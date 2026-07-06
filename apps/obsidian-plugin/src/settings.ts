@@ -41,7 +41,7 @@ export type VaultRoomsSettings = {
 export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
   bindMode: "local",
   allowRemoteBootstrap: false,
-  maxFileBytes: 1048576,
+  maxFileBytes: 5 * 1024 * 1024,
   autoStart: false
 };
 
