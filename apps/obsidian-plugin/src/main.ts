@@ -190,7 +190,7 @@ export default class VaultRoomsPlugin extends Plugin {
 
   async testConnection(baseUrl: string): Promise<void> {
     const result = await new RelayApiClient(baseUrl).testConnection();
-    new Notice(`Connected to Vault Rooms v${result.version}`);
+    new Notice(`Connected to Vault Rooms`);
   }
 
   async setupTeam(baseUrl: string, teamName: string, displayName: string, deviceName: string): Promise<void> {

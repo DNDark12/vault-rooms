@@ -51720,7 +51720,7 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
   }
   async testConnection(baseUrl) {
     const result = await new RelayApiClient(baseUrl).testConnection();
-    new import_obsidian9.Notice(`Connected to Vault Rooms v${result.version}`);
+    new import_obsidian9.Notice(`Connected to Vault Rooms`);
   }
   async setupTeam(baseUrl, teamName, displayName, deviceName) {
     const response = await new RelayApiClient(baseUrl).bootstrap(teamName, displayName, deviceName);
