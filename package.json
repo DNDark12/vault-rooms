@@ -1,0 +1,20 @@
+{
+  "name": "vault-rooms",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev:server": "pnpm --filter vault-rooms-relay dev",
+    "build:plugin": "pnpm --filter @vault-rooms/obsidian-plugin build && node scripts/sync-plugin-assets.mjs",
+    "typecheck": "tsc -b",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/sql.js": "^1.4.11",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

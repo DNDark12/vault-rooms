@@ -1,0 +1,145 @@
+.vault-rooms-status {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.vault-rooms-view {
+  padding: 12px;
+}
+
+.vault-rooms-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.vault-rooms-header h2 {
+  margin: 0;
+}
+
+.vault-rooms-actions,
+.vault-rooms-room-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.vault-rooms-actions button,
+.vault-rooms-room-actions button {
+  min-height: 30px;
+}
+
+.vault-rooms-empty {
+  color: var(--text-muted);
+  padding: 12px 0;
+}
+
+.vault-rooms-room {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  margin: 10px 0;
+  padding: 12px;
+}
+
+.vault-rooms-team-list,
+.vault-rooms-member-list,
+.vault-rooms-acl-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.vault-rooms-team,
+.vault-rooms-member,
+.vault-rooms-acl-row {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.vault-rooms-team.is-active {
+  border-color: var(--interactive-accent);
+}
+
+.vault-rooms-member.is-revoked {
+  opacity: 0.65;
+}
+
+.vault-rooms-team-title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.vault-rooms-team-title span {
+  background: var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+}
+
+.vault-rooms-room-title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.vault-rooms-room-title span {
+  background: var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+}
+
+.vault-rooms-room-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+}
+
+.vault-rooms-mounted,
+.vault-rooms-unmounted {
+  font-size: var(--font-ui-small);
+  margin-top: 8px;
+}
+
+.vault-rooms-mounted {
+  color: var(--text-success);
+}
+
+.vault-rooms-unmounted {
+  color: var(--text-muted);
+}
+
+.vault-rooms-settings-modal h3 {
+  margin: 18px 0 8px;
+}
+
+.vault-rooms-setting-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  margin: 0 0 8px;
+}
+
+.vault-rooms-permission-grid {
+  display: grid;
+  gap: 6px 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin: 8px 0 12px;
+}
+
+.vault-rooms-permission-grid label {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  font-size: var(--font-ui-small);
+}

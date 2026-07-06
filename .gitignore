@@ -1,0 +1,37 @@
+node_modules/
+.pnpm-store/
+
+data/
+coverage/
+dist/
+apps/*/dist/
+packages/*/dist/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+release/
+*.zip
+
+.DS_Store
+
+# Stray tsc output that once leaked into apps/relay-server/test/ (source is health.test.ts).
+# Safe to delete manually; kept ignored here in case it reappears from a misconfigured build.
+apps/relay-server/test/health.test.js
+apps/relay-server/test/health.test.js.map
+apps/relay-server/test/health.test.d.ts
+apps/relay-server/test/health.test.d.ts.map
+
+# Obsidian plugin build output. The root-level manifest.json/main.js/styles.css/sql-wasm.wasm
+# (kept in sync via `pnpm build:plugin`) are the committed, installable copies - see
+# "Installing the Obsidian plugin manually" and "Release checklist" in README.md.
+apps/obsidian-plugin/main.js
+apps/obsidian-plugin/sql-wasm.wasm

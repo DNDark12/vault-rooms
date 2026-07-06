@@ -1,0 +1,128 @@
+import type { FastifyInstance } from "fastify";
+import { AppError, isEligibleTextPath, normalizeRelativePath } from "@vault-rooms/protocol";
+import type { RelayRepository } from "../db/repositories/relayRepository.js";
+import { getActivePrincipal } from "../services/authService.js";
+import { assertRoomPermission } from "../services/policyService.js";
+import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+
+export type FileRoutesOptions = {
+  maxFileBytes: number;
+  connectionRegistry?: ConnectionRegistry;
+};
+
+export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, options: FileRoutesOptions): void {
+  app.get("/api/rooms/:roomId/files", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
+    assertRoomPermission({ repo, principal, room, permission: "file:read" });
+    return {
+      files: repo.listFiles(room.id).map((file) => ({
+        relativePath: file.relative_path,
+        kind: file.kind,
+        version: file.version,
+        sha256: file.sha256,
+        deleted: Boolean(file.deleted_at)
+      }))
+    };
+  });
+
+  app.get("/api/rooms/:roomId/files/content", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
+    const query = request.query as Partial<{ path: string }>;
+    const relativePath = normalizeRelativePath(query.path ?? "");
+    assertRoomPermission({ repo, principal, room, permission: "file:read", relativePath });
+    const { file, content } = repo.readFileContent(room.id, relativePath);
+    return {
+      relativePath,
+      version: file.version,
+      sha256: file.sha256,
+      content
+    };
+  });
+
+  app.put("/api/rooms/:roomId/files/content", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
+    const body = request.body as Partial<{ relativePath: string; baseVersion: number; content: string }>;
+    if (!body.relativePath || typeof body.content !== "string") {
+      throw new AppError("VALIDATION_ERROR", "relativePath and content are required.", 422);
+    }
+    const relativePath = normalizeRelativePath(body.relativePath);
+    if (!isEligibleTextPath(relativePath)) {
+      throw new AppError("INVALID_PATH", "Only v0.1 text file extensions can be synced.", 422);
+    }
+    if (Buffer.byteLength(body.content, "utf8") > options.maxFileBytes) {
+      throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
+    }
+
+    const baseVersion = body.baseVersion ?? 0;
+    assertRoomPermission({
+      repo,
+      principal,
+      room,
+      permission: baseVersion === 0 ? "file:create" : "file:write",
+      relativePath
+    });
+    const result = repo.writeFile({
+      roomId: room.id,
+      relativePath,
+      baseVersion,
+      content: body.content,
+      actorUserId: principal.userId
+    });
+    options.connectionRegistry?.broadcastToRoom(
+      room.id,
+      {
+        type: "remote_file_change",
+        roomId: room.id,
+        relativePath,
+        version: result.version,
+        sha256: result.sha256,
+        content: body.content,
+        updatedBy: { userId: principal.userId, displayName: principal.userDisplayName },
+        updatedAt: new Date().toISOString()
+      },
+      { excludeDeviceId: principal.deviceId }
+    );
+    return { ok: true, relativePath: result.relativePath, version: result.version, sha256: result.sha256 };
+  });
+
+  app.post("/api/rooms/:roomId/files/delete", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
+    const body = request.body as Partial<{ relativePath: string; baseVersion: number }>;
+    if (!body.relativePath || typeof body.baseVersion !== "number") {
+      throw new AppError("VALIDATION_ERROR", "relativePath and baseVersion are required.", 422);
+    }
+    const relativePath = normalizeRelativePath(body.relativePath);
+    assertRoomPermission({ repo, principal, room, permission: "file:delete", relativePath });
+    const result = repo.deleteFile({
+      roomId: room.id,
+      relativePath,
+      baseVersion: body.baseVersion,
+      actorUserId: principal.userId
+    });
+    options.connectionRegistry?.broadcastToRoom(
+      room.id,
+      {
+        type: "remote_file_delete",
+        roomId: room.id,
+        relativePath,
+        version: result.version,
+        deletedBy: { userId: principal.userId, displayName: principal.userDisplayName },
+        deletedAt: new Date().toISOString()
+      },
+      { excludeDeviceId: principal.deviceId }
+    );
+    return result;
+  });
+}
+
+function requireRoom(repo: RelayRepository, roomId: string) {
+  const room = repo.getRoom(roomId);
+  if (!room) {
+    throw new AppError("NOT_FOUND", "Room not found.", 404);
+  }
+  return room;
+}

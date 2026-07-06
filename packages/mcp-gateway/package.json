@@ -1,0 +1,15 @@
+{
+  "name": "vault-rooms-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@vault-rooms/markdown-adapters": "workspace:*",
+    "@vault-rooms/policy": "workspace:*",
+    "@vault-rooms/protocol": "workspace:*"
+  }
+}

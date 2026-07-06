@@ -1,0 +1,9 @@
+{
+  "id": "vault-rooms",
+  "name": "Vault Rooms",
+  "version": "0.1.0",
+  "minAppVersion": "1.8.0",
+  "description": "Create local rooms for vault folders, team access, and scoped AI tools.",
+  "author": "DNDark",
+  "isDesktopOnly": true
+}

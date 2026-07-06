@@ -1,0 +1,19 @@
+{
+  "name": "@vault-rooms/obsidian-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@vault-rooms/protocol": "workspace:*",
+    "esbuild": "^0.25.8",
+    "obsidian": "^1.8.7",
+    "vault-rooms-relay": "workspace:*"
+  },
+  "devDependencies": {
+    "builtin-modules": "^4.0.0"
+  }
+}

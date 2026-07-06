@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/protocol" },
+    { "path": "./packages/policy-engine" },
+    { "path": "./packages/markdown-adapters" },
+    { "path": "./packages/mcp-gateway" },
+    { "path": "./apps/relay-server" },
+    { "path": "./apps/obsidian-plugin" }
+  ]
+}
