@@ -228,6 +228,11 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   async setupServer(baseUrl: string, displayName: string, deviceName: string, teamName?: string): Promise<void> {
+    // Setting up always means "make this device the server," so there is no useful case for
+    // asking the user to separately click Start first - do it for them if it isn't running yet.
+    if (!this.getServerStatus().running) {
+      await this.startEmbeddedServer();
+    }
     const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
@@ -336,14 +341,32 @@ export default class VaultRoomsPlugin extends Plugin {
     await this.apiFor(server).revokeMember(teamId, userId);
     await this.refreshTeams({ notify: false });
     new Notice("Removed from team.");
+    await this.offerToDeleteEmptyTeams([teamId]);
   }
 
   /** Server owner only. Revokes a friend's user account and all of their devices on this server. */
   async revokeFriend(userId: string): Promise<void> {
     const server = this.requireActiveServer();
+    const affectedTeamIds = Object.entries(this.teamMembersByTeam)
+      .filter(([, members]) => members.some((member) => member.userId === userId && !member.revokedAt))
+      .map(([teamId]) => teamId);
     await this.apiFor(server).revokeFriend(userId);
     await this.refreshTeams({ notify: false });
     new Notice("Friend revoked.");
+    await this.offerToDeleteEmptyTeams(affectedTeamIds);
+  }
+
+  /** After removing someone from a team (or revoking them entirely), offer to clean up any team that's now left with no active members. */
+  private async offerToDeleteEmptyTeams(teamIds: string[]): Promise<void> {
+    for (const teamId of teamIds) {
+      const team = this.teams.find((candidate) => candidate.id === teamId);
+      const activeMembers = this.teamMembersByTeam[teamId]?.filter((member) => !member.revokedAt) ?? [];
+      if (team && activeMembers.length === 0 && this.canDeleteTeam(team)) {
+        if (window.confirm(`Team "${team.name}" now has no members left. Delete it too?`)) {
+          await this.deleteTeam(teamId);
+        }
+      }
+    }
   }
 
   async createRoom(input: {

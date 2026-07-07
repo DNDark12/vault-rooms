@@ -1,6 +1,5 @@
 import { Notice, PluginSettingTab, Setting } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
-import type { ServerBindMode } from "./settings.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
   constructor(private readonly plugin: VaultRoomsPlugin) {
@@ -21,7 +20,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Relay server" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "This device hosts the relay server directly — no separate process or terminal needed. Start it, then set up or join a team from the Vault Rooms panel."
+      text: "This device hosts the relay server directly — no separate process or terminal needed. Set up or join from the Vault Rooms panel and it starts automatically if it isn't already running."
     });
 
     const status = this.plugin.getServerStatus();
@@ -59,26 +58,9 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Network access")
-      .setDesc("\"This device only\" is safest. Choose \"Local network\" so teammates on the same LAN can connect via an invite link. There is no TLS in v0.1 — only use LAN mode on networks you trust.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("local", "This device only (127.0.0.1)")
-          .addOption("lan", "Local network (LAN)")
-          .setValue(this.plugin.settings.server.bindMode)
-          .onChange(async (value) => {
-            this.plugin.settings.server.bindMode = value as ServerBindMode;
-            await this.plugin.saveSettings();
-            if (this.plugin.getServerStatus().running) {
-              new Notice("Restart the server for this change to take effect.");
-            }
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "Only needed in \"Local network\" mode if auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers). Set this to this device's real LAN address, e.g. http://192.168.1.42:8787 - leave blank to auto-detect."
+        "The server always listens on your local network so teammates can connect - no TLS in v0.1, so only run this on networks you trust. Set this only if LAN IP auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers): this device's real LAN address, e.g. http://192.168.1.42:8787. Leave blank to auto-detect."
       )
       .addText((text) =>
         text

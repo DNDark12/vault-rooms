@@ -41,6 +41,58 @@
   padding: 4px 0;
 }
 
+.vault-rooms-badge-row {
+  margin-bottom: 8px;
+}
+
+.vault-rooms-badge {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  gap: 6px;
+  padding: 3px 10px;
+}
+
+.vault-rooms-badge::before {
+  border-radius: 50%;
+  content: "";
+  display: inline-block;
+  flex-shrink: 0;
+  height: 8px;
+  width: 8px;
+}
+
+.vault-rooms-badge.is-running {
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
+  color: var(--color-green);
+}
+
+.vault-rooms-badge.is-running::before {
+  animation: vault-rooms-pulse 1.6s ease-in-out infinite;
+  background: var(--color-green);
+}
+
+.vault-rooms-badge.is-stopped {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.vault-rooms-badge.is-stopped::before {
+  background: var(--text-muted);
+}
+
+@keyframes vault-rooms-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-green) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-green) 0%, transparent);
+  }
+}
+
 .vault-rooms-room {
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);

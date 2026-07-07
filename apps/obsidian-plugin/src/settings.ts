@@ -13,11 +13,7 @@ export type ServerConnection = {
   status: "active" | "revoked";
 };
 
-export type ServerBindMode = "local" | "lan";
-
 export type EmbeddedServerSettings = {
-  /** "local" binds 127.0.0.1 only (this device); "lan" binds 0.0.0.0 so LAN teammates can connect. */
-  bindMode: ServerBindMode;
   /** Leave undefined to auto-pick a free port starting at 8787. */
   port?: number;
   allowRemoteBootstrap: boolean;
@@ -26,9 +22,8 @@ export type EmbeddedServerSettings = {
   autoStart: boolean;
   /**
    * Manual override for the URL embedded in invite links (e.g. "http://192.168.1.42:8787").
-   * Only needed in "Local network" mode when LAN IP auto-detection picks the wrong network
-   * interface or fails outright (multiple NICs, VPNs, some Wi-Fi adapters, etc.) - leave blank to
-   * use the auto-detected LAN IP.
+   * Only needed if LAN IP auto-detection picks the wrong network interface or fails outright
+   * (multiple NICs, VPNs, some Wi-Fi adapters, etc.) - leave blank to use the auto-detected LAN IP.
    */
   publicUrlOverride?: string;
 };
@@ -44,7 +39,6 @@ export type VaultRoomsSettings = {
 };
 
 export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
-  bindMode: "local",
   allowRemoteBootstrap: false,
   maxFileBytes: 5 * 1024 * 1024,
   autoStart: false

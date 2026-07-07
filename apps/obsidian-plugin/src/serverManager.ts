@@ -35,9 +35,13 @@ export class EmbeddedRelayServer {
       return this.status;
     }
     try {
+      // Always bind every interface (0.0.0.0), not just 127.0.0.1: there is no supported "this
+      // device only" mode - a server that teammates can't reach isn't useful, and the invite
+      // flow/policy engine already require a valid invite token (and localhost-only bootstrap by
+      // default) to actually do anything, so this doesn't expose more than intended.
       const publicUrlOverride = settings.publicUrlOverride?.trim();
       const env: EnvLike = {
-        HOST: settings.bindMode === "lan" ? "0.0.0.0" : "127.0.0.1",
+        HOST: "0.0.0.0",
         PORT: settings.port ? String(settings.port) : undefined,
         PUBLIC_URL: publicUrlOverride || undefined,
         MAX_FILE_BYTES: String(settings.maxFileBytes),
@@ -54,20 +58,19 @@ export class EmbeddedRelayServer {
       });
       await app.listen({ host: config.host, port: config.port });
       this.app = app;
-      // If LAN mode is on but detection failed (no override set either), do NOT quietly fall back
-      // to a "lanUrl" of 127.0.0.1 - that produces exactly the "invite link is 127.0.0.1 and B
-      // can't join" confusion, with no indication anything went wrong. Surface it instead so the
-      // UI can tell the user to set a manual "Public URL override".
+      // If LAN IP detection fails and no override is set, do NOT quietly fall back to a "lanUrl"
+      // of 127.0.0.1 - that produces exactly the "invite link is 127.0.0.1 and B can't join"
+      // confusion, with no indication anything went wrong. Surface it instead so the UI can tell
+      // the user to set a manual "Public URL override".
       const detectedLanIp = publicUrlOverride ? undefined : detectLanIp();
-      const lanUrl =
-        config.host === "0.0.0.0" ? (publicUrlOverride ? config.publicUrl : detectedLanIp ? `http://${detectedLanIp}:${config.port}` : undefined) : undefined;
+      const lanUrl = publicUrlOverride ? config.publicUrl : detectedLanIp ? `http://${detectedLanIp}:${config.port}` : undefined;
       this.status = {
         running: true,
         host: config.host,
         port: config.port,
         localUrl: `http://127.0.0.1:${config.port}`,
         lanUrl,
-        lanDetectionFailed: config.host === "0.0.0.0" && !lanUrl
+        lanDetectionFailed: !lanUrl
       };
       return this.status;
     } catch (error) {

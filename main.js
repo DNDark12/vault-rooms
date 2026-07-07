@@ -47937,7 +47937,6 @@ function registerMountedRoomWatcher(vault, room, cb) {
 
 // src/settings.ts
 var DEFAULT_SERVER_SETTINGS = {
-  bindMode: "local",
   allowRemoteBootstrap: false,
   maxFileBytes: 5 * 1024 * 1024,
   autoStart: false
@@ -50599,7 +50598,7 @@ var EmbeddedRelayServer = class {
     try {
       const publicUrlOverride = (_a = settings.publicUrlOverride) == null ? void 0 : _a.trim();
       const env = {
-        HOST: settings.bindMode === "lan" ? "0.0.0.0" : "127.0.0.1",
+        HOST: "0.0.0.0",
         PORT: settings.port ? String(settings.port) : void 0,
         PUBLIC_URL: publicUrlOverride || void 0,
         MAX_FILE_BYTES: String(settings.maxFileBytes),
@@ -50617,14 +50616,14 @@ var EmbeddedRelayServer = class {
       await app.listen({ host: config.host, port: config.port });
       this.app = app;
       const detectedLanIp = publicUrlOverride ? void 0 : detectLanIp();
-      const lanUrl = config.host === "0.0.0.0" ? publicUrlOverride ? config.publicUrl : detectedLanIp ? `http://${detectedLanIp}:${config.port}` : void 0 : void 0;
+      const lanUrl = publicUrlOverride ? config.publicUrl : detectedLanIp ? `http://${detectedLanIp}:${config.port}` : void 0;
       this.status = {
         running: true,
         host: config.host,
         port: config.port,
         localUrl: `http://127.0.0.1:${config.port}`,
         lanUrl,
-        lanDetectionFailed: config.host === "0.0.0.0" && !lanUrl
+        lanDetectionFailed: !lanUrl
       };
       return this.status;
     } catch (error) {
@@ -50664,7 +50663,7 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h3", { text: "Relay server" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "This device hosts the relay server directly \u2014 no separate process or terminal needed. Start it, then set up or join a team from the Vault Rooms panel."
+      text: "This device hosts the relay server directly \u2014 no separate process or terminal needed. Set up or join from the Vault Rooms panel and it starts automatically if it isn't already running."
     });
     const status = this.plugin.getServerStatus();
     new import_obsidian.Setting(containerEl).setName("Status").setDesc(
@@ -50683,17 +50682,8 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
         this.display();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Network access").setDesc('"This device only" is safest. Choose "Local network" so teammates on the same LAN can connect via an invite link. There is no TLS in v0.1 \u2014 only use LAN mode on networks you trust.').addDropdown(
-      (dropdown) => dropdown.addOption("local", "This device only (127.0.0.1)").addOption("lan", "Local network (LAN)").setValue(this.plugin.settings.server.bindMode).onChange(async (value) => {
-        this.plugin.settings.server.bindMode = value;
-        await this.plugin.saveSettings();
-        if (this.plugin.getServerStatus().running) {
-          new import_obsidian.Notice("Restart the server for this change to take effect.");
-        }
-      })
-    );
     new import_obsidian.Setting(containerEl).setName("Public URL override").setDesc(
-      `Only needed in "Local network" mode if auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers). Set this to this device's real LAN address, e.g. http://192.168.1.42:8787 - leave blank to auto-detect.`
+      "The server always listens on your local network so teammates can connect - no TLS in v0.1, so only run this on networks you trust. Set this only if LAN IP auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers): this device's real LAN address, e.g. http://192.168.1.42:8787. Leave blank to auto-detect."
     ).addText(
       (text) => {
         var _a;
@@ -51876,7 +51866,6 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
     const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
     badgeRow.createSpan({ cls: status.running ? "vault-rooms-badge is-running" : "vault-rooms-badge is-stopped", text: status.running ? "Running" : "Stopped" });
     if (status.running) {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: `This device: ${status.localUrl}` });
       if (status.lanUrl) {
         const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
         lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
@@ -51885,15 +51874,10 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
           await navigator.clipboard.writeText((_a = status.lanUrl) != null ? _a : "");
           new import_obsidian8.Notice("LAN URL copied.");
         });
-      } else if (status.lanDetectionFailed) {
+      } else {
         card.createEl("div", {
           cls: "vault-rooms-error",
           text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings \u2192 Vault Rooms \u2192 Relay server, then restart the server."
-        });
-      } else {
-        card.createEl("div", {
-          cls: "vault-rooms-room-meta",
-          text: "Only this device can connect. Enable LAN access in Settings \u2192 Vault Rooms to invite teammates."
         });
       }
     } else if (!status.running && status.error) {
@@ -51948,18 +51932,19 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
     section.createEl("h3", { text: "Friends" });
     const server = this.plugin.getActiveServer();
     const list = section.createDiv({ cls: "vault-rooms-friend-list" });
-    if (this.plugin.friends.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty", text: "No friends loaded." });
+    const others = this.plugin.friends.filter((friend) => friend.id !== (server == null ? void 0 : server.userId));
+    if (others.length === 0) {
+      list.createDiv({ cls: "vault-rooms-empty", text: "No friends yet - share an invite link to add one." });
       return;
     }
-    for (const friend of this.plugin.friends) {
+    for (const friend of others) {
       const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
       item.createEl("strong", { text: friend.displayName });
       item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
       if (server == null ? void 0 : server.isServerOwner) {
         const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
         const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
-        revoke.disabled = friend.id === server.userId || Boolean(friend.revokedAt);
+        revoke.disabled = Boolean(friend.revokedAt);
       }
     }
   }
@@ -52323,6 +52308,9 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
     new import_obsidian9.Notice(`Connected to Vault Rooms`);
   }
   async setupServer(baseUrl, displayName, deviceName, teamName) {
+    if (!this.getServerStatus().running) {
+      await this.startEmbeddedServer();
+    }
     const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
@@ -52424,13 +52412,29 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     await this.apiFor(server).revokeMember(teamId, userId);
     await this.refreshTeams({ notify: false });
     new import_obsidian9.Notice("Removed from team.");
+    await this.offerToDeleteEmptyTeams([teamId]);
   }
   /** Server owner only. Revokes a friend's user account and all of their devices on this server. */
   async revokeFriend(userId) {
     const server = this.requireActiveServer();
+    const affectedTeamIds = Object.entries(this.teamMembersByTeam).filter(([, members]) => members.some((member) => member.userId === userId && !member.revokedAt)).map(([teamId]) => teamId);
     await this.apiFor(server).revokeFriend(userId);
     await this.refreshTeams({ notify: false });
     new import_obsidian9.Notice("Friend revoked.");
+    await this.offerToDeleteEmptyTeams(affectedTeamIds);
+  }
+  /** After removing someone from a team (or revoking them entirely), offer to clean up any team that's now left with no active members. */
+  async offerToDeleteEmptyTeams(teamIds) {
+    var _a, _b;
+    for (const teamId of teamIds) {
+      const team = this.teams.find((candidate) => candidate.id === teamId);
+      const activeMembers = (_b = (_a = this.teamMembersByTeam[teamId]) == null ? void 0 : _a.filter((member) => !member.revokedAt)) != null ? _b : [];
+      if (team && activeMembers.length === 0 && this.canDeleteTeam(team)) {
+        if (window.confirm(`Team "${team.name}" now has no members left. Delete it too?`)) {
+          await this.deleteTeam(teamId);
+        }
+      }
+    }
   }
   async createRoom(input) {
     const server = this.requireActiveServer();

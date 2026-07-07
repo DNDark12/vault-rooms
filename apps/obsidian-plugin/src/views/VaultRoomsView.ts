@@ -69,7 +69,6 @@ export class VaultRoomsView extends ItemView {
     badgeRow.createSpan({ cls: status.running ? "vault-rooms-badge is-running" : "vault-rooms-badge is-stopped", text: status.running ? "Running" : "Stopped" });
 
     if (status.running) {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: `This device: ${status.localUrl}` });
       if (status.lanUrl) {
         const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
         lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
@@ -77,15 +76,10 @@ export class VaultRoomsView extends ItemView {
           await navigator.clipboard.writeText(status.lanUrl ?? "");
           new Notice("LAN URL copied.");
         });
-      } else if (status.lanDetectionFailed) {
+      } else {
         card.createEl("div", {
           cls: "vault-rooms-error",
           text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
-        });
-      } else {
-        card.createEl("div", {
-          cls: "vault-rooms-room-meta",
-          text: "Only this device can connect. Enable LAN access in Settings → Vault Rooms to invite teammates."
         });
       }
     } else if (!status.running && status.error) {
@@ -147,18 +141,21 @@ export class VaultRoomsView extends ItemView {
 
     const server = this.plugin.getActiveServer();
     const list = section.createDiv({ cls: "vault-rooms-friend-list" });
-    if (this.plugin.friends.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty", text: "No friends loaded." });
+    // "Friends" means everyone else on this server - showing your own account here just adds
+    // noise (and there's nothing to do with it: you can't revoke yourself).
+    const others = this.plugin.friends.filter((friend) => friend.id !== server?.userId);
+    if (others.length === 0) {
+      list.createDiv({ cls: "vault-rooms-empty", text: "No friends yet - share an invite link to add one." });
       return;
     }
-    for (const friend of this.plugin.friends) {
+    for (const friend of others) {
       const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
       item.createEl("strong", { text: friend.displayName });
       item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
       if (server?.isServerOwner) {
         const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
         const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
-        revoke.disabled = friend.id === server.userId || Boolean(friend.revokedAt);
+        revoke.disabled = Boolean(friend.revokedAt);
       }
     }
   }

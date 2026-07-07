@@ -38,9 +38,9 @@ Permissions are enforced by the relay server over synced rooms and MCP tools. Cl
 
 This project does not sandbox arbitrary Obsidian community plugins. If a local plugin can read a synced Markdown file in B's vault, Vault Rooms cannot prevent that local plugin from reading it.
 
-v0.1 has no TLS: use only on trusted networks. Tokens and content travel in plaintext over LAN. Binding defaults to "this device only" (`127.0.0.1`); LAN hosting requires opting into `0.0.0.0` - via the **Network access** setting for the embedded server, or `HOST=0.0.0.0` for the standalone CLI.
+v0.1 has no TLS: use only on trusted networks. Tokens and content travel in plaintext over LAN. The embedded server always binds every network interface (`0.0.0.0`) so teammates can reach it - there is no "this device only" mode, since a server nobody else can reach isn't useful, and the invite flow (plus localhost-only bootstrap by default) already gates what an unauthenticated request can do. The standalone CLI still binds via `HOST`/`PORT` if you need a different setup.
 
-**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). Once network access is set to LAN, the server auto-detects its real LAN IP (e.g. `192.168.1.42`) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates.
+**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The server auto-detects its real LAN IP (e.g. `192.168.1.42`) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates. If auto-detection fails (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server.
 
 ## Revocation and rejoin model
 
@@ -140,7 +140,7 @@ Clicking it opens Obsidian, and if the Vault Rooms plugin is installed there, it
 The link only works if:
 
 1. The recipient already has the Vault Rooms plugin installed (the link cannot install it).
-2. The `server` value is a LAN IP the recipient's machine can actually reach - never `127.0.0.1` (see the security model section above). Network access must be set to "Local network" for the host, and the printed/embedded URL will then use the real LAN IP automatically.
+2. The `server` value is a LAN IP the recipient's machine can actually reach - never `127.0.0.1` (see the security model section above). The host's embedded server always binds LAN, so the printed/embedded URL uses the real LAN IP automatically unless auto-detection failed (see the Public URL override note above).
 3. Both machines are actually on the same LAN. If in doubt, have the recipient open `http://<host-LAN-IP>:<port>/health` in a browser first; if that doesn't load, the invite link won't work either. Common culprits: different subnets, a firewall blocking the port, or Wi-Fi "client/AP isolation" on a guest network (isolation prevents devices on the same Wi-Fi from reaching each other at all).
 
 ## Do other members need to run their own server?
@@ -211,7 +211,7 @@ Before submitting to the Obsidian Community directory:
 
 - `Test connection` says wrong service: another process is answering on that port.
 - A teammate can't reach the server at all: confirm the invite/server URL uses the host's actual LAN IP, not `127.0.0.1` - see "Invite links" above. Have them test `http://<host-LAN-IP>:<port>/health` in a browser first.
-- B cannot join: confirm the invite server URL embeds the actual bound port, and that A has set Network access to "Local network" (not "This device only").
+- B cannot join: confirm the invite server URL embeds the actual bound port and A's real LAN IP, not `127.0.0.1`. If A's LAN IP auto-detection failed, set a Public URL override in Settings → Vault Rooms → Relay server and restart the server.
 - B can reach `/health` but the invite link does nothing when clicked: confirm the Vault Rooms plugin is installed and enabled on B's machine - the link only opens the Join form, it can't install the plugin.
 - Writes are denied: inspect ACL grants for the user/device/agent and path pattern.
 - Conflicts are expected when two actors edit the same file version.
