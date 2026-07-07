@@ -48,7 +48,7 @@ export async function resolveRuntimeConfig(env: EnvLike = process.env): Promise<
     host,
     port,
     publicUrl: env.PUBLIC_URL ?? detectPublicUrl(host, port),
-    maxFileBytes: Number.parseInt(env.MAX_FILE_BYTES ?? "5242880", 10),
+    maxFileBytes: Number.parseInt(env.MAX_FILE_BYTES ?? "1048576", 10),
     allowRemoteBootstrap: env.ALLOW_REMOTE_BOOTSTRAP === "true"
   };
 }

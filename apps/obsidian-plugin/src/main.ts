@@ -1,6 +1,5 @@
 import { FileSystemAdapter, Notice, Plugin, type ObsidianProtocolData } from "obsidian";
 import { join } from "node:path";
-import { isEligibleTextPath } from "@vault-rooms/protocol";
 import { RelayApiClient, type AclRuleSummary, type RoomSummary, type TeamMemberSummary } from "./apiClient.js";
 import { registerMountedRoomWatcher } from "./fileWatcher.js";
 import { activeServer, DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type RelayServerConfig, type VaultRoomsSettings } from "./settings.js";
@@ -347,37 +346,6 @@ export default class VaultRoomsPlugin extends Plugin {
     new Notice(`Deleted team ${server.teamName}`);
   }
 
-  /**
-   * Purely local cleanup - removes a saved team/server entry without calling the server at all.
-   * This is the recovery path for a team whose saved device token no longer works there (see
-   * `markServerRevoked`): `deleteTeam` can't help in that case since it also needs a valid,
-   * working token to authenticate the delete request. Use this to drop the stale entry, then set
-   * up or join that team again to get a fresh, working identity.
-   */
-  async forgetServer(serverId: string): Promise<void> {
-    const server = this.settings.servers.find((candidate) => candidate.id === serverId);
-    if (!server) {
-      return;
-    }
-    const isActive = this.getActiveServer()?.id === server.id;
-    this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
-    if (this.settings.activeServerId === server.id) {
-      this.settings.activeServerId = undefined;
-    }
-    if (isActive) {
-      this.syncSocket?.disconnect();
-      this.syncSocket = null;
-      this.visibleRooms = [];
-      this.teamMembers = [];
-    }
-    await this.saveSettings();
-    if (isActive) {
-      this.connectSyncSocket();
-    }
-    this.renderOpenRoomsViews();
-    new Notice(`Removed ${server.teamName} from this device.`);
-  }
-
   async activateServer(serverId: string): Promise<void> {
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
     if (!server) {
@@ -438,7 +406,6 @@ export default class VaultRoomsPlugin extends Plugin {
     state.mountPath = mountPath;
     const api = this.apiFor(server);
     const files = await api.listFiles(room.id);
-    const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
     for (const file of files.files) {
       const tracked = state.files[file.relativePath];
       if (file.deleted) {
@@ -453,26 +420,6 @@ export default class VaultRoomsPlugin extends Plugin {
       const content = await api.readFile(room.id, file.relativePath);
       await this.syncEngine.applyRemoteChange(state, content, server.deviceName);
     }
-
-    // The server's listing only covers what's already been synced. On the room owner's own
-    // device, mountPath is the real sourcePath folder, which typically already has real content
-    // before the room ever existed - without this, that pre-existing content would just sit there
-    // forever, since the local file watcher only reacts to *future* edits. Push anything under
-    // mountPath the server has never heard of (skips anything it already knows about, including
-    // tombstoned/deleted paths - those are intentional server-side deletions, not "missing" files).
-    const localPaths = await this.vaultAdapter.list(mountPath);
-    for (const localPath of localPaths) {
-      const relativePath = localPath.slice(mountPath.length + 1);
-      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligibleTextPath(relativePath)) {
-        continue;
-      }
-      try {
-        await this.syncEngine.pushLocalChange(state, relativePath, server.deviceName);
-      } catch (error) {
-        console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
-      }
-    }
-
     this.watchMountedRoom(room.id);
     this.syncSocket?.subscribe(room.id);
     await this.saveSettings();
@@ -496,25 +443,18 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.settings.mountedRooms[roomId]?.mountPath;
   }
 
-  /**
-   * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
-   * folder) - there's nothing to "download," their files already live there, so a separate copy
-   * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
-   * folder under the configured mount root, since they have no pre-existing copy of the room.
-   */
   roomMountPathFor(room: RoomSummary): string {
     const configured = this.settings.roomMountPaths[room.id]?.trim();
     if (configured) {
       return configured;
     }
     const server = this.requireActiveServer();
-    const isOwner = room.ownerUserId === server.userId;
     return mountPathForRoom({
-      owner: isOwner,
+      owner: false,
       mountRoot: this.settings.mountRoot,
       teamSlug: server.teamSlug,
       mountName: room.mountName,
-      sourcePath: room.sourcePath
+      sourcePath: room.mountName
     });
   }
 
@@ -622,25 +562,7 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   private apiFor(server: RelayServerConfig): RelayApiClient {
-    return new RelayApiClient(server.baseUrl, server.deviceToken, () => this.markServerRevoked(server));
-  }
-
-  /**
-   * A 401 from a server means the saved device token no longer resolves to anything there - most
-   * commonly because that server's data was reset/recreated since the token was issued (fresh
-   * install, wiped data dir, or switching between embedded/standalone with different data files).
-   * Reflect that in the UI (Settings → Vault Rooms → Teams already shows `status`) instead of
-   * leaving it as a one-off error toast with no lasting trace, so it's clear this team needs to be
-   * removed and set up/joined again rather than retried.
-   */
-  private markServerRevoked(server: RelayServerConfig): void {
-    if (server.status === "revoked") {
-      return;
-    }
-    server.status = "revoked";
-    void this.saveSettings();
-    this.renderOpenRoomsViews();
-    new Notice(`"${server.teamName}" - saved login is no longer valid on this server. Remove it and set up/join the team again from Settings → Vault Rooms → Teams.`);
+    return new RelayApiClient(server.baseUrl, server.deviceToken);
   }
 
   private requireActiveServer(): RelayServerConfig {

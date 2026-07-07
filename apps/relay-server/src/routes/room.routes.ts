@@ -268,8 +268,7 @@ function toRoomResponse(room: RoomRow) {
     name: room.name,
     type: room.type,
     sourcePath: room.source_path,
-    mountName: room.mount_name,
-    ownerUserId: room.owner_user_id
+    mountName: room.mount_name
   };
 }
 

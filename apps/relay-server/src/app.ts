@@ -22,15 +22,11 @@ export type CreateAppOptions = {
 };
 
 export async function createApp(options: CreateAppOptions = {}) {
-  const maxFileBytes = options.maxFileBytes ?? 5 * 1024 * 1024;
-  // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
-  // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
-  // maxFileBytes - otherwise a file just under the configured limit can still be rejected at the
-  // HTTP layer before the friendlier FILE_TOO_LARGE check even runs.
-  const app = Fastify({ logger: false, bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) });
+  const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
   const db = await openRelayDb(options.dbPath ?? "data/relay.sqlite", options.sqlJsLocator);
   const repo = new RelayRepository(db);
   const connectionRegistry = new ConnectionRegistry();
+  const maxFileBytes = options.maxFileBytes ?? 1024 * 1024;
 
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("access-control-allow-origin", "*");

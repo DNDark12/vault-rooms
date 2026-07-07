@@ -52,10 +52,6 @@ describe("rooms and ACL", () => {
     });
     expect(created.statusCode).toBe(200);
     const room = created.json().room;
-    // The Obsidian plugin needs this to decide whether a device should mount in place at
-    // sourcePath (the owner) or into a separate folder under the team's mount root (everyone
-    // else) - see roomMountPathFor() in apps/obsidian-plugin/src/main.ts.
-    expect(room.ownerUserId).toBe(owner.user.id);
 
     const duplicate = await app.inject({
       method: "POST",

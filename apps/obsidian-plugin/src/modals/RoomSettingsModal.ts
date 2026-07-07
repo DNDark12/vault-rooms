@@ -98,7 +98,6 @@ export class RoomSettingsModal extends Modal {
     );
     new Setting(parent)
       .setName("Source path")
-      .setDesc("The folder (or file) in the owner's vault that this room shares - this is the content that actually gets synced to every member.")
       .addText((text) => text.setValue(this.sourcePath).onChange((value) => (this.sourcePath = value.trim())))
       .addButton((button) =>
         button.setButtonText(this.type === "folder" ? "Choose folder" : "Choose file").onClick(() => {
@@ -117,17 +116,8 @@ export class RoomSettingsModal extends Modal {
     new Setting(parent).setName("Mount name").addText((text) => text.setValue(this.mountName).onChange((value) => (this.mountName = value.trim())));
     new Setting(parent)
       .setName("Local mount path")
-      .setDesc(
-        (this.isOwnRoom()
-          ? "Where this device keeps the room's files. You created this room, so by default it's the source path itself - your existing files stay right where they are, nothing is duplicated."
-          : "Where this device keeps its local copy of the room's files (a folder under Settings → Vault Rooms → Sync → Mount root by default). Leave blank to use that default.") +
-          (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
-      )
+      .setDesc(this.plugin.isRoomMounted(this.room.id) ? "Used after next unmount/mount." : "Used when this room is mounted.")
       .addText((text) => text.setValue(this.localMountPath).onChange((value) => (this.localMountPath = value.trim())));
-  }
-
-  private isOwnRoom(): boolean {
-    return this.room.ownerUserId === this.plugin.getActiveServer()?.userId;
   }
 
   private renderCapabilities(parent: HTMLElement): void {

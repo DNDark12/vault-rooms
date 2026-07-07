@@ -99,7 +99,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Max synced file size")
-      .setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).")
+      .setDesc("Files larger than this (in bytes) are rejected. Default 1048576 (1 MB).")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);
@@ -158,14 +158,9 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
 
     for (const server of this.plugin.settings.servers) {
       const active = server.id === this.plugin.getActiveServer()?.id;
-      const isRevoked = server.status === "revoked";
       const setting = new Setting(containerEl)
         .setName(`${server.teamName} - ${server.userDisplayName}${active ? " - active" : ""}`)
-        .setDesc(
-          isRevoked
-            ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join the team again.`
-            : `${server.baseUrl} (${server.status})`
-        );
+        .setDesc(`${server.baseUrl} (${server.status})`);
       setting.addButton((button) =>
         button.setButtonText("Use").setDisabled(active).onClick(async () => {
           try {
@@ -207,18 +202,6 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             })
         );
       }
-      setting.addButton((button) =>
-        button
-          .setButtonText("Forget")
-          .setWarning()
-          .onClick(async () => {
-            if (!window.confirm(`Remove "${server.teamName}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
-              return;
-            }
-            await this.plugin.forgetServer(server.id);
-            this.display();
-          })
-      );
     }
   }
 }
