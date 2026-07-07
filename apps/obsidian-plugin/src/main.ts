@@ -242,12 +242,22 @@ export default class VaultRoomsPlugin extends Plugin {
     new Notice(`Connected to Vault Rooms`);
   }
 
-  async setupServer(baseUrl: string, displayName: string, deviceName: string, teamName?: string): Promise<void> {
+  async setupServer(displayName: string, deviceName: string, teamName?: string): Promise<void> {
     // Setting up always means "make this device the server," so there is no useful case for
     // asking the user to separately click Start first - do it for them if it isn't running yet.
+    // The target address is always this freshly-(re)started embedded server's own detected local
+    // URL, never something the user types in: bootstrap only ever succeeds against localhost with
+    // no existing owner (see team.routes.ts), so a hand-entered/stale URL could only fail loudly
+    // (pointing elsewhere) or, worse, silently mismatch a port auto-picked because the default was
+    // taken - there is no legitimate case where it should be anything other than this value.
     if (!this.getServerStatus().running) {
       await this.startEmbeddedServer();
     }
+    const status = this.getServerStatus();
+    if (!status.running) {
+      throw new Error(status.error ?? "Could not start the relay server.");
+    }
+    const baseUrl = status.localUrl;
     const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
@@ -716,8 +726,7 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   openSetupServerModal(): void {
-    const status = this.getServerStatus();
-    new SetupTeamModal(this, status.running ? status.localUrl : undefined).open();
+    new SetupTeamModal(this).open();
   }
 
   openCreateRoomModal(): void {

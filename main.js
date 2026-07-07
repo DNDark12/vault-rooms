@@ -47054,14 +47054,12 @@ function sanitizeMountName2(name) {
 // src/modals/SetupTeamModal.ts
 var import_obsidian7 = require("obsidian");
 var SetupTeamModal = class extends import_obsidian7.Modal {
-  constructor(plugin, defaultServerUrl = "http://127.0.0.1:8787") {
+  constructor(plugin) {
     super(plugin.app);
     this.plugin = plugin;
-    __publicField(this, "serverUrl");
     __publicField(this, "teamName", "");
-    __publicField(this, "displayName", "A");
-    __publicField(this, "deviceName", "A laptop");
-    this.serverUrl = defaultServerUrl;
+    __publicField(this, "displayName", "");
+    __publicField(this, "deviceName", "");
   }
   onOpen() {
     const { contentEl } = this;
@@ -47069,21 +47067,22 @@ var SetupTeamModal = class extends import_obsidian7.Modal {
     contentEl.createEl("h2", { text: "Set up server" });
     contentEl.createEl("p", {
       cls: "setting-item-description",
-      text: 'Creates your account and device identity on this relay server. Do this once per server - after that, use "Create team" and "Invite" from the Vault Rooms panel.'
+      text: `Creates your account and device identity on this device's relay server (starting it first if it isn't running yet - no separate address to enter). Do this once per server - after that, use "Create team" and "Invite" from the Vault Rooms panel.`
     });
-    new import_obsidian7.Setting(contentEl).setName("Server URL").addText((text) => text.setValue(this.serverUrl).onChange((value) => this.serverUrl = value.trim()));
-    new import_obsidian7.Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => this.displayName = value.trim()));
-    new import_obsidian7.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName).onChange((value) => this.deviceName = value.trim()));
+    new import_obsidian7.Setting(contentEl).setName("Display name").setDesc("This is what teammates will see you as.").addText((text) => {
+      window.setTimeout(() => text.inputEl.focus(), 0);
+      text.setValue(this.displayName).onChange((value) => this.displayName = value.trim());
+    });
+    new import_obsidian7.Setting(contentEl).setName("Device name").setDesc("Identifies this specific device (shown in conflict-copy filenames, and lets a lost/stolen device be revoked separately from your account later).").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
     new import_obsidian7.Setting(contentEl).setName("First team name").setDesc("Optional - creates a team you own right away. You can create more teams later.").addText((text) => text.setValue(this.teamName).onChange((value) => this.teamName = value.trim()));
     new import_obsidian7.Setting(contentEl).addButton(
-      (button) => button.setButtonText("Test connection").onClick(async () => {
-        await this.plugin.testConnection(this.serverUrl);
-      })
-    );
-    new import_obsidian7.Setting(contentEl).addButton(
       (button) => button.setCta().setButtonText("Set up server").onClick(async () => {
+        if (!this.displayName) {
+          new import_obsidian7.Notice("Display name is required.");
+          return;
+        }
         try {
-          await this.plugin.setupServer(this.serverUrl, this.displayName, this.deviceName, this.teamName || void 0);
+          await this.plugin.setupServer(this.displayName, this.deviceName || "Obsidian desktop", this.teamName || void 0);
           this.close();
         } catch (error) {
           new import_obsidian7.Notice(error instanceof Error ? error.message : "Server setup failed");
@@ -47514,9 +47513,9 @@ var VaultRoomsView = class extends import_obsidian9.ItemView {
         cls: "vault-rooms-empty",
         text: this.plugin.settings.servers.length > 0 ? 'No server selected - pick one under "Other servers" below, or set up/join a new one.' : "Not connected to any server yet."
       });
-      const actions = section.createDiv({ cls: "vault-rooms-actions" });
-      this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
-      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
+      const actions2 = section.createDiv({ cls: "vault-rooms-actions" });
+      this.addPanelButton(actions2, "Set up server", () => this.plugin.openSetupServerModal(), true);
+      this.addPanelButton(actions2, "Join server", () => this.plugin.openJoinTeamModal());
       return;
     }
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
@@ -47526,12 +47525,15 @@ var VaultRoomsView = class extends import_obsidian9.ItemView {
     const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting\u2026" : "Live sync: offline";
     const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
     badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    const actions = section.createDiv({ cls: "vault-rooms-actions" });
+    this.addPanelButton(actions, "Set up another server", () => this.plugin.openSetupServerModal());
+    this.addPanelButton(actions, "Join another server", () => this.plugin.openJoinTeamModal());
   }
   /**
-   * Every *other* saved server (logins this device remembers but isn't currently using).
-   * Collapsed by default reasoning doesn't apply here since it's not collapsed by default at all -
-   * left expanded so switching servers is one click, not two - but it's still wrapped in the
-   * generic collapsible so it can be tucked away once a device accumulates a long list.
+   * Every *other* saved server (logins this device remembers but isn't currently using) - a plain
+   * list, not an action menu. "Set up/Join another server" already lives in Active connection
+   * above regardless of whether anything is saved here yet, so this section only ever needs to
+   * render when there's something to actually list.
    *
    * Only one server is ever live at a time: switching (or setting up/joining another) makes that
    * one active instead. Rooms mounted under a server that isn't active are simply paused - their
@@ -47542,17 +47544,10 @@ var VaultRoomsView = class extends import_obsidian9.ItemView {
   renderOtherServersSection(parent) {
     const active = this.plugin.getActiveServer();
     const others = this.plugin.settings.servers.filter((server) => server.id !== (active == null ? void 0 : active.id));
-    if (others.length === 0 && !active) {
+    if (others.length === 0) {
       return;
     }
     this.renderCollapsibleSection(parent, "other-servers", "Other servers", others.length, (body) => {
-      const actions = body.createDiv({ cls: "vault-rooms-actions" });
-      this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
-      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
-      if (others.length === 0) {
-        body.createDiv({ cls: "vault-rooms-empty", text: "No other saved servers on this device." });
-        return;
-      }
       body.createEl("p", {
         cls: "vault-rooms-setting-hint",
         text: "Only the active connection above syncs live. Switching here pauses sync for rooms mounted under the server you're leaving, and resumes it for rooms under this one."
@@ -47993,10 +47988,16 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     await new RelayApiClient(baseUrl).testConnection();
     new import_obsidian10.Notice(`Connected to Vault Rooms`);
   }
-  async setupServer(baseUrl, displayName, deviceName, teamName) {
+  async setupServer(displayName, deviceName, teamName) {
+    var _a;
     if (!this.getServerStatus().running) {
       await this.startEmbeddedServer();
     }
+    const status = this.getServerStatus();
+    if (!status.running) {
+      throw new Error((_a = status.error) != null ? _a : "Could not start the relay server.");
+    }
+    const baseUrl = status.localUrl;
     const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
@@ -48403,8 +48404,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     });
   }
   openSetupServerModal() {
-    const status = this.getServerStatus();
-    new SetupTeamModal(this, status.running ? status.localUrl : void 0).open();
+    new SetupTeamModal(this).open();
   }
   openCreateRoomModal() {
     new CreateRoomModal(this).open();

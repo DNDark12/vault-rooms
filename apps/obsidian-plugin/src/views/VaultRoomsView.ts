@@ -158,13 +158,20 @@ export class VaultRoomsView extends ItemView {
     const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting…" : "Live sync: offline";
     const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
     badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+
+    // Connecting to another server/team lives here (not tucked inside "Other servers" below, which
+    // is just a list of what's already saved) since it's an action you can take regardless of
+    // whether anything else has been saved yet.
+    const actions = section.createDiv({ cls: "vault-rooms-actions" });
+    this.addPanelButton(actions, "Set up another server", () => this.plugin.openSetupServerModal());
+    this.addPanelButton(actions, "Join another server", () => this.plugin.openJoinTeamModal());
   }
 
   /**
-   * Every *other* saved server (logins this device remembers but isn't currently using).
-   * Collapsed by default reasoning doesn't apply here since it's not collapsed by default at all -
-   * left expanded so switching servers is one click, not two - but it's still wrapped in the
-   * generic collapsible so it can be tucked away once a device accumulates a long list.
+   * Every *other* saved server (logins this device remembers but isn't currently using) - a plain
+   * list, not an action menu. "Set up/Join another server" already lives in Active connection
+   * above regardless of whether anything is saved here yet, so this section only ever needs to
+   * render when there's something to actually list.
    *
    * Only one server is ever live at a time: switching (or setting up/joining another) makes that
    * one active instead. Rooms mounted under a server that isn't active are simply paused - their
@@ -175,20 +182,11 @@ export class VaultRoomsView extends ItemView {
   private renderOtherServersSection(parent: HTMLElement): void {
     const active = this.plugin.getActiveServer();
     const others = this.plugin.settings.servers.filter((server) => server.id !== active?.id);
-    if (others.length === 0 && !active) {
-      return; // Nothing else to show - the "Set up/Join" CTAs already live in Active connection above.
+    if (others.length === 0) {
+      return;
     }
 
     this.renderCollapsibleSection(parent, "other-servers", "Other servers", others.length, (body) => {
-      const actions = body.createDiv({ cls: "vault-rooms-actions" });
-      this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
-      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
-
-      if (others.length === 0) {
-        body.createDiv({ cls: "vault-rooms-empty", text: "No other saved servers on this device." });
-        return;
-      }
-
       body.createEl("p", {
         cls: "vault-rooms-setting-hint",
         text: "Only the active connection above syncs live. Switching here pauses sync for rooms mounted under the server you're leaving, and resumes it for rooms under this one."
