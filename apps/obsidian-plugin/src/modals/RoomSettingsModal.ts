@@ -3,26 +3,7 @@ import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
 import type VaultRoomsPlugin from "../main.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
 
-const PERMISSIONS = [
-  "room:read",
-  "room:write",
-  "room:delete",
-  "file:read",
-  "file:write",
-  "file:create",
-  "file:delete",
-  "sync:subscribe",
-  "sync:push",
-  "mcp:use",
-  "tool:list_files",
-  "tool:read_file",
-  "tool:write_file",
-  "tool:list_tasks",
-  "tool:create_task",
-  "tool:update_task_status",
-  "tool:create_kanban_card",
-  "tool:move_kanban_card"
-];
+const PERMISSIONS = ["room:read", "room:write", "room:delete", "file:read", "file:write", "file:create", "file:delete", "sync:subscribe", "sync:push"];
 
 type CapabilityDraft = { pluginId: string; displayName: string; mode: string; minVersion?: string };
 
@@ -37,7 +18,7 @@ export class RoomSettingsModal extends Modal {
   private conflictPolicy: "keep_both" | "owner_wins";
   private capabilities: CapabilityDraft[];
   private aclRules: AclRuleSummary[] = [];
-  private subjectType: "team" | "user" | "device" | "agent" = "team";
+  private subjectType: "team" | "user" = "team";
   private subjectId = "";
   private effect: "allow" | "deny" = "allow";
   private preset: "reader" | "editor" | "custom" = "reader";
@@ -248,18 +229,16 @@ export class RoomSettingsModal extends Modal {
     parent.createEl("h3", { text: "Room access" });
     parent.createEl("p", {
       cls: "vault-rooms-setting-hint",
-      text: "Grant a whole team, a specific friend, or (advanced) a specific device/agent id access to this room."
+      text: "Grant a whole team or a specific friend access to this room."
     });
 
     new Setting(parent).setName("Grant access to").addDropdown((dropdown) =>
       dropdown
         .addOption("team", "Team")
         .addOption("user", "Specific friend")
-        .addOption("device", "Device id (advanced)")
-        .addOption("agent", "Agent id (advanced)")
         .setValue(this.subjectType)
         .onChange((value) => {
-          this.subjectType = value as "team" | "user" | "device" | "agent";
+          this.subjectType = value as "team" | "user";
           this.subjectId = this.defaultSubjectId();
           this.render();
         })
@@ -276,7 +255,7 @@ export class RoomSettingsModal extends Modal {
           dropdown.setValue(this.subjectId).onChange((value) => (this.subjectId = value));
         });
       }
-    } else if (this.subjectType === "user") {
+    } else {
       const activeFriends = this.plugin.friends.filter((friend) => !friend.revokedAt);
       if (activeFriends.length === 0) {
         new Setting(parent).setDesc("No friends yet - invite someone first.");
@@ -288,11 +267,6 @@ export class RoomSettingsModal extends Modal {
           dropdown.setValue(this.subjectId).onChange((value) => (this.subjectId = value));
         });
       }
-    } else {
-      new Setting(parent)
-        .setName(this.subjectType === "device" ? "Device id" : "Agent id")
-        .setDesc("Paste the exact device or agent id - only use this for advanced/automation setups.")
-        .addText((text) => text.setValue(this.subjectId).onChange((value) => (this.subjectId = value.trim())));
     }
 
     new Setting(parent)
@@ -411,7 +385,7 @@ export class RoomSettingsModal extends Modal {
   }
 
   private async grantAccess(input: {
-    subjectType: "user" | "team" | "device" | "agent";
+    subjectType: "user" | "team";
     subjectId: string;
     effect: "allow" | "deny";
     preset?: "reader" | "editor";

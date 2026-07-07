@@ -4,11 +4,9 @@ import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthRespons
 import { openRelayDb } from "./db/db.js";
 import type { SqlJsLocator } from "./db/sqlJsAdapter.js";
 import { RelayRepository } from "./db/repositories/relayRepository.js";
-import { registerAgentRoutes } from "./routes/agent.routes.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
 import { registerFileRoutes } from "./routes/file.routes.js";
 import { registerFriendRoutes } from "./routes/friend.routes.js";
-import { registerMcpRoutes } from "./routes/mcp.routes.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
 import { ConnectionRegistry } from "./sync/connectionRegistry.js";
@@ -69,12 +67,10 @@ export async function createApp(options: CreateAppOptions = {}) {
   });
   registerRoomRoutes(app, repo, { connectionRegistry });
   registerFriendRoutes(app, repo, { connectionRegistry });
-  registerAgentRoutes(app, repo);
   registerFileRoutes(app, repo, {
     maxFileBytes,
     connectionRegistry
   });
-  registerMcpRoutes(app, repo);
   void app.register(async (syncApp) => {
     registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes });
   });

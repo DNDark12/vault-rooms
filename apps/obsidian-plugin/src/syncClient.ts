@@ -32,6 +32,14 @@ export type MountedFileState = {
 
 export type MountedRoomState = {
   roomId: string;
+  /** Which saved server (settings.servers[].id) this room's files live on. Only one server is
+   *  "active" (connected/syncing) at a time - see main.ts's connectSyncSocket()/activateServer() -
+   *  so this lets mount/watch/subscribe logic tell "my room, but a different, currently-inactive
+   *  server" apart from "my room, on the active server," instead of routing every mounted room's
+   *  push/pull through whichever server happens to be active right now. Optional only so that
+   *  mountedRooms entries saved before this field existed don't crash on load; treated the same as
+   *  "belongs to a different server" (paused until re-mounted) rather than assumed to be current. */
+  serverId?: string;
   mountPath: string;
   files: Record<string, MountedFileState>;
 };

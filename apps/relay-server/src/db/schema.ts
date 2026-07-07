@@ -71,7 +71,7 @@ export type RoomCapabilityRow = {
 export type AclRuleRow = {
   id: string;
   room_id: string;
-  subject_type: "user" | "team" | "device" | "agent";
+  subject_type: "user" | "team";
   subject_id: string;
   effect: "allow" | "deny";
   permissions_json: string;
@@ -106,9 +106,3 @@ export type FileVersionWithContentRow = {
   content: string;
 };
 
-export type AgentPrincipalRow = {
-  id: string;
-  user_id: string;
-  display_name: string;
-  revoked_at: string | null;
-};

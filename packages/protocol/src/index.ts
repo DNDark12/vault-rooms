@@ -5,7 +5,6 @@ export * from "./errors.js";
 export * from "./ids.js";
 export * from "./paths.js";
 export * from "./protocol.js";
-export * from "./schemas.js";
 export * from "./tokens.js";
 export * from "./types.js";
 

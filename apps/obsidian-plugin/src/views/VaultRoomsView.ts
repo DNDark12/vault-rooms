@@ -5,6 +5,11 @@ import type VaultRoomsPlugin from "../main.js";
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
 
 export class VaultRoomsView extends ItemView {
+  /** Which collapsible sections are currently collapsed, by key. Not persisted to disk - it's a
+   *  transient display preference, not data, so it resets (all expanded) when the view is closed
+   *  and reopened or Obsidian restarts; that's an acceptable, simple default. */
+  private collapsedSections = new Set<string>();
+
   constructor(
     leaf: WorkspaceLeaf,
     private readonly plugin: VaultRoomsPlugin
@@ -40,15 +45,12 @@ export class VaultRoomsView extends ItemView {
 
     const header = container.createDiv({ cls: "vault-rooms-header" });
     header.createEl("h2", { text: "Vault Rooms" });
+
+    this.renderHostingSection(container);
+    this.renderActiveConnectionSection(container);
+    this.renderOtherServersSection(container);
+
     const server = this.plugin.getActiveServer();
-    header.createEl("div", {
-      cls: "vault-rooms-status",
-      text: server ? `${server.userDisplayName} / ${server.baseUrl} / ${server.status}` : "No server connected yet"
-    });
-
-    this.renderServerSection(container);
-    this.renderConnectionSection(container);
-
     if (!server) {
       container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a server above to load teams and rooms." });
       return;
@@ -59,9 +61,40 @@ export class VaultRoomsView extends ItemView {
     this.renderRoomsSection(container);
   }
 
-  private renderServerSection(parent: HTMLElement): void {
+  /** A collapsible block: a clickable header (title + optional count badge + chevron) that toggles
+   *  whether renderBody() runs. Collapse state is keyed and remembered across re-renders (but not
+   *  across closing/reopening the view - see the collapsedSections field doc comment). Use this for
+   *  anything that can grow long (lists of friends/teams/rooms/servers); leave short, always-useful
+   *  controls (hosting toggle, current connection status) as plain, non-collapsible sections so
+   *  they're never accidentally hidden. */
+  private renderCollapsibleSection(parent: HTMLElement, key: string, title: string, count: number | undefined, renderBody: (body: HTMLElement) => void): void {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Server" });
+    const collapsed = this.collapsedSections.has(key);
+    const headerEl = section.createDiv({ cls: "vault-rooms-section-header" });
+    headerEl.createEl("h3", { text: title });
+    if (count !== undefined) {
+      headerEl.createSpan({ cls: "vault-rooms-section-count", text: String(count) });
+    }
+    headerEl.createSpan({ cls: "vault-rooms-section-chevron", text: collapsed ? "▸" : "▾" });
+    headerEl.onClickEvent(() => {
+      if (collapsed) {
+        this.collapsedSections.delete(key);
+      } else {
+        this.collapsedSections.add(key);
+      }
+      this.render();
+    });
+    if (!collapsed) {
+      renderBody(section.createDiv({ cls: "vault-rooms-section-body" }));
+    }
+  }
+
+  /** Whether this device hosts a relay server at all - orthogonal to which server this device is
+   *  currently *using* as a client (see renderActiveConnectionSection): a host is also a client of
+   *  its own server, and a joining member never sees this section do anything but sit stopped. */
+  private renderHostingSection(parent: HTMLElement): void {
+    const section = parent.createDiv({ cls: "vault-rooms-section" });
+    section.createEl("h3", { text: "This device's server" });
 
     const status = this.plugin.getServerStatus();
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
@@ -85,118 +118,149 @@ export class VaultRoomsView extends ItemView {
     } else if (!status.running && status.error) {
       card.createEl("div", { cls: "vault-rooms-error", text: status.error });
     } else {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Start it to set up or join a server." });
+      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Only start this if you want to host a room for others - joining someone else's server doesn't need it." });
     }
 
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     if (status.running) {
       this.addPanelButton(actions, "Stop server", () => this.plugin.stopEmbeddedServer());
     } else {
-      this.addPanelButton(
-        actions,
-        "Start Server",
-        async () => {
-          await this.plugin.startEmbeddedServer();
-        },
-        true
-      );
+      this.addPanelButton(actions, "Start server", async () => {
+        await this.plugin.startEmbeddedServer();
+      });
     }
   }
 
-  private renderConnectionSection(parent: HTMLElement): void {
+  /** The one server this device is currently using as a client (whether that's its own hosted
+   *  server or someone else's) - always visible, never collapsed, since "am I actually synced right
+   *  now" is exactly the kind of thing you glance at, not something to hide behind a click. Only
+   *  this server's mounted rooms are live: see "Other servers" below for what that means. */
+  private renderActiveConnectionSection(parent: HTMLElement): void {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Connection" });
+    section.createEl("h3", { text: "Active connection" });
 
-    if (this.plugin.getActiveServer()) {
-      const syncState = this.plugin.getSyncState();
-      const badgeRow = section.createDiv({ cls: "vault-rooms-badge-row" });
-      const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting…" : "Live sync: offline";
-      const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
-      badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
-    }
-
-    const serverRunning = this.plugin.getServerStatus().running;
-    const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
-    this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
-
-    if (this.plugin.settings.servers.length === 0) {
+    const server = this.plugin.getActiveServer();
+    if (!server) {
       section.createDiv({
         cls: "vault-rooms-empty",
-        text: serverRunning ? "Not connected yet. Set up a server, or join one via an invite link." : "Start the server above, then set up or join one."
+        text: this.plugin.settings.servers.length > 0 ? "No server selected - pick one under \"Other servers\" below, or set up/join a new one." : "Not connected to any server yet."
       });
+      const actions = section.createDiv({ cls: "vault-rooms-actions" });
+      this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
+      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
       return;
     }
 
+    const card = section.createDiv({ cls: "vault-rooms-server-card" });
+    card.createEl("div", { text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+    const syncState = this.plugin.getSyncState();
+    const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
+    const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting…" : "Live sync: offline";
+    const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
+    badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+  }
+
+  /**
+   * Every *other* saved server (logins this device remembers but isn't currently using).
+   * Collapsed by default reasoning doesn't apply here since it's not collapsed by default at all -
+   * left expanded so switching servers is one click, not two - but it's still wrapped in the
+   * generic collapsible so it can be tucked away once a device accumulates a long list.
+   *
+   * Only one server is ever live at a time: switching (or setting up/joining another) makes that
+   * one active instead. Rooms mounted under a server that isn't active are simply paused - their
+   * local files stay put and nothing is lost, but neither pushes nor live updates happen until you
+   * switch back to that server (see the note under Rooms below). There's no background multi-server
+   * sync in v0.1; this is a deliberate simplification, not a bug you're missing a setting for.
+   */
+  private renderOtherServersSection(parent: HTMLElement): void {
     const active = this.plugin.getActiveServer();
-    const list = section.createDiv({ cls: "vault-rooms-team-list" });
-    for (const server of this.plugin.settings.servers) {
-      const item = list.createDiv({ cls: server.id === active?.id ? "vault-rooms-team is-active" : "vault-rooms-team" });
-      const title = item.createDiv({ cls: "vault-rooms-team-title" });
-      title.createEl("strong", { text: server.baseUrl });
-      title.createEl("span", { text: server.id === active?.id ? "active" : server.status });
-      item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
-      const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-      const useButton = this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
-      useButton.disabled = server.id === active?.id;
-      this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl));
+    const others = this.plugin.settings.servers.filter((server) => server.id !== active?.id);
+    if (others.length === 0 && !active) {
+      return; // Nothing else to show - the "Set up/Join" CTAs already live in Active connection above.
     }
+
+    this.renderCollapsibleSection(parent, "other-servers", "Other servers", others.length, (body) => {
+      const actions = body.createDiv({ cls: "vault-rooms-actions" });
+      this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
+      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
+
+      if (others.length === 0) {
+        body.createDiv({ cls: "vault-rooms-empty", text: "No other saved servers on this device." });
+        return;
+      }
+
+      body.createEl("p", {
+        cls: "vault-rooms-setting-hint",
+        text: "Only the active connection above syncs live. Switching here pauses sync for rooms mounted under the server you're leaving, and resumes it for rooms under this one."
+      });
+      const list = body.createDiv({ cls: "vault-rooms-team-list" });
+      for (const server of others) {
+        const item = list.createDiv({ cls: "vault-rooms-team" });
+        const title = item.createDiv({ cls: "vault-rooms-team-title" });
+        title.createEl("strong", { text: server.baseUrl });
+        title.createEl("span", { text: server.status });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+        const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+        this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
+        this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl));
+      }
+    });
   }
 
   private renderFriendsSection(parent: HTMLElement): void {
-    const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Friends" });
-
     const server = this.plugin.getActiveServer();
-    const list = section.createDiv({ cls: "vault-rooms-friend-list" });
     // "Friends" means everyone else on this server - showing your own account here just adds
     // noise (and there's nothing to do with it: you can't revoke yourself).
     const others = this.plugin.friends.filter((friend) => friend.id !== server?.userId);
-    if (others.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty", text: "No friends yet - share an invite link to add one." });
-      return;
-    }
-    for (const friend of others) {
-      const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
-      item.createEl("strong", { text: friend.displayName });
-      item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
-      if (server?.isServerOwner) {
-        const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-        const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
-        revoke.disabled = Boolean(friend.revokedAt);
+
+    this.renderCollapsibleSection(parent, "friends", "Friends", others.length, (body) => {
+      const list = body.createDiv({ cls: "vault-rooms-friend-list" });
+      if (others.length === 0) {
+        list.createDiv({ cls: "vault-rooms-empty", text: "No friends yet - share an invite link to add one." });
+        return;
       }
-    }
+      for (const friend of others) {
+        const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
+        item.createEl("strong", { text: friend.displayName });
+        item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
+        if (server?.isServerOwner) {
+          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+          const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
+          revoke.disabled = Boolean(friend.revokedAt);
+        }
+      }
+    });
   }
 
   private renderTeamsSection(parent: HTMLElement): void {
-    const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Teams" });
-
     const server = this.plugin.getActiveServer();
-    if (server?.isServerOwner) {
-      const actions = section.createDiv({ cls: "vault-rooms-actions" });
-      let newTeamName = "";
-      const nameInput = actions.createEl("input", { type: "text", attr: { placeholder: "New team name" } });
-      nameInput.oninput = () => (newTeamName = nameInput.value.trim());
-      this.addPanelButton(actions, "Create team", async () => {
-        if (!newTeamName) {
-          new Notice("Team name is required.");
-          return;
-        }
-        await this.plugin.createTeam(newTeamName);
-        this.render();
-      });
-    }
 
-    if (this.plugin.teams.length === 0) {
-      section.createDiv({ cls: "vault-rooms-empty", text: "No teams yet." });
-      return;
-    }
+    this.renderCollapsibleSection(parent, "teams", "Teams", this.plugin.teams.length, (body) => {
+      if (server?.isServerOwner) {
+        const actions = body.createDiv({ cls: "vault-rooms-actions" });
+        let newTeamName = "";
+        const nameInput = actions.createEl("input", { type: "text", attr: { placeholder: "New team name" } });
+        nameInput.oninput = () => (newTeamName = nameInput.value.trim());
+        this.addPanelButton(actions, "Create team", async () => {
+          if (!newTeamName) {
+            new Notice("Team name is required.");
+            return;
+          }
+          await this.plugin.createTeam(newTeamName);
+          this.render();
+        });
+      }
 
-    const list = section.createDiv({ cls: "vault-rooms-team-card-list" });
-    for (const team of this.plugin.teams) {
-      this.renderTeamCard(list, team);
-    }
+      if (this.plugin.teams.length === 0) {
+        body.createDiv({ cls: "vault-rooms-empty", text: "No teams yet." });
+        return;
+      }
+
+      const list = body.createDiv({ cls: "vault-rooms-team-card-list" });
+      for (const team of this.plugin.teams) {
+        this.renderTeamCard(list, team);
+      }
+    });
   }
 
   private renderTeamCard(parent: HTMLElement, team: TeamSummary): void {
@@ -264,55 +328,65 @@ export class VaultRoomsView extends ItemView {
   }
 
   private renderRoomsSection(parent: HTMLElement): void {
-    const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Rooms" });
-    const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Create room", () => this.plugin.openCreateRoomModal());
-    this.addPanelButton(actions, "Refresh", async () => {
-      await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
-    });
-
-    if (this.plugin.visibleRooms.length === 0) {
-      section.createDiv({ cls: "vault-rooms-empty", text: "No rooms loaded." });
-      return;
-    }
-
-    for (const room of this.plugin.visibleRooms) {
-      const item = section.createDiv({ cls: "vault-rooms-room" });
-      const title = item.createDiv({ cls: "vault-rooms-room-title" });
-      title.createEl("strong", { text: room.name });
-      title.createEl("span", { text: room.type });
-      item.createEl("div", { cls: "vault-rooms-room-meta", text: `Folder: ${room.mountName}` });
-      item.createEl("div", { cls: "vault-rooms-room-meta", text: `Source: ${room.sourcePath}` });
-      item.createEl("div", { cls: "vault-rooms-room-meta", text: `Permissions: ${room.permissions.join(", ") || "none"}` });
-      item.createEl("div", {
-        cls: "vault-rooms-room-meta",
-        text: `Capabilities: ${room.capabilities.map((cap) => `${cap.displayName}: ${cap.installed ? "installed" : "missing"}`).join(", ") || "none"}`
+    this.renderCollapsibleSection(parent, "rooms", "Rooms", this.plugin.visibleRooms.length, (body) => {
+      const actions = body.createDiv({ cls: "vault-rooms-actions" });
+      this.addPanelButton(actions, "Create room", () => this.plugin.openCreateRoomModal());
+      this.addPanelButton(actions, "Refresh", async () => {
+        await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
       });
-      const mounted = this.plugin.isRoomMounted(room.id);
-      item.createEl("div", {
-        cls: mounted ? "vault-rooms-mounted" : "vault-rooms-unmounted",
-        text: mounted ? `Mounted: ${this.plugin.mountedPathFor(room.id) ?? room.mountName}` : "Not mounted"
-      });
-      const roomActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-      this.addPanelButton(roomActions, "Settings", () => this.plugin.openRoomSettingsModal(room));
-      this.addPanelButton(
-        roomActions,
-        mounted ? "Unmount" : "Mount",
-        async () => {
-          if (mounted) {
-            await this.plugin.unmountRoom(room.id);
-          } else {
-            await this.plugin.mountRoom(room);
-          }
-          this.render();
-        },
-        !mounted
-      );
-      if (mounted) {
-        this.renderRoomConflicts(item, room.id);
+
+      if (this.plugin.visibleRooms.length === 0) {
+        body.createDiv({ cls: "vault-rooms-empty", text: "No rooms loaded." });
+        return;
       }
-    }
+
+      const activeServerId = this.plugin.getActiveServer()?.id;
+      for (const room of this.plugin.visibleRooms) {
+        const item = body.createDiv({ cls: "vault-rooms-room" });
+        const title = item.createDiv({ cls: "vault-rooms-room-title" });
+        title.createEl("strong", { text: room.name });
+        title.createEl("span", { text: room.type });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Folder: ${room.mountName}` });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Source: ${room.sourcePath}` });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Permissions: ${room.permissions.join(", ") || "none"}` });
+        item.createEl("div", {
+          cls: "vault-rooms-room-meta",
+          text: `Capabilities: ${room.capabilities.map((cap) => `${cap.displayName}: ${cap.installed ? "installed" : "missing"}`).join(", ") || "none"}`
+        });
+        const mounted = this.plugin.isRoomMounted(room.id);
+        item.createEl("div", {
+          cls: mounted ? "vault-rooms-mounted" : "vault-rooms-unmounted",
+          text: mounted ? `Mounted: ${this.plugin.mountedPathFor(room.id) ?? room.mountName}` : "Not mounted"
+        });
+        // Only the active server's rooms actually sync (see "Other servers" above) - a room mounted
+        // under a server this device isn't currently using would otherwise look identical to a
+        // normally-syncing one, which is exactly the confusing silent-pause this note prevents.
+        if (mounted && this.plugin.mountedRoomServerId(room.id) !== undefined && this.plugin.mountedRoomServerId(room.id) !== activeServerId) {
+          item.createEl("div", {
+            cls: "vault-rooms-error",
+            text: "Not syncing right now - this room was mounted under a different server. Switch to that server (Other servers, above) to resume."
+          });
+        }
+        const roomActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+        this.addPanelButton(roomActions, "Settings", () => this.plugin.openRoomSettingsModal(room));
+        this.addPanelButton(
+          roomActions,
+          mounted ? "Unmount" : "Mount",
+          async () => {
+            if (mounted) {
+              await this.plugin.unmountRoom(room.id);
+            } else {
+              await this.plugin.mountRoom(room);
+            }
+            this.render();
+          },
+          !mounted
+        );
+        if (mounted) {
+          this.renderRoomConflicts(item, room.id);
+        }
+      }
+    });
   }
 
   private renderRoomConflicts(parent: HTMLElement, roomId: string): void {

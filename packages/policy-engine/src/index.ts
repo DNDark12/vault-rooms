@@ -17,17 +17,16 @@ export function expandPreset(preset: PermissionPreset): Permission[] {
 
 export type PolicyInput = {
   subject: {
-    type: "user" | "device" | "agent";
+    type: "user";
     id: string;
     userId?: string;
     teamIds?: string[];
   };
   resource: {
-    type: "room" | "file" | "tool";
+    type: "room" | "file";
     roomId?: string;
     roomOwnerUserId?: string;
     relativePath?: string;
-    toolName?: string;
   };
   permission: Permission;
   aclRules: AclRule[];
@@ -65,14 +64,6 @@ export function evaluatePolicy(input: PolicyInput): PolicyDecision {
   }
 
   return deny("no matching allow");
-}
-
-export function requireToolAndFilePermissions(decisions: PolicyDecision[]): PolicyDecision {
-  const denied = decisions.find((decision) => !decision.allowed);
-  if (denied) {
-    return denied;
-  }
-  return { allowed: true, reason: "all required permissions allowed", matchedRuleIds: decisions.flatMap((d) => d.matchedRuleIds) };
 }
 
 function deny(reason: string): PolicyDecision {

@@ -14,7 +14,6 @@ import {
 } from "@vault-rooms/protocol";
 import type {
   AclRuleRow,
-  AgentPrincipalRow,
   DevicePrincipalRow,
   FileRow,
   FileVersionWithContentRow,
@@ -35,13 +34,6 @@ export type DevicePrincipal = {
   userDisplayName: string;
   userRevokedAt: string | null;
   isServerOwner: boolean;
-};
-
-export type AgentPrincipal = {
-  agentId: string;
-  userId: string;
-  displayName: string;
-  revokedAt: string | null;
 };
 
 export type UserTeam = {
@@ -411,51 +403,6 @@ export class RelayRepository {
     });
   }
 
-  createAgentToken(input: { userId: string; displayName: string }): { agent: { id: string; displayName: string }; agentToken: string } {
-    const agentId = createId("agt");
-    const agentToken = createToken("agt");
-    const now = new Date().toISOString();
-    this.db
-      .prepare("insert into mcp_agent_tokens(id, user_id, display_name, token_hash, revoked_at, created_at) values (?, ?, ?, ?, null, ?)")
-      .run(agentId, input.userId, input.displayName, hashToken(agentToken), now);
-    this.audit({
-      teamId: null,
-      actorType: "user",
-      actorId: input.userId,
-      action: "mcp.agent.created",
-      resourceType: "agent",
-      resourceId: agentId,
-      metadata: { displayName: input.displayName }
-    });
-    return { agent: { id: agentId, displayName: input.displayName }, agentToken };
-  }
-
-  authenticateAgentToken(token: string): AgentPrincipal | null {
-    const row = this.db
-      .prepare("select id, user_id, display_name, revoked_at from mcp_agent_tokens where token_hash = ?")
-      .get(hashToken(token)) as AgentPrincipalRow | undefined;
-    return row ? { agentId: row.id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
-  }
-
-  getAgentById(agentId: string): AgentPrincipal | null {
-    const row = this.db.prepare("select id, user_id, display_name, revoked_at from mcp_agent_tokens where id = ?").get(agentId) as AgentPrincipalRow | undefined;
-    return row ? { agentId: row.id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
-  }
-
-  revokeAgent(input: { agentId: string; actorUserId: string }): void {
-    const now = new Date().toISOString();
-    this.db.prepare("update mcp_agent_tokens set revoked_at = ? where id = ?").run(now, input.agentId);
-    this.audit({
-      teamId: null,
-      actorType: "user",
-      actorId: input.actorUserId,
-      action: "mcp.agent.revoked",
-      resourceType: "agent",
-      resourceId: input.agentId,
-      metadata: {}
-    });
-  }
-
   createRoom(input: {
     name: string;
     type: "file" | "folder";
@@ -802,7 +749,7 @@ export class RelayRepository {
 
   audit(input: {
     teamId: string | null;
-    actorType: "user" | "device" | "agent" | "system";
+    actorType: "user" | "device" | "system";
     actorId: string;
     action: string;
     resourceType: string;

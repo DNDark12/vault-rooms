@@ -137,7 +137,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "subjectType, subjectId, effect, and pathPattern are required.", 422);
     }
     if (!isSubjectType(body.subjectType)) {
-      throw new AppError("VALIDATION_ERROR", "subjectType must be user, team, device, or agent.", 422);
+      throw new AppError("VALIDATION_ERROR", "subjectType must be user or team.", 422);
     }
     if (body.effect !== "allow" && body.effect !== "deny") {
       throw new AppError("VALIDATION_ERROR", "effect must be allow or deny.", 422);
@@ -281,7 +281,7 @@ function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder";
 }
 
 function isSubjectType(value: string): value is SubjectType {
-  return value === "user" || value === "team" || value === "device" || value === "agent";
+  return value === "user" || value === "team";
 }
 
 function isSafeMountName(value: string): boolean {

@@ -1,6 +1,10 @@
 export type TeamRole = "admin" | "member";
 export type RoomType = "file" | "folder";
-export type SubjectType = "user" | "team" | "device" | "agent";
+// "device" and "agent" subject types existed in an earlier design but were never wired up to any
+// evaluatePolicy() call site (every request is authorized as the underlying user, never a specific
+// device) - see the removal note in policy-engine's evaluatePolicy(). "agent" was the MCP gateway's
+// subject type, removed along with that feature.
+export type SubjectType = "user" | "team";
 export type AclEffect = "allow" | "deny";
 export type CapabilityMode = "required" | "recommended" | "optional";
 export type FileKind = "file" | "folder";
@@ -26,16 +30,7 @@ export type Permission =
   | "file:create"
   | "file:delete"
   | "sync:subscribe"
-  | "sync:push"
-  | "mcp:use"
-  | "tool:list_files"
-  | "tool:read_file"
-  | "tool:write_file"
-  | "tool:list_tasks"
-  | "tool:create_task"
-  | "tool:update_task_status"
-  | "tool:create_kanban_card"
-  | "tool:move_kanban_card";
+  | "sync:push";
 
 export type AclRule = {
   id: string;

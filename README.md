@@ -4,7 +4,7 @@
 
 Vault Rooms lets you create local rooms for selected folders in your vault with trusted people on the same local network.
 
-Create a room, invite members, grant file and AI tool permissions, and collaborate on Markdown-backed workflows such as Kanban boards and Tasks. Vault Rooms includes a local relay server, an Obsidian client plugin, and a scoped MCP gateway for AI tools.
+Create a room, invite members, grant fine-grained file permissions, and collaborate on Markdown-backed workflows such as Kanban boards and Tasks. Vault Rooms includes a local relay server and an Obsidian client plugin.
 
 Vault Rooms is LAN-first, deny-by-default, and designed to avoid exposing raw vault access.
 
@@ -20,7 +20,6 @@ Vault Rooms makes network connections, but only ever between devices on your own
 
 - The device hosting a room (the "server") listens on your local network - by default port `8787`, or the next free port up to `8797` - so that teammates' Obsidian clients can reach it over plain HTTP and WebSocket.
 - Every other device's plugin only ever makes outbound HTTP/WebSocket requests to that one host, to authenticate, sync files, fetch room/team/friend metadata, and receive live updates.
-- If you also use the MCP gateway (`POST /mcp`), that endpoint is served by the same LAN host and is reachable by anything holding a valid agent token; no data is sent anywhere outside your LAN because of it.
 
 v0.1 has no TLS (see "Security model" below) - tokens and file contents travel in plaintext over your LAN, so only use this on a network you trust.
 
@@ -28,12 +27,10 @@ v0.1 has no TLS (see "Security model" below) - tokens and file contents travel i
 
 The repo is a pnpm TypeScript monorepo:
 
-- `apps/relay-server`: Fastify relay, SQLite storage (via `sql.js`, pure JS/WASM - no native build step), REST API, WebSocket sync, scoped MCP endpoint (`vault-rooms-relay`).
+- `apps/relay-server`: Fastify relay, SQLite storage (via `sql.js`, pure JS/WASM - no native build step), REST API, WebSocket sync (`vault-rooms-relay`).
 - `apps/obsidian-plugin`: Obsidian plugin shell, settings, setup/join/room commands, mount/download behavior, sync core behind `VaultAdapter`, and an **embedded copy of the relay server** that runs inside the plugin process (`@vault-rooms/obsidian-plugin`).
 - `packages/protocol`: protocol, types, errors, token/path helpers (`@vault-rooms/protocol`).
-- `packages/policy-engine`: pure ACL evaluator used by REST, sync, and MCP (`@vault-rooms/policy`).
-- `packages/markdown-adapters`: pure Tasks and Kanban Markdown operations (`@vault-rooms/markdown-adapters`).
-- `packages/mcp-gateway`: MCP tool names and permission metadata (`vault-rooms-mcp`).
+- `packages/policy-engine`: pure ACL evaluator used by both REST and sync (`@vault-rooms/policy`).
 
 There are two ways to run the relay, and both speak the exact same protocol:
 
@@ -44,13 +41,13 @@ Whoever's device is running the relay (embedded or standalone) is "the server." 
 
 ## Security model
 
-Permissions are enforced by the relay server over synced rooms and MCP tools. Client-side UI is convenience only. Tokens use `tr_inv_`, `tr_dev_`, and `tr_agt_` prefixes and only SHA-256 token hashes are stored in SQLite.
+Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes and only SHA-256 token hashes are stored in SQLite.
 
 This project does not sandbox arbitrary Obsidian community plugins. If a local plugin can read a synced Markdown file in B's vault, Vault Rooms cannot prevent that local plugin from reading it.
 
 v0.1 has no TLS: use only on trusted networks. Tokens and content travel in plaintext over LAN. The embedded server always binds every network interface (`0.0.0.0`) so teammates can reach it - there is no "this device only" mode, since a server nobody else can reach isn't useful, and the invite flow (plus localhost-only bootstrap by default) already gates what an unauthenticated request can do. The standalone CLI still binds via `HOST`/`PORT` if you need a different setup.
 
-**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The server auto-detects its real LAN IP (e.g. `192.168.1.42`) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates. If auto-detection fails (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server.
+**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The server auto-detects its real LAN IP (a private address like `192.168.x.x` or `10.x.x.x` - specific to your own network, never shown here) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates. If auto-detection fails (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server.
 
 ## Revocation and rejoin model
 
@@ -71,7 +68,7 @@ One caveat: this reconciliation runs when you mount/re-mount a room or reconnect
 
 Concurrent edits to the same file are "first save wins"; the losing device gets a **local-only** conflict copy (never pushed or synced - it only exists on the device that lost the race) instead of losing the edit outright. Character-level co-editing arrives with CRDT in v0.2.
 
-The server uses compare-and-swap file versions. Semantic MCP tools read the latest file, apply a pure Markdown operation, and retry once on version conflict.
+The server uses compare-and-swap file versions: every write must include the version it was based on, and a write based on a stale version is rejected (see the conflict policy above for what happens next).
 
 Two things soften "first save wins" for files that autosave very frequently (a drawing plugin can resave on every stroke), where forking on every near-simultaneous save is more annoying than useful:
 
@@ -104,32 +101,6 @@ When creating a room, **source path** is the folder (or file) in the *owner's* v
 
 You can override the computed default for any room/device via the "Local mount path" field in that room's Settings modal, e.g. to point a member's copy somewhere other than the default mount-root location.
 
-## Quick start (development)
-
-```bash
-pnpm install
-pnpm typecheck
-pnpm test
-pnpm build:plugin
-```
-
-Then load the plugin in a real vault (see "Installing the Obsidian plugin manually") and use the panel - there is no `pnpm dev:server` step needed for normal use anymore; that script still exists for development and for standalone hosting (see below).
-
-## Development
-
-```bash
-pnpm typecheck
-pnpm test
-pnpm build:plugin
-```
-
-Targeted examples:
-
-```bash
-pnpm test apps/relay-server/test/sync-flow.test.ts
-pnpm test packages/markdown-adapters/src/tasks.test.ts
-```
-
 ## Running the relay server (ports, config)
 
 Default port is `8787`. If a port is unset and the default is busy, the server tries `8788` through `8797`. If a port is explicitly set, only that port is attempted and a busy port exits with a clear error.
@@ -149,8 +120,10 @@ Default port is `8787`. If a port is unset and the default is busy, the server t
 Creating an invite (Team Members → Invite Member/Admin) generates a link like:
 
 ```
-obsidian://vault-rooms?mode=join&server=http%3A%2F%2F192.168.1.42%3A8787&token=tr_inv_...
+obsidian://vault-rooms?mode=join&server=http%3A%2F%2F<host-LAN-IP>%3A8787&token=tr_inv_...
 ```
+
+(`<host-LAN-IP>` is a placeholder - the plugin fills in the host's actual detected LAN address, e.g. something in the `192.168.x.x` or `10.x.x.x` range.)
 
 Clicking it opens Obsidian, and if the Vault Rooms plugin is installed there, it pre-fills the Join form with the server URL and token - the recipient only has to add a display name and click Join. The plugin also accepts the older `obsidian://vault-rooms/join?...` path-style link for compatibility.
 
@@ -186,21 +159,22 @@ What doesn't scale, and matters more as the team grows toward 20-50 people:
 - **No TLS yet (v0.1).** At 20-50 people, "trusted LAN" is a bigger assumption to lean on than for a pair. Treat this as an internal-network tool until v0.3 TLS/e2e lands (see Roadmap), and don't run it on a network you don't trust.
 - **ACLs are per-room, not automatic.** Every room's access still has to be granted (to the whole team or specific members/roles) after creation - there's no team size at which this becomes automatic, so plan for a bit of upfront admin work rounding up 50 people into the right room grants.
 
-## MCP tools
+## Development
 
-The relay exposes `POST /mcp` with `Authorization: Bearer tr_agt_...`. v0.1 supports:
+```bash
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm build:plugin
+```
 
-- `list_rooms`
-- `list_files`
-- `read_file`
-- `write_file`
-- `list_tasks`
-- `create_task`
-- `update_task_status`
-- `create_kanban_card`
-- `move_kanban_card`
+Run a single test file, e.g.:
 
-Tool access uses the same ACL table as human/device access. Raw unrestricted vault access is not exposed.
+```bash
+pnpm test apps/relay-server/test/sync-flow.test.ts
+```
+
+Then load the plugin in a real vault (see "Installing the Obsidian plugin manually" below) and use the panel - there is no `pnpm dev:server` step needed for normal use; that script exists only for development and for standalone hosting (see "Running the relay server" above).
 
 ## Release checklist
 
@@ -233,22 +207,10 @@ To cut a release:
 - A teammate can't reach the server at all: confirm the invite/server URL uses the host's actual LAN IP, not `127.0.0.1` - see "Invite links" above. Have them test `http://<host-LAN-IP>:<port>/health` in a browser first.
 - B cannot join: confirm the invite server URL embeds the actual bound port and A's real LAN IP, not `127.0.0.1`. If A's LAN IP auto-detection failed, set a Public URL override in Settings → Vault Rooms → Relay server and restart the server.
 - B can reach `/health` but the invite link does nothing when clicked: confirm the Vault Rooms plugin is installed and enabled on B's machine - the link only opens the Join form, it can't install the plugin.
-- Writes are denied: inspect ACL grants for the user/device/agent and path pattern.
+- Writes are denied: inspect ACL grants for the user/team and path pattern.
 - Conflicts are expected when two actors edit the same file version.
 - A teammate's edits aren't showing up: confirm both devices show the room as mounted (not just visible) - only mounted rooms hold a live sync subscription.
 - "Invalid or expired credentials" on one team/server but not another: that team's saved device token no longer matches anything in that server's data (most often because the server's data was reset/recreated after the token was issued - e.g. a fresh reinstall, a wiped `server-data` folder, or switching between embedded and standalone mode with different data files). The plugin marks the team `revoked` in Settings → Vault Rooms → Teams when this happens; use **Forget** there to remove the stale entry (this only forgets it locally, it does not touch the server), then set up or join that team again to get a working identity. This is unrelated to which *room* you have open - a device token is per-team, not per-room.
-
-## Roadmap
-
-Given what's now implemented (embedded server, in-app settings, live WebSocket push wired end-to-end, dual-format invite links), the original v0.2/v0.3 plan still holds up; feasibility notes below.
-
-v0.2: CRDT, better conflict UI, binary support, multi-device enrollment, **QR/mDNS discovery**. The last item is now more valuable than originally scoped, since it would remove the one recurring rough edge in the invite-link flow (stale links after the host's LAN IP changes) - realistic to prioritize earlier than the rest of v0.2 given the mechanism (`detectLanIp`) already exists and mDNS/zeroconf would sit alongside it.
-
-v0.3: TLS, end-to-end encryption, web admin, audit viewer, rollback. TLS is worth pulling forward for any team past pair-programming size (see "Team size and scaling") - plaintext HTTP/WS is a bigger exposure at 20-50 people than at 2.
-
-v0.4: richer Kanban plugin format support, deeper Tasks metadata, Dataview read-only tools.
-
-Not yet on the roadmap but worth adding given the embedded-server model: **standalone-hosting guidance/tooling** (a documented, maybe scripted, path to run `vault-rooms-relay` unattended on a NAS or always-on machine) for teams that outgrow "one teammate's laptop is the server."
 
 ## License
 

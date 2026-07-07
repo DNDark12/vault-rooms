@@ -152,10 +152,8 @@ export default class VaultRoomsPlugin extends Plugin {
     this.registerObsidianProtocolHandler("vault-rooms", handleJoinLink);
     this.registerObsidianProtocolHandler("vault-rooms/join", (params) => handleJoinLink({ ...params, mode: "join" }));
 
-    for (const room of Object.values(this.settings.mountedRooms)) {
-      this.watchMountedRoom(room.roomId);
-    }
-
+    // Registers watchers (for the active server's mounted rooms only) and connects the WS - see
+    // connectSyncSocket()'s doc comment.
     this.connectSyncSocket();
   }
 
@@ -427,7 +425,7 @@ export default class VaultRoomsPlugin extends Plugin {
   async grantRoomAccess(
     roomId: string,
     input: {
-      subjectType: "user" | "team" | "device" | "agent";
+      subjectType: "user" | "team";
       subjectId: string;
       effect: "allow" | "deny";
       preset?: "reader" | "editor";
@@ -489,6 +487,18 @@ export default class VaultRoomsPlugin extends Plugin {
     this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
     if (this.settings.activeServerId === server.id) {
       this.settings.activeServerId = undefined;
+    }
+    // Otherwise these mountedRooms/roomMountPaths entries would sit around forever, tagged to a
+    // serverId that no longer matches anything in settings.servers - permanently un-syncable and
+    // never surfaced anywhere. Local files are left alone (same as unmounting); only the tracking
+    // entries are removed.
+    for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
+      if (roomState.serverId === server.id) {
+        this.roomWatchers.get(roomId)?.();
+        this.roomWatchers.delete(roomId);
+        delete this.settings.mountedRooms[roomId];
+        delete this.settings.roomMountPaths[roomId];
+      }
     }
     if (isActive) {
       this.syncSocket?.disconnect();
@@ -564,10 +574,12 @@ export default class VaultRoomsPlugin extends Plugin {
     const mountPath = this.roomMountPathFor(room);
     const state = (this.settings.mountedRooms[room.id] = this.settings.mountedRooms[room.id] ?? {
       roomId: room.id,
+      serverId: server.id,
       mountPath,
       files: {}
     });
     state.mountPath = mountPath;
+    state.serverId = server.id;
     const api = this.apiFor(server);
     const files = await api.listFiles(room.id);
     const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
@@ -628,6 +640,13 @@ export default class VaultRoomsPlugin extends Plugin {
 
   mountedPathFor(roomId: string): string | undefined {
     return this.settings.mountedRooms[roomId]?.mountPath;
+  }
+
+  /** Which server (settings.servers[].id) a mounted room belongs to - see the serverId note on
+   *  MountedRoomState. Used by the panel to tell whether a mounted room is under the currently
+   *  active server (syncing) or a different, currently-inactive one (paused). */
+  mountedRoomServerId(roomId: string): string | undefined {
+    return this.settings.mountedRooms[roomId]?.serverId;
   }
 
   /**
@@ -727,6 +746,14 @@ export default class VaultRoomsPlugin extends Plugin {
     if (!roomState || !server) {
       return;
     }
+    // A room mounted while a *different* server was active must not be watched now: pushLocalChange
+    // below always goes through the currently-active server's API client, so watching it here would
+    // silently try to push this room's edits to the wrong server (guaranteed to fail - that server
+    // has never heard of this roomId). It stays un-watched (edits queue up unsynced on disk, same as
+    // if Obsidian were closed) until its own server is reactivated and it's re-mounted/reconnected.
+    if (roomState.serverId !== server.id) {
+      return;
+    }
     if (this.roomWatchers.has(roomId)) {
       return;
     }
@@ -787,16 +814,34 @@ export default class VaultRoomsPlugin extends Plugin {
    * for a manual re-mount. Call this any time the active server changes (setup, join, switch
    * team) - `syncEngine` is otherwise only bound once at onload and would keep pushing to a
    * stale/unauthenticated client. Safe to call repeatedly; it tears down any previous connection.
+   *
+   * Only one server is ever "active" (connected/syncing) at a time - `syncEngine` and the live
+   * WebSocket both point at it exclusively. Rooms mounted under a *different* saved server are
+   * left un-watched and unsubscribed (see watchMountedRoom()'s serverId guard) rather than routed
+   * through the now-wrong client, so switching servers can never push one server's edits to
+   * another. This also means: mounted rooms only actually sync while their own server is active -
+   * switch back to a server to resume syncing whatever's mounted under it.
    */
   private connectSyncSocket(): void {
     this.syncSocket?.disconnect();
     this.syncSocket = null;
     this.syncState = "offline";
+    // Every watcher was registered against whichever server was active when it was set up; that
+    // binding is about to go stale (syncEngine below is being replaced), so every watcher must be
+    // torn down and, for the new active server's own rooms, re-registered below - otherwise a
+    // leftover watcher from the old server would push through the new server's client.
+    for (const unsubscribe of this.roomWatchers.values()) {
+      unsubscribe();
+    }
+    this.roomWatchers.clear();
     const server = this.getActiveServer();
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787"));
     if (!server) {
       this.renderOpenRoomsViews();
       return;
+    }
+    for (const roomId of Object.keys(this.settings.mountedRooms)) {
+      this.watchMountedRoom(roomId);
     }
     const socket = new RoomSyncSocket(server, {
       getMountedRoom: (roomId) => this.settings.mountedRooms[roomId],
@@ -837,8 +882,13 @@ export default class VaultRoomsPlugin extends Plugin {
       }
     });
     socket.connect();
-    for (const roomId of Object.keys(this.settings.mountedRooms)) {
-      socket.subscribe(roomId);
+    // Only subscribe rooms that actually belong to this server - see the serverId note on
+    // MountedRoomState. Subscribing a foreign room here would ask this server about a roomId it
+    // has never issued, which the relay would just reject.
+    for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
+      if (roomState.serverId === server.id) {
+        socket.subscribe(roomId);
+      }
     }
     this.syncSocket = socket;
   }

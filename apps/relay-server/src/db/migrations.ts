@@ -135,15 +135,6 @@ export function runMigrations(db: RelayDb): void {
       ip_address text,
       created_at text not null
     );
-
-    create table if not exists mcp_agent_tokens(
-      id text primary key,
-      user_id text not null,
-      display_name text not null,
-      token_hash text not null,
-      revoked_at text,
-      created_at text not null
-    );
   `);
 
   // Schema evolution for databases created before a column existed: `create table if not exists`

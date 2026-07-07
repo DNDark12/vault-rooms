@@ -43,7 +43,7 @@ export type FriendSummary = {
 export type AclRuleSummary = {
   id: string;
   roomId: string;
-  subjectType: "user" | "team" | "device" | "agent";
+  subjectType: "user" | "team";
   subjectId: string;
   effect: "allow" | "deny";
   permissions: string[];
@@ -190,7 +190,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async grantAcl(roomId: string, input: { subjectType: "user" | "team" | "device" | "agent"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }) {
+  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }) {
     return this.request(`/api/rooms/${roomId}/acl`, {
       method: "POST",
       body: input

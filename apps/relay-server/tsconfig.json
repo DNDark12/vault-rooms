@@ -6,10 +6,5 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "references": [
-    { "path": "../../packages/protocol" },
-    { "path": "../../packages/policy-engine" },
-    { "path": "../../packages/markdown-adapters" },
-    { "path": "../../packages/mcp-gateway" }
-  ]
+  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/policy-engine" }]
 }

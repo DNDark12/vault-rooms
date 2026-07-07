@@ -35,6 +35,9 @@ importers:
       obsidian:
         specifier: ^1.8.7
         version: 1.13.1(@codemirror/state@6.5.0)(@codemirror/view@6.38.6)
+      sql.js:
+        specifier: ^1.14.1
+        version: 1.14.1
       vault-rooms-relay:
         specifier: workspace:*
         version: link:../relay-server
@@ -48,9 +51,6 @@ importers:
       '@fastify/websocket':
         specifier: ^11.2.0
         version: 11.2.0
-      '@vault-rooms/markdown-adapters':
-        specifier: workspace:*
-        version: link:../../packages/markdown-adapters
       '@vault-rooms/policy':
         specifier: workspace:*
         version: link:../../packages/policy-engine
@@ -69,33 +69,9 @@ importers:
       tsx:
         specifier: ^4.20.3
         version: 4.23.0
-      vault-rooms-mcp:
-        specifier: workspace:*
-        version: link:../../packages/mcp-gateway
       ws:
         specifier: ^8.18.3
         version: 8.21.0
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-
-  packages/markdown-adapters:
-    dependencies:
-      '@vault-rooms/protocol':
-        specifier: workspace:*
-        version: link:../protocol
-
-  packages/mcp-gateway:
-    dependencies:
-      '@vault-rooms/markdown-adapters':
-        specifier: workspace:*
-        version: link:../markdown-adapters
-      '@vault-rooms/policy':
-        specifier: workspace:*
-        version: link:../policy-engine
-      '@vault-rooms/protocol':
-        specifier: workspace:*
-        version: link:../protocol
 
   packages/policy-engine:
     dependencies:
@@ -103,11 +79,7 @@ importers:
         specifier: workspace:*
         version: link:../protocol
 
-  packages/protocol:
-    dependencies:
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+  packages/protocol: {}
 
 packages:
 
@@ -1098,9 +1070,6 @@ packages:
       utf-8-validate:
         optional: true
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
-
 snapshots:
 
   '@codemirror/state@6.5.0':
@@ -1928,5 +1897,3 @@ snapshots:
   wrappy@1.0.2: {}
 
   ws@8.21.0: {}
-
-  zod@3.25.76: {}

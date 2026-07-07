@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AclRule, Permission } from "@vault-rooms/protocol";
-import { EDITOR_PERMISSIONS, evaluatePolicy, expandPreset, requireToolAndFilePermissions } from "./index.js";
+import { EDITOR_PERMISSIONS, evaluatePolicy, expandPreset } from "./index.js";
 
 const baseRule = {
   id: "acl_1",
@@ -90,34 +90,6 @@ describe("policy engine", () => {
         aclRules: [teamRule]
       }).allowed
     ).toBe(true);
-  });
-
-  it("requires tool permission and underlying file permission", () => {
-    const toolOnly = { ...baseRule, permissions: ["tool:list_tasks"] } satisfies AclRule;
-    const fileOnly = { ...baseRule, permissions: ["file:read"] } satisfies AclRule;
-    const toolDecision = decide("tool:list_tasks", [toolOnly], {
-      subject: { type: "agent", id: "agt_1" },
-      resource: { type: "tool", roomId: "room_1", relativePath: "Tasks.md", toolName: "list_tasks" }
-    });
-    const fileDecision = decide("file:read", [toolOnly], {
-      subject: { type: "agent", id: "agt_1" },
-      resource: { type: "file", roomId: "room_1", relativePath: "Tasks.md" }
-    });
-    expect(requireToolAndFilePermissions([toolDecision, fileDecision]).allowed).toBe(false);
-
-    const allowedTool = { ...toolOnly, subjectType: "agent" as const, subjectId: "agt_1" };
-    const allowedFile = { ...fileOnly, subjectType: "agent" as const, subjectId: "agt_1" };
-    const both = requireToolAndFilePermissions([
-      decide("tool:list_tasks", [allowedTool, allowedFile], {
-        subject: { type: "agent", id: "agt_1" },
-        resource: { type: "tool", roomId: "room_1", relativePath: "Tasks.md", toolName: "list_tasks" }
-      }),
-      decide("file:read", [allowedTool, allowedFile], {
-        subject: { type: "agent", id: "agt_1" },
-        resource: { type: "file", roomId: "room_1", relativePath: "Tasks.md" }
-      })
-    ]);
-    expect(both.allowed).toBe(true);
   });
 
   it("denies writes outside allowed subpath and does not let write imply delete", () => {

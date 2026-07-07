@@ -16,15 +16,12 @@
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",
-    "@vault-rooms/markdown-adapters": "workspace:*",
-    "vault-rooms-mcp": "workspace:*",
     "@vault-rooms/policy": "workspace:*",
     "@vault-rooms/protocol": "workspace:*",
     "fastify": "^5.4.0",
     "pino": "^9.7.0",
     "sql.js": "^1.14.1",
     "tsx": "^4.20.3",
-    "ws": "^8.18.3",
-    "zod": "^3.25.76"
+    "ws": "^8.18.3"
   }
 }
