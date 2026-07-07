@@ -19,8 +19,8 @@ import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
-import { mountPathForRoom, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
-import { RoomSyncSocket } from "./syncWsClient.js";
+import { canonicalPathForConflictCopy, isConflictCopyPath, mountPathForRoom, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
+import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
 import { VAULT_ROOMS_VIEW_TYPE, VaultRoomsView } from "./views/VaultRoomsView.js";
 import { withInstalledCapabilities } from "./pluginCapabilities.js";
@@ -40,6 +40,7 @@ export default class VaultRoomsPlugin extends Plugin {
   private watchedRoomStates = new WeakSet<MountedRoomState>();
   private embeddedServer: EmbeddedRelayServer | null = null;
   private syncSocket: RoomSyncSocket | null = null;
+  private syncState: SyncConnectionState = "offline";
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -183,6 +184,11 @@ export default class VaultRoomsPlugin extends Plugin {
 
   getServerStatus(): EmbeddedServerStatus {
     return this.embeddedServer?.getStatus() ?? { running: false };
+  }
+
+  /** Live-sync WebSocket state - separate from getServerStatus(), which is about *hosting* the embedded server. */
+  getSyncState(): SyncConnectionState {
+    return this.syncState;
   }
 
   async startEmbeddedServer(): Promise<EmbeddedServerStatus> {
@@ -374,6 +380,7 @@ export default class VaultRoomsPlugin extends Plugin {
     type: "file" | "folder";
     sourcePath: string;
     mountName: string;
+    conflictPolicy?: "keep_both" | "owner_wins";
     capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
   }): Promise<void> {
     const server = this.requireActiveServer();
@@ -389,6 +396,7 @@ export default class VaultRoomsPlugin extends Plugin {
       type: "file" | "folder";
       sourcePath: string;
       mountName: string;
+      conflictPolicy?: "keep_both" | "owner_wins";
       capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
     },
     localMountPath: string
@@ -610,6 +618,51 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   /**
+   * Conflict copies are local-only files (see isConflictCopyPath - they're never pushed or
+   * synced), so finding them is a plain local file-listing scan, not a server call. Used to
+   * render a "Resolve" list per mounted room instead of leaving people to sort them out by hand
+   * in the file explorer.
+   */
+  listRoomConflicts(roomId: string): Array<{ relativePath: string; conflictRelativePath: string }> {
+    const mountPath = this.mountedPathFor(roomId);
+    if (!mountPath) {
+      return [];
+    }
+    const prefix = mountPath.replace(/\/+$/, "");
+    const conflicts: Array<{ relativePath: string; conflictRelativePath: string }> = [];
+    for (const file of this.app.vault.getFiles()) {
+      const path = file.path;
+      if (path !== prefix && !path.startsWith(`${prefix}/`)) {
+        continue;
+      }
+      if (!isConflictCopyPath(path)) {
+        continue;
+      }
+      const canonical = canonicalPathForConflictCopy(path);
+      if (!canonical) {
+        continue;
+      }
+      conflicts.push({
+        relativePath: canonical.slice(prefix.length + 1),
+        conflictRelativePath: path.slice(prefix.length + 1)
+      });
+    }
+    return conflicts;
+  }
+
+  async resolveRoomConflict(roomId: string, relativePath: string, conflictRelativePath: string, keep: "mine" | "theirs"): Promise<void> {
+    const server = this.requireActiveServer();
+    const roomState = this.settings.mountedRooms[roomId];
+    if (!roomState) {
+      throw new Error("Room is not mounted.");
+    }
+    await this.syncEngine.resolveConflict(roomState, relativePath, conflictRelativePath, keep, server.deviceName);
+    await this.saveSettings();
+    this.renderOpenRoomsViews();
+    new Notice(keep === "mine" ? "Kept your version and re-synced it." : "Kept the synced version and removed your local copy.");
+  }
+
+  /**
    * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
    * folder) - there's nothing to "download," their files already live there, so a separate copy
    * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
@@ -665,19 +718,36 @@ export default class VaultRoomsPlugin extends Plugin {
       return;
     }
     this.watchedRoomStates.add(roomState);
+    // Per-path debounce timers and push chains, scoped to this one room-watch registration.
+    // Without coalescing, a fast-autosaving file (a drawing plugin can resave on every stroke)
+    // fires one independent setTimeout per event; all of them eventually push, and overlapping
+    // in-flight pushes for the same path race on the same baseVersion and spuriously
+    // version-conflict with themselves - the file forks into a conflict copy against no one but
+    // its own earlier push. Debouncing per path (reset the timer on every new event) plus
+    // serializing pushes per path (chain onto any push still in flight) fixes both the redundant
+    // network round trips and the self-inflicted conflicts.
+    const pendingTimers = new Map<string, number>();
+    const pushChains = new Map<string, Promise<void>>();
     registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
       if (this.settings.mountedRooms[roomId] !== roomState) {
         return;
       }
-      window.setTimeout(() => {
+      if (event.type === "delete") {
+        return;
+      }
+      const existingTimer = pendingTimers.get(relativePath);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      const timer = window.setTimeout(() => {
+        pendingTimers.delete(relativePath);
         if (this.settings.mountedRooms[roomId] !== roomState) {
           return;
         }
-        if (event.type === "delete") {
-          return;
-        }
-        void this.syncEngine
-          .pushLocalChange(roomState, relativePath, server.deviceName)
+        const previous = pushChains.get(relativePath) ?? Promise.resolve();
+        const next = previous
+          .catch(() => undefined)
+          .then(() => this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName))
           .then(() => this.saveSettings())
           .catch((error) => {
             // Without this, a rejected push (unsupported file type, size limit, stale
@@ -686,7 +756,9 @@ export default class VaultRoomsPlugin extends Plugin {
             console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
             new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
           });
+        pushChains.set(relativePath, next);
       }, this.settings.debounceMs);
+      pendingTimers.set(relativePath, timer);
     });
   }
 
@@ -700,15 +772,21 @@ export default class VaultRoomsPlugin extends Plugin {
   private connectSyncSocket(): void {
     this.syncSocket?.disconnect();
     this.syncSocket = null;
+    this.syncState = "offline";
     const server = this.getActiveServer();
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787"));
     if (!server) {
+      this.renderOpenRoomsViews();
       return;
     }
     const socket = new RoomSyncSocket(server, {
       getMountedRoom: (roomId) => this.settings.mountedRooms[roomId],
       getApi: () => this.apiFor(server),
       syncEngine: this.syncEngine,
+      onStateChange: (state) => {
+        this.syncState = state;
+        this.renderOpenRoomsViews();
+      },
       onApplied: () => {
         void this.saveSettings();
         this.renderOpenRoomsViews();

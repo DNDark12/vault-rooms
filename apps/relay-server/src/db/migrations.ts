@@ -63,6 +63,7 @@ export function runMigrations(db: RelayDb): void {
       source_path text not null,
       mount_name text not null,
       owner_user_id text not null,
+      conflict_policy text not null default 'keep_both',
       created_at text not null,
       updated_at text not null,
       unique(owner_user_id, mount_name)
@@ -144,4 +145,17 @@ export function runMigrations(db: RelayDb): void {
       created_at text not null
     );
   `);
+
+  // Schema evolution for databases created before a column existed: `create table if not exists`
+  // above only bootstraps brand new files, so an already-existing `rooms` table from an older
+  // version of the plugin needs the new column added explicitly. Safe to run on every startup.
+  addColumnIfMissing(db, "rooms", "conflict_policy", "text not null default 'keep_both'");
+}
+
+function addColumnIfMissing(db: RelayDb, table: string, column: string, definition: string): void {
+  const columns = db.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((existing) => existing.name === column)) {
+    return;
+  }
+  db.exec(`alter table ${table} add column ${column} ${definition}`);
 }

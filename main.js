@@ -43525,7 +43525,7 @@ function createId(prefix) {
 
 // ../../packages/protocol/src/paths.ts
 var DRIVE_LETTER = /^[a-zA-Z]:[\\/]/;
-var ELIGIBLE_EXTENSIONS = /* @__PURE__ */ new Set([".md", ".txt", ".canvas", ".json", ".csv"]);
+var ELIGIBLE_EXTENSIONS = /* @__PURE__ */ new Set([".md", ".txt", ".canvas", ".json", ".csv", ".excalidraw"]);
 var ELIGIBLE_BINARY_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"]);
 function normalizeRelativePath(input) {
   if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
@@ -47831,6 +47831,13 @@ async function createConflictCopyPath(vault, path, deviceName, now = /* @__PURE_
 function isConflictCopyPath(path) {
   return /\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?\.[^/]+$/.test(path);
 }
+var CONFLICT_SUFFIX = /\s\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?(?=\.[^/]+$)/;
+function canonicalPathForConflictCopy(path) {
+  if (!isConflictCopyPath(path)) {
+    return null;
+  }
+  return path.replace(CONFLICT_SUFFIX, "");
+}
 var VaultSyncEngine = class _VaultSyncEngine {
   constructor(vault, api, now = () => /* @__PURE__ */ new Date()) {
     this.vault = vault;
@@ -47928,6 +47935,31 @@ var VaultSyncEngine = class _VaultSyncEngine {
       }
       throw error;
     }
+  }
+  /**
+   * Resolves a local conflict copy against its canonical file. Conflict copies never sync (see
+   * isConflictCopyPath checks above) - they're purely a local safety net - so this only ever
+   * touches files on this one device:
+   * - "mine": overwrite the canonical file with the conflict copy's content and push it as a new
+   *   version, then remove the now-redundant conflict copy.
+   * - "theirs": keep the canonical file as-is (it already holds the version that won) and just
+   *   remove the conflict copy.
+   */
+  async resolveConflict(room, relativePath, conflictRelativePath, keep, deviceName) {
+    const conflictPath = mountedPath(room, conflictRelativePath);
+    if (keep === "theirs") {
+      if (await this.vault.exists(conflictPath)) {
+        await this.vault.delete(conflictPath);
+      }
+      return;
+    }
+    const path = mountedPath(room, relativePath);
+    const conflictContent = await this.readContent(conflictPath, relativePath);
+    await this.writeContent(path, relativePath, conflictContent);
+    if (await this.vault.exists(conflictPath)) {
+      await this.vault.delete(conflictPath);
+    }
+    await this.pushLocalChange(room, relativePath, deviceName);
   }
 };
 function arrayBufferToBase64(buffer) {
@@ -48069,6 +48101,7 @@ function runMigrations(db) {
       source_path text not null,
       mount_name text not null,
       owner_user_id text not null,
+      conflict_policy text not null default 'keep_both',
       created_at text not null,
       updated_at text not null,
       unique(owner_user_id, mount_name)
@@ -48150,6 +48183,14 @@ function runMigrations(db) {
       created_at text not null
     );
   `);
+  addColumnIfMissing(db, "rooms", "conflict_policy", "text not null default 'keep_both'");
+}
+function addColumnIfMissing(db, table, column, definition) {
+  const columns = db.prepare(`pragma table_info(${table})`).all();
+  if (columns.some((existing) => existing.name === column)) {
+    return;
+  }
+  db.exec(`alter table ${table} add column ${column} ${definition}`);
 }
 
 // ../relay-server/src/db/sqlJsAdapter.ts
@@ -48637,16 +48678,20 @@ var RelayRepository = class {
     });
   }
   createRoom(input) {
+    var _a;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const roomId = createId("room");
+    const conflictPolicy = (_a = input.conflictPolicy) != null ? _a : "keep_both";
     const create = this.db.transaction(() => {
-      var _a;
-      this.db.prepare("insert into rooms(id, name, type, source_path, mount_name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)").run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, now, now);
+      var _a2;
+      this.db.prepare(
+        "insert into rooms(id, name, type, source_path, mount_name, owner_user_id, conflict_policy, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, conflictPolicy, now, now);
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
       );
       for (const capability of input.capabilities) {
-        insertCapability.run(createId("cap"), roomId, capability.pluginId, capability.displayName, capability.mode, (_a = capability.minVersion) != null ? _a : null);
+        insertCapability.run(createId("cap"), roomId, capability.pluginId, capability.displayName, capability.mode, (_a2 = capability.minVersion) != null ? _a2 : null);
       }
       this.audit({
         teamId: null,
@@ -48676,20 +48721,22 @@ var RelayRepository = class {
     return this.db.prepare("select * from room_capabilities where room_id = ? order by id asc").all(roomId);
   }
   updateRoom(input) {
+    var _a;
     const room = this.getRoom(input.roomId);
     if (!room) {
       throw new AppError("NOT_FOUND", "Room not found.", 404);
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    const conflictPolicy = (_a = input.conflictPolicy) != null ? _a : room.conflict_policy;
     const update = this.db.transaction(() => {
-      var _a;
-      this.db.prepare("update rooms set name = ?, type = ?, source_path = ?, mount_name = ?, updated_at = ? where id = ?").run(input.name, input.type, input.sourcePath, input.mountName, now, input.roomId);
+      var _a2;
+      this.db.prepare("update rooms set name = ?, type = ?, source_path = ?, mount_name = ?, conflict_policy = ?, updated_at = ? where id = ?").run(input.name, input.type, input.sourcePath, input.mountName, conflictPolicy, now, input.roomId);
       this.db.prepare("delete from room_capabilities where room_id = ?").run(input.roomId);
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
       );
       for (const capability of input.capabilities) {
-        insertCapability.run(createId("cap"), input.roomId, capability.pluginId, capability.displayName, capability.mode, (_a = capability.minVersion) != null ? _a : null);
+        insertCapability.run(createId("cap"), input.roomId, capability.pluginId, capability.displayName, capability.mode, (_a2 = capability.minVersion) != null ? _a2 : null);
       }
       this.audit({
         teamId: null,
@@ -48849,7 +48896,11 @@ var RelayRepository = class {
         throw new AppError((existing == null ? void 0 : existing.deleted_at) ? "FILE_DELETED" : "NOT_FOUND", (existing == null ? void 0 : existing.deleted_at) ? "The file has been deleted." : "File not found.", 404);
       }
       if (existing.version !== input.baseVersion) {
-        throw this.versionConflict(existing);
+        const room = this.getRoom(input.roomId);
+        const ownerOverride = (room == null ? void 0 : room.conflict_policy) === "owner_wins" && room.owner_user_id === input.actorUserId;
+        if (!ownerOverride) {
+          throw this.versionConflict(existing);
+        }
       }
       const version = existing.version + 1;
       this.db.prepare("update files set version = ?, sha256 = ?, size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?").run(version, sha2562, sizeBytes, input.actorUserId, now, existing.id);
@@ -49869,6 +49920,7 @@ function registerRoomRoutes(app, repo, options = {}) {
         sourcePath: body.sourcePath,
         mountName: body.mountName,
         ownerUserId: principal.userId,
+        conflictPolicy: body.conflictPolicy,
         capabilities: (_a = body.capabilities) != null ? _a : []
       });
       return { room: toRoomResponse(room) };
@@ -49903,6 +49955,7 @@ function registerRoomRoutes(app, repo, options = {}) {
         type: body.type,
         sourcePath: body.sourcePath,
         mountName: body.mountName,
+        conflictPolicy: body.conflictPolicy,
         capabilities: (_a = body.capabilities) != null ? _a : []
       });
       const teamIds = repo.listUserTeams(principal.userId).map((team) => team.teamId);
@@ -50037,7 +50090,8 @@ function toRoomResponse(room) {
     type: room.type,
     sourcePath: room.source_path,
     mountName: room.mount_name,
-    ownerUserId: room.owner_user_id
+    ownerUserId: room.owner_user_id,
+    conflictPolicy: room.conflict_policy
   };
 }
 function requireRoom3(repo, roomId) {
@@ -50056,6 +50110,9 @@ function validateRoomBody(body) {
   }
   if (!isSafeMountName(body.mountName)) {
     throw new AppError("INVALID_PATH", "mountName must be a safe single path segment.", 422);
+  }
+  if (body.conflictPolicy !== void 0 && body.conflictPolicy !== "keep_both" && body.conflictPolicy !== "owner_wins") {
+    throw new AppError("VALIDATION_ERROR", "conflictPolicy must be keep_both or owner_wins.", 422);
   }
 }
 function isSubjectType(value) {
@@ -50896,6 +50953,7 @@ var CreateRoomModal = class extends import_obsidian3.Modal {
     __publicField(this, "mountName", "Projects Demo");
     /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
     __publicField(this, "mountNameTouched", false);
+    __publicField(this, "conflictPolicy", "keep_both");
     __publicField(this, "capabilities", [
       { pluginId: "obsidian-tasks-plugin", displayName: "Tasks", mode: "recommended" },
       { pluginId: "obsidian-kanban", displayName: "Kanban", mode: "recommended" }
@@ -50931,6 +50989,13 @@ var CreateRoomModal = class extends import_obsidian3.Modal {
       (text) => text.setValue(this.mountName).onChange((value) => {
         this.mountName = value.trim();
         this.mountNameTouched = true;
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("When edits conflict").setDesc(
+      "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("keep_both", "Keep both (default)").addOption("owner_wins", "Owner's version always wins").setValue(this.conflictPolicy).onChange((value) => {
+        this.conflictPolicy = value;
       })
     );
     contentEl.createEl("h3", { text: "Plugin capabilities" });
@@ -50982,6 +51047,7 @@ var CreateRoomModal = class extends import_obsidian3.Modal {
             type: this.type,
             sourcePath: this.sourcePath,
             mountName: this.mountName,
+            conflictPolicy: this.conflictPolicy,
             capabilities: this.capabilities.filter((capability) => capability.mode !== "off")
           });
           this.close();
@@ -51218,6 +51284,7 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     __publicField(this, "localMountPath");
     /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
     __publicField(this, "mountNameTouched", false);
+    __publicField(this, "conflictPolicy");
     __publicField(this, "capabilities");
     __publicField(this, "aclRules", []);
     __publicField(this, "subjectType", "team");
@@ -51230,6 +51297,7 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     this.type = room.type;
     this.sourcePath = room.sourcePath;
     this.mountName = room.mountName;
+    this.conflictPolicy = room.conflictPolicy;
     this.localMountPath = (_a = plugin.settings.roomMountPaths[room.id]) != null ? _a : plugin.roomMountPathFor(room);
     this.capabilities = room.capabilities.map((capability) => ({
       pluginId: capability.pluginId,
@@ -51295,6 +51363,13 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
       (this.isOwnRoom() ? "Where this device keeps the room's files. You created this room, so by default it's the source path itself - your existing files stay right where they are, nothing is duplicated." : "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default.") + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
     ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
+    new import_obsidian6.Setting(parent).setName("When edits conflict").setDesc(
+      "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("keep_both", "Keep both (default)").addOption("owner_wins", "Owner's version always wins").setValue(this.conflictPolicy).onChange((value) => {
+        this.conflictPolicy = value;
+      })
+    );
   }
   isOwnRoom() {
     var _a;
@@ -51366,6 +51441,7 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
               type: this.type,
               sourcePath: this.sourcePath,
               mountName: this.mountName,
+              conflictPolicy: this.conflictPolicy,
               capabilities: this.capabilities
             },
             this.localMountPath
@@ -51618,9 +51694,22 @@ var RoomSyncSocket = class {
     __publicField(this, "reconnectDelayMs", MIN_RECONNECT_DELAY_MS);
     __publicField(this, "pendingSubscriptions", /* @__PURE__ */ new Set());
     __publicField(this, "subscribedRooms", /* @__PURE__ */ new Set());
+    __publicField(this, "state", "offline");
+  }
+  getState() {
+    return this.state;
+  }
+  setState(state) {
+    var _a, _b;
+    if (this.state === state) {
+      return;
+    }
+    this.state = state;
+    (_b = (_a = this.deps).onStateChange) == null ? void 0 : _b.call(_a, state);
   }
   connect() {
     this.closedByUser = false;
+    this.setState("connecting");
     this.open();
   }
   disconnect() {
@@ -51633,6 +51722,7 @@ var RoomSyncSocket = class {
     (_a = this.socket) == null ? void 0 : _a.close();
     this.socket = null;
     this.helloAcked = false;
+    this.setState("offline");
   }
   subscribe(roomId) {
     if (this.subscribedRooms.has(roomId)) {
@@ -51666,9 +51756,15 @@ var RoomSyncSocket = class {
     });
     socket.addEventListener("close", () => {
       this.helloAcked = false;
+      for (const roomId of this.subscribedRooms) {
+        this.pendingSubscriptions.add(roomId);
+      }
       this.subscribedRooms.clear();
       if (!this.closedByUser) {
+        this.setState("connecting");
         this.scheduleReconnect();
+      } else {
+        this.setState("offline");
       }
     });
     socket.addEventListener("error", () => {
@@ -51700,6 +51796,7 @@ var RoomSyncSocket = class {
       case "hello_ok": {
         this.helloAcked = true;
         this.reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
+        this.setState("connected");
         for (const roomId of this.pendingSubscriptions) {
           this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
         }
@@ -51708,6 +51805,7 @@ var RoomSyncSocket = class {
       }
       case "hello_error":
       case "revoked": {
+        this.setState("offline");
         this.deps.onRevoked();
         this.disconnect();
         return;
@@ -51954,6 +52052,13 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
   renderConnectionSection(parent) {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
     section.createEl("h3", { text: "Connection" });
+    if (this.plugin.getActiveServer()) {
+      const syncState = this.plugin.getSyncState();
+      const badgeRow = section.createDiv({ cls: "vault-rooms-badge-row" });
+      const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting\u2026" : "Live sync: offline";
+      const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
+      badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    }
     const serverRunning = this.plugin.getServerStatus().running;
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     this.addPanelButton(actions, "Set Up Server", () => this.plugin.openSetupServerModal(), true);
@@ -52131,6 +52236,33 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
         },
         !mounted
       );
+      if (mounted) {
+        this.renderRoomConflicts(item, room.id);
+      }
+    }
+  }
+  renderRoomConflicts(parent, roomId) {
+    const conflicts = this.plugin.listRoomConflicts(roomId);
+    if (conflicts.length === 0) {
+      return;
+    }
+    const section = parent.createDiv({ cls: "vault-rooms-conflict-list" });
+    section.createEl("div", {
+      cls: "vault-rooms-error",
+      text: `${conflicts.length} unresolved conflict${conflicts.length > 1 ? "s" : ""} - a teammate's edit and yours landed at the same time:`
+    });
+    for (const conflict of conflicts) {
+      const row = section.createDiv({ cls: "vault-rooms-conflict-row" });
+      row.createEl("div", { cls: "vault-rooms-room-meta", text: conflict.relativePath });
+      const rowActions = row.createDiv({ cls: "vault-rooms-room-actions" });
+      this.addPanelButton(rowActions, "Keep mine", async () => {
+        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "mine");
+        this.render();
+      });
+      this.addPanelButton(rowActions, "Keep synced version", async () => {
+        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "theirs");
+        this.render();
+      });
     }
   }
   addPanelButton(parent, label, action, cta = false) {
@@ -52185,6 +52317,7 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
     __publicField(this, "watchedRoomStates", /* @__PURE__ */ new WeakSet());
     __publicField(this, "embeddedServer", null);
     __publicField(this, "syncSocket", null);
+    __publicField(this, "syncState", "offline");
   }
   async onload() {
     await this.loadSettings();
@@ -52320,6 +52453,10 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
   getServerStatus() {
     var _a, _b;
     return (_b = (_a = this.embeddedServer) == null ? void 0 : _a.getStatus()) != null ? _b : { running: false };
+  }
+  /** Live-sync WebSocket state - separate from getServerStatus(), which is about *hosting* the embedded server. */
+  getSyncState() {
+    return this.syncState;
   }
   async startEmbeddedServer() {
     const server = this.getOrCreateEmbeddedServer();
@@ -52686,6 +52823,49 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     return (_a = this.settings.mountedRooms[roomId]) == null ? void 0 : _a.mountPath;
   }
   /**
+   * Conflict copies are local-only files (see isConflictCopyPath - they're never pushed or
+   * synced), so finding them is a plain local file-listing scan, not a server call. Used to
+   * render a "Resolve" list per mounted room instead of leaving people to sort them out by hand
+   * in the file explorer.
+   */
+  listRoomConflicts(roomId) {
+    const mountPath = this.mountedPathFor(roomId);
+    if (!mountPath) {
+      return [];
+    }
+    const prefix = mountPath.replace(/\/+$/, "");
+    const conflicts = [];
+    for (const file of this.app.vault.getFiles()) {
+      const path = file.path;
+      if (path !== prefix && !path.startsWith(`${prefix}/`)) {
+        continue;
+      }
+      if (!isConflictCopyPath(path)) {
+        continue;
+      }
+      const canonical = canonicalPathForConflictCopy(path);
+      if (!canonical) {
+        continue;
+      }
+      conflicts.push({
+        relativePath: canonical.slice(prefix.length + 1),
+        conflictRelativePath: path.slice(prefix.length + 1)
+      });
+    }
+    return conflicts;
+  }
+  async resolveRoomConflict(roomId, relativePath, conflictRelativePath, keep) {
+    const server = this.requireActiveServer();
+    const roomState = this.settings.mountedRooms[roomId];
+    if (!roomState) {
+      throw new Error("Room is not mounted.");
+    }
+    await this.syncEngine.resolveConflict(roomState, relativePath, conflictRelativePath, keep, server.deviceName);
+    await this.saveSettings();
+    this.renderOpenRoomsViews();
+    new import_obsidian9.Notice(keep === "mine" ? "Kept your version and re-synced it." : "Kept the synced version and removed your local copy.");
+  }
+  /**
    * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
    * folder) - there's nothing to "download," their files already live there, so a separate copy
    * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
@@ -52736,22 +52916,33 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       return;
     }
     this.watchedRoomStates.add(roomState);
+    const pendingTimers = /* @__PURE__ */ new Map();
+    const pushChains = /* @__PURE__ */ new Map();
     registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
       if (this.settings.mountedRooms[roomId] !== roomState) {
         return;
       }
-      window.setTimeout(() => {
+      if (event.type === "delete") {
+        return;
+      }
+      const existingTimer = pendingTimers.get(relativePath);
+      if (existingTimer !== void 0) {
+        window.clearTimeout(existingTimer);
+      }
+      const timer = window.setTimeout(() => {
+        var _a;
+        pendingTimers.delete(relativePath);
         if (this.settings.mountedRooms[roomId] !== roomState) {
           return;
         }
-        if (event.type === "delete") {
-          return;
-        }
-        void this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName).then(() => this.saveSettings()).catch((error) => {
+        const previous = (_a = pushChains.get(relativePath)) != null ? _a : Promise.resolve();
+        const next = previous.catch(() => void 0).then(() => this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName)).then(() => this.saveSettings()).catch((error) => {
           console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
           new import_obsidian9.Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
         });
+        pushChains.set(relativePath, next);
       }, this.settings.debounceMs);
+      pendingTimers.set(relativePath, timer);
     });
   }
   /**
@@ -52765,15 +52956,21 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     var _a;
     (_a = this.syncSocket) == null ? void 0 : _a.disconnect();
     this.syncSocket = null;
+    this.syncState = "offline";
     const server = this.getActiveServer();
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787"));
     if (!server) {
+      this.renderOpenRoomsViews();
       return;
     }
     const socket = new RoomSyncSocket(server, {
       getMountedRoom: (roomId) => this.settings.mountedRooms[roomId],
       getApi: () => this.apiFor(server),
       syncEngine: this.syncEngine,
+      onStateChange: (state) => {
+        this.syncState = state;
+        this.renderOpenRoomsViews();
+      },
       onApplied: () => {
         void this.saveSettings();
         this.renderOpenRoomsViews();

@@ -64,6 +64,17 @@ export function isConflictCopyPath(path: string): boolean {
   return /\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?\.[^/]+$/.test(path);
 }
 
+const CONFLICT_SUFFIX = /\s\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?(?=\.[^/]+$)/;
+
+/** Reverses createConflictCopyPath()'s naming: strips the inserted "(conflict ...)" suffix to get
+ *  back the canonical path this conflict copy forked from. Returns null for a non-conflict path. */
+export function canonicalPathForConflictCopy(path: string): string | null {
+  if (!isConflictCopyPath(path)) {
+    return null;
+  }
+  return path.replace(CONFLICT_SUFFIX, "");
+}
+
 export class VaultSyncEngine {
   constructor(
     private readonly vault: VaultAdapter,
@@ -175,6 +186,32 @@ export class VaultSyncEngine {
       }
       throw error;
     }
+  }
+
+  /**
+   * Resolves a local conflict copy against its canonical file. Conflict copies never sync (see
+   * isConflictCopyPath checks above) - they're purely a local safety net - so this only ever
+   * touches files on this one device:
+   * - "mine": overwrite the canonical file with the conflict copy's content and push it as a new
+   *   version, then remove the now-redundant conflict copy.
+   * - "theirs": keep the canonical file as-is (it already holds the version that won) and just
+   *   remove the conflict copy.
+   */
+  async resolveConflict(room: MountedRoomState, relativePath: string, conflictRelativePath: string, keep: "mine" | "theirs", deviceName: string): Promise<void> {
+    const conflictPath = mountedPath(room, conflictRelativePath);
+    if (keep === "theirs") {
+      if (await this.vault.exists(conflictPath)) {
+        await this.vault.delete(conflictPath);
+      }
+      return;
+    }
+    const path = mountedPath(room, relativePath);
+    const conflictContent = await this.readContent(conflictPath, relativePath);
+    await this.writeContent(path, relativePath, conflictContent);
+    if (await this.vault.exists(conflictPath)) {
+      await this.vault.delete(conflictPath);
+    }
+    await this.pushLocalChange(room, relativePath, deviceName);
   }
 }
 

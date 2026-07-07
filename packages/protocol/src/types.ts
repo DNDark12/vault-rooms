@@ -5,6 +5,17 @@ export type AclEffect = "allow" | "deny";
 export type CapabilityMode = "required" | "recommended" | "optional";
 export type FileKind = "file" | "folder";
 export type ContentType = "markdown" | "text" | "binary";
+/**
+ * How a room resolves a write that lands on a stale version:
+ * - "keep_both" (default): reject the stale write (VERSION_CONFLICT) - the pusher's device forks
+ *   it into a local-only conflict copy instead of losing it. Safe for anything, but a file that
+ *   autosaves very frequently (e.g. a drawing) can fork often if two devices edit it around the
+ *   same time.
+ * - "owner_wins": the room owner's writes are always accepted, even against a stale baseVersion -
+ *   good for frequently-autosaving files owned by one person, where forking on every save is more
+ *   annoying than useful. Non-owner writes still follow "keep_both" against each other.
+ */
+export type ConflictPolicy = "keep_both" | "owner_wins";
 
 export type Permission =
   | "room:read"

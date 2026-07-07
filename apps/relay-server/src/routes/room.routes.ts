@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, type CapabilityMode, type Permission, type SubjectType } from "@vault-rooms/protocol";
+import { AppError, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
 import { evaluatePolicy, expandPreset } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageRoom } from "../db/repositories/relayRepository.js";
@@ -32,6 +32,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       type: "file" | "folder";
       sourcePath: string;
       mountName: string;
+      conflictPolicy: ConflictPolicy;
       capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
     }>;
     validateRoomBody(body);
@@ -43,6 +44,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         sourcePath: body.sourcePath!,
         mountName: body.mountName!,
         ownerUserId: principal.userId,
+        conflictPolicy: body.conflictPolicy,
         capabilities: body.capabilities ?? []
       });
       return { room: toRoomResponse(room) };
@@ -78,6 +80,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       type: "file" | "folder";
       sourcePath: string;
       mountName: string;
+      conflictPolicy: ConflictPolicy;
       capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
     }>;
     validateRoomBody(body);
@@ -90,6 +93,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         type: body.type!,
         sourcePath: body.sourcePath!,
         mountName: body.mountName!,
+        conflictPolicy: body.conflictPolicy,
         capabilities: body.capabilities ?? []
       });
       const teamIds = repo.listUserTeams(principal.userId).map((team) => team.teamId);
@@ -239,7 +243,8 @@ function toRoomResponse(room: RoomRow) {
     type: room.type,
     sourcePath: room.source_path,
     mountName: room.mount_name,
-    ownerUserId: room.owner_user_id
+    ownerUserId: room.owner_user_id,
+    conflictPolicy: room.conflict_policy
   };
 }
 
@@ -251,7 +256,7 @@ function requireRoom(repo: RelayRepository, roomId: string): RoomRow {
   return room;
 }
 
-function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder"; sourcePath: string; mountName: string }>): void {
+function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder"; sourcePath: string; mountName: string; conflictPolicy: ConflictPolicy }>): void {
   if (!body.name || !body.type || !body.sourcePath || !body.mountName) {
     throw new AppError("VALIDATION_ERROR", "name, type, sourcePath, and mountName are required.", 422);
   }
@@ -260,6 +265,9 @@ function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder";
   }
   if (!isSafeMountName(body.mountName)) {
     throw new AppError("INVALID_PATH", "mountName must be a safe single path segment.", 422);
+  }
+  if (body.conflictPolicy !== undefined && body.conflictPolicy !== "keep_both" && body.conflictPolicy !== "owner_wins") {
+    throw new AppError("VALIDATION_ERROR", "conflictPolicy must be keep_both or owner_wins.", 422);
   }
 }
 

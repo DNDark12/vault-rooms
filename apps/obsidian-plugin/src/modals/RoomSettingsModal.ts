@@ -34,6 +34,7 @@ export class RoomSettingsModal extends Modal {
   private localMountPath: string;
   /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
   private mountNameTouched = false;
+  private conflictPolicy: "keep_both" | "owner_wins";
   private capabilities: CapabilityDraft[];
   private aclRules: AclRuleSummary[] = [];
   private subjectType: "team" | "user" | "device" | "agent" = "team";
@@ -52,6 +53,7 @@ export class RoomSettingsModal extends Modal {
     this.type = room.type;
     this.sourcePath = room.sourcePath;
     this.mountName = room.mountName;
+    this.conflictPolicy = room.conflictPolicy;
     this.localMountPath = plugin.settings.roomMountPaths[room.id] ?? plugin.roomMountPathFor(room);
     this.capabilities = room.capabilities.map((capability) => ({
       pluginId: capability.pluginId,
@@ -136,6 +138,20 @@ export class RoomSettingsModal extends Modal {
           (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
       )
       .addText((text) => text.setValue(this.localMountPath).onChange((value) => (this.localMountPath = value.trim())));
+    new Setting(parent)
+      .setName("When edits conflict")
+      .setDesc(
+        "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("keep_both", "Keep both (default)")
+          .addOption("owner_wins", "Owner's version always wins")
+          .setValue(this.conflictPolicy)
+          .onChange((value) => {
+            this.conflictPolicy = value as "keep_both" | "owner_wins";
+          })
+      );
   }
 
   private isOwnRoom(): boolean {
@@ -214,6 +230,7 @@ export class RoomSettingsModal extends Modal {
               type: this.type,
               sourcePath: this.sourcePath,
               mountName: this.mountName,
+              conflictPolicy: this.conflictPolicy,
               capabilities: this.capabilities
             },
             this.localMountPath

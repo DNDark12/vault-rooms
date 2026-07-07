@@ -11,6 +11,7 @@ export class CreateRoomModal extends Modal {
   private mountName = "Projects Demo";
   /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
   private mountNameTouched = false;
+  private conflictPolicy: "keep_both" | "owner_wins" = "keep_both";
   private capabilities = [
     { pluginId: "obsidian-tasks-plugin", displayName: "Tasks", mode: "recommended" },
     { pluginId: "obsidian-kanban", displayName: "Kanban", mode: "recommended" }
@@ -58,6 +59,20 @@ export class CreateRoomModal extends Modal {
           this.mountName = value.trim();
           this.mountNameTouched = true;
         })
+      );
+    new Setting(contentEl)
+      .setName("When edits conflict")
+      .setDesc(
+        "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("keep_both", "Keep both (default)")
+          .addOption("owner_wins", "Owner's version always wins")
+          .setValue(this.conflictPolicy)
+          .onChange((value) => {
+            this.conflictPolicy = value as "keep_both" | "owner_wins";
+          })
       );
     contentEl.createEl("h3", { text: "Plugin capabilities" });
     contentEl.createEl("p", {
@@ -115,6 +130,7 @@ export class CreateRoomModal extends Modal {
             type: this.type,
             sourcePath: this.sourcePath,
             mountName: this.mountName,
+            conflictPolicy: this.conflictPolicy,
             capabilities: this.capabilities.filter((capability) => capability.mode !== "off")
           });
           this.close();

@@ -462,14 +462,18 @@ export class RelayRepository {
     sourcePath: string;
     mountName: string;
     ownerUserId: string;
+    conflictPolicy?: "keep_both" | "owner_wins";
     capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
   }): RoomRow {
     const now = new Date().toISOString();
     const roomId = createId("room");
+    const conflictPolicy = input.conflictPolicy ?? "keep_both";
     const create = this.db.transaction(() => {
       this.db
-        .prepare("insert into rooms(id, name, type, source_path, mount_name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, now, now);
+        .prepare(
+          "insert into rooms(id, name, type, source_path, mount_name, owner_user_id, conflict_policy, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, conflictPolicy, now, now);
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
       );
@@ -513,6 +517,7 @@ export class RelayRepository {
     type: "file" | "folder";
     sourcePath: string;
     mountName: string;
+    conflictPolicy?: "keep_both" | "owner_wins";
     capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
   }): RoomRow {
     const room = this.getRoom(input.roomId);
@@ -520,10 +525,11 @@ export class RelayRepository {
       throw new AppError("NOT_FOUND", "Room not found.", 404);
     }
     const now = new Date().toISOString();
+    const conflictPolicy = input.conflictPolicy ?? room.conflict_policy;
     const update = this.db.transaction(() => {
       this.db
-        .prepare("update rooms set name = ?, type = ?, source_path = ?, mount_name = ?, updated_at = ? where id = ?")
-        .run(input.name, input.type, input.sourcePath, input.mountName, now, input.roomId);
+        .prepare("update rooms set name = ?, type = ?, source_path = ?, mount_name = ?, conflict_policy = ?, updated_at = ? where id = ?")
+        .run(input.name, input.type, input.sourcePath, input.mountName, conflictPolicy, now, input.roomId);
       this.db.prepare("delete from room_capabilities where room_id = ?").run(input.roomId);
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
@@ -714,7 +720,16 @@ export class RelayRepository {
         throw new AppError(existing?.deleted_at ? "FILE_DELETED" : "NOT_FOUND", existing?.deleted_at ? "The file has been deleted." : "File not found.", 404);
       }
       if (existing.version !== input.baseVersion) {
-        throw this.versionConflict(existing);
+        const room = this.getRoom(input.roomId);
+        const ownerOverride = room?.conflict_policy === "owner_wins" && room.owner_user_id === input.actorUserId;
+        if (!ownerOverride) {
+          throw this.versionConflict(existing);
+        }
+        // "owner_wins": the owner's write always becomes canonical, even though it raced in
+        // behind someone else's edit - fall through and apply it on top of the file's *actual*
+        // current version instead of rejecting it, so the owner isn't the one who gets forked
+        // into a conflict copy on their own device just because another device's write landed
+        // a moment earlier.
       }
 
       const version = existing.version + 1;

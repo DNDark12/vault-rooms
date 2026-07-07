@@ -4,6 +4,8 @@ import type { ServerConnection } from "./settings.js";
 import type { MountedRoomState } from "./syncClient.js";
 import { VaultSyncEngine } from "./syncClient.js";
 
+export type SyncConnectionState = "connected" | "connecting" | "offline";
+
 export type RoomSyncSocketDeps = {
   getMountedRoom: (roomId: string) => MountedRoomState | undefined;
   getApi: () => RelayApiClient;
@@ -15,6 +17,8 @@ export type RoomSyncSocketDeps = {
   onRoomDeleted: (roomId: string) => void;
   /** Called when this device's grant to a still-existing room is revoked (e.g. removed from the team that granted it). */
   onAccessRevoked: (roomId: string) => void;
+  /** Called whenever the live-sync connection state changes, so the panel can show it. */
+  onStateChange?: (state: SyncConnectionState) => void;
 };
 
 const MIN_RECONNECT_DELAY_MS = 1000;
@@ -34,14 +38,28 @@ export class RoomSyncSocket {
   private reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
   private readonly pendingSubscriptions = new Set<string>();
   private readonly subscribedRooms = new Set<string>();
+  private state: SyncConnectionState = "offline";
 
   constructor(
     private readonly server: ServerConnection,
     private readonly deps: RoomSyncSocketDeps
   ) {}
 
+  getState(): SyncConnectionState {
+    return this.state;
+  }
+
+  private setState(state: SyncConnectionState): void {
+    if (this.state === state) {
+      return;
+    }
+    this.state = state;
+    this.deps.onStateChange?.(state);
+  }
+
   connect(): void {
     this.closedByUser = false;
+    this.setState("connecting");
     this.open();
   }
 
@@ -54,6 +72,7 @@ export class RoomSyncSocket {
     this.socket?.close();
     this.socket = null;
     this.helloAcked = false;
+    this.setState("offline");
   }
 
   subscribe(roomId: string): void {
@@ -89,9 +108,20 @@ export class RoomSyncSocket {
     });
     socket.addEventListener("close", () => {
       this.helloAcked = false;
+      // Re-queue whatever was subscribed so the next successful hello resubscribes it. Without
+      // this, an automatic reconnect (server restart, brief network drop) re-established the
+      // socket and said hello, but every room silently stopped getting real-time updates forever
+      // after - pendingSubscriptions was already drained from the first connect, and nothing ever
+      // refilled it.
+      for (const roomId of this.subscribedRooms) {
+        this.pendingSubscriptions.add(roomId);
+      }
       this.subscribedRooms.clear();
       if (!this.closedByUser) {
+        this.setState("connecting");
         this.scheduleReconnect();
+      } else {
+        this.setState("offline");
       }
     });
     // Connection failures always also fire "close" (per the WebSocket spec), which is what
@@ -129,6 +159,7 @@ export class RoomSyncSocket {
       case "hello_ok": {
         this.helloAcked = true;
         this.reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
+        this.setState("connected");
         for (const roomId of this.pendingSubscriptions) {
           this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
         }
@@ -137,6 +168,7 @@ export class RoomSyncSocket {
       }
       case "hello_error":
       case "revoked": {
+        this.setState("offline");
         this.deps.onRevoked();
         this.disconnect();
         return;

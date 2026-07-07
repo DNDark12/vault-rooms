@@ -148,4 +148,59 @@ describe("file REST API", () => {
     expect(oversized.statusCode).toBe(413);
     expect(oversized.json().error.code).toBe("FILE_TOO_LARGE");
   });
+
+  it("lets the owner's writes win on conflict when the room's conflictPolicy is owner_wins", async () => {
+    const { app, owner, member, room } = await setupFileFlow();
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/rooms/${room.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: room.name, type: room.type, sourcePath: room.sourcePath, mountName: room.mountName, conflictPolicy: "owner_wins", capabilities: [] }
+    });
+
+    const created = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "Drawing.excalidraw", baseVersion: 0, content: "v1" }
+    });
+    expect(created.json()).toMatchObject({ version: 1 });
+
+    // Member races ahead first (normal conflict rules still apply to non-owners).
+    const memberWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${member.deviceToken}` },
+      payload: { relativePath: "Drawing.excalidraw", baseVersion: 1, content: "member edit" }
+    });
+    expect(memberWrite.json()).toMatchObject({ version: 2 });
+
+    // Owner's push still thinks the base version is 1 (stale) - with keep_both this would 409.
+    const ownerWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "Drawing.excalidraw", baseVersion: 1, content: "owner edit" }
+    });
+    expect(ownerWrite.statusCode).toBe(200);
+    expect(ownerWrite.json()).toMatchObject({ version: 3 });
+
+    const readBack = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=Drawing.excalidraw`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(readBack.json()).toMatchObject({ version: 3, content: "owner edit" });
+
+    // A stale non-owner write is still rejected even under owner_wins.
+    const memberStale = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${member.deviceToken}` },
+      payload: { relativePath: "Drawing.excalidraw", baseVersion: 2, content: "stale member edit" }
+    });
+    expect(memberStale.statusCode).toBe(409);
+    expect(memberStale.json().error.code).toBe("VERSION_CONFLICT");
+  });
 });

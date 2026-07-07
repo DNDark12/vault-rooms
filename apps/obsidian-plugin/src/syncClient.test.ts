@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createConflictCopyPath, mountPathForRoom, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
+import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
@@ -181,5 +181,49 @@ describe("plugin sync core", () => {
     await engine.applyRemoteChange(room, { relativePath: "cover.png", version: 2, sha256: "png-2", content: pushedContent! }, "B laptop");
     const roundTripped = new Uint8Array(await vault.readBinary("Vault Rooms/demo/Projects Demo/cover.png"));
     expect([...roundTripped]).toEqual([...pngBytes]);
+  });
+
+  it("derives the canonical path a conflict copy forked from", () => {
+    expect(canonicalPathForConflictCopy("Vault Rooms/demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe("Vault Rooms/demo/Board.md");
+    expect(canonicalPathForConflictCopy("Vault Rooms/demo/Board (conflict B laptop 2026-07-06T120000) 2.md")).toBe("Vault Rooms/demo/Board.md");
+    expect(canonicalPathForConflictCopy("Vault Rooms/demo/Board.md")).toBeNull();
+  });
+
+  it("resolves a conflict by keeping the local conflict copy and re-syncing it", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api, () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: { "Board.md": { serverVersion: 4, serverSha256: "server-4", localSha256: "server-4", dirty: false } }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# server wins\n");
+    await vault.write("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md", "# my draft\n");
+    api.nextWrite = { ok: true, relativePath: "Board.md", version: 5, sha256: "sha-mine" };
+
+    await engine.resolveConflict(room, "Board.md", "Board (conflict B laptop 2026-07-06T120000).md", "mine", "B laptop");
+
+    expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# my draft\n");
+    expect(await vault.exists("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe(false);
+    expect(api.writes[0]).toMatchObject({ relativePath: "Board.md", baseVersion: 4, content: "# my draft\n" });
+    expect(room.files["Board.md"]).toMatchObject({ serverVersion: 5, serverSha256: "sha-mine" });
+  });
+
+  it("resolves a conflict by discarding the local conflict copy", async () => {
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: { "Board.md": { serverVersion: 4, serverSha256: "server-4", localSha256: "server-4", dirty: false } }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# server wins\n");
+    await vault.write("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md", "# my draft\n");
+
+    await engine.resolveConflict(room, "Board.md", "Board (conflict B laptop 2026-07-06T120000).md", "theirs", "B laptop");
+
+    expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# server wins\n");
+    expect(await vault.exists("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe(false);
   });
 });

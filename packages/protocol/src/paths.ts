@@ -1,7 +1,9 @@
 import { AppError } from "./errors.js";
 
 const DRIVE_LETTER = /^[a-zA-Z]:[\\/]/;
-const ELIGIBLE_EXTENSIONS = new Set([".md", ".txt", ".canvas", ".json", ".csv"]);
+// `.excalidraw` is the legacy Excalidraw-for-Obsidian format: plain JSON text, same as `.canvas`
+// (newer Excalidraw versions save as `.excalidraw.md`, which is already covered by `.md` below).
+const ELIGIBLE_EXTENSIONS = new Set([".md", ".txt", ".canvas", ".json", ".csv", ".excalidraw"]);
 // Images and other binary assets a note might embed (drawings, exported previews, PDFs). These
 // are synced as base64 text over the same content field - see VaultSyncEngine's readBinary/
 // writeBinary handling on the client, which is the only place that cares about this distinction.

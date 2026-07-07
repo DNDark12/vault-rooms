@@ -107,6 +107,14 @@ export class VaultRoomsView extends ItemView {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
     section.createEl("h3", { text: "Connection" });
 
+    if (this.plugin.getActiveServer()) {
+      const syncState = this.plugin.getSyncState();
+      const badgeRow = section.createDiv({ cls: "vault-rooms-badge-row" });
+      const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting…" : "Live sync: offline";
+      const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
+      badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    }
+
     const serverRunning = this.plugin.getServerStatus().running;
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     this.addPanelButton(actions, "Set Up Server", () => this.plugin.openSetupServerModal(), true);
@@ -301,6 +309,34 @@ export class VaultRoomsView extends ItemView {
         },
         !mounted
       );
+      if (mounted) {
+        this.renderRoomConflicts(item, room.id);
+      }
+    }
+  }
+
+  private renderRoomConflicts(parent: HTMLElement, roomId: string): void {
+    const conflicts = this.plugin.listRoomConflicts(roomId);
+    if (conflicts.length === 0) {
+      return;
+    }
+    const section = parent.createDiv({ cls: "vault-rooms-conflict-list" });
+    section.createEl("div", {
+      cls: "vault-rooms-error",
+      text: `${conflicts.length} unresolved conflict${conflicts.length > 1 ? "s" : ""} - a teammate's edit and yours landed at the same time:`
+    });
+    for (const conflict of conflicts) {
+      const row = section.createDiv({ cls: "vault-rooms-conflict-row" });
+      row.createEl("div", { cls: "vault-rooms-room-meta", text: conflict.relativePath });
+      const rowActions = row.createDiv({ cls: "vault-rooms-room-actions" });
+      this.addPanelButton(rowActions, "Keep mine", async () => {
+        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "mine");
+        this.render();
+      });
+      this.addPanelButton(rowActions, "Keep synced version", async () => {
+        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "theirs");
+        this.render();
+      });
     }
   }
 

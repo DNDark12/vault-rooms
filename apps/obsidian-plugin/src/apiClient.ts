@@ -7,6 +7,7 @@ export type RoomSummary = {
   sourcePath: string;
   mountName: string;
   ownerUserId: string;
+  conflictPolicy: "keep_both" | "owner_wins";
   permissions: string[];
   capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string; installed: boolean | null }>;
 };
@@ -163,6 +164,7 @@ export class RelayApiClient implements RelayFileApi {
     type: "file" | "folder";
     sourcePath: string;
     mountName: string;
+    conflictPolicy?: "keep_both" | "owner_wins";
     capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
   }) {
     return this.request("/api/rooms", {
@@ -173,7 +175,14 @@ export class RelayApiClient implements RelayFileApi {
 
   async updateRoom(
     roomId: string,
-    input: { name: string; type: "file" | "folder"; sourcePath: string; mountName: string; capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }> }
+    input: {
+      name: string;
+      type: "file" | "folder";
+      sourcePath: string;
+      mountName: string;
+      conflictPolicy?: "keep_both" | "owner_wins";
+      capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
+    }
   ): Promise<{ room: RoomSummary }> {
     return this.request(`/api/rooms/${roomId}`, {
       method: "PATCH",

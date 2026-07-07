@@ -54,6 +54,7 @@ export type RoomRow = {
   source_path: string;
   mount_name: string;
   owner_user_id: string;
+  conflict_policy: "keep_both" | "owner_wins";
   created_at: string;
   updated_at: string;
 };

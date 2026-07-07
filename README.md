@@ -59,9 +59,16 @@ One caveat: this reconciliation runs when you mount/re-mount a room or reconnect
 
 ## Concurrency model
 
-Concurrent edits to the same file are "first save wins"; the other editor gets a conflict copy. Character-level co-editing arrives with CRDT in v0.2.
+Concurrent edits to the same file are "first save wins"; the losing device gets a **local-only** conflict copy (never pushed or synced - it only exists on the device that lost the race) instead of losing the edit outright. Character-level co-editing arrives with CRDT in v0.2.
 
 The server uses compare-and-swap file versions. Semantic MCP tools read the latest file, apply a pure Markdown operation, and retry once on version conflict.
+
+Two things soften "first save wins" for files that autosave very frequently (a drawing plugin can resave on every stroke), where forking on every near-simultaneous save is more annoying than useful:
+
+- **Debounce coalescing.** Rapid successive local edits to the same file are coalesced into a single push per `debounceMs` window instead of firing one independent push per change - this also serializes overlapping pushes for the same file so a fast-autosaving file can't race against and version-conflict with its own earlier, still-in-flight push.
+- **Per-room conflict policy** (Room Settings → "When edits conflict"): the default, **Keep both**, is what's described above. **Owner's version always wins** makes the room owner's writes always become canonical, even if they land a moment behind someone else's edit - non-owner writes still follow "Keep both" against each other.
+
+Whenever a local conflict copy does exist, the Rooms panel lists it under the mounted room with **Keep mine** (push your version as the new canonical one) and **Keep synced version** (discard your local copy) - no need to sort it out by hand in the file explorer.
 
 ## Sync latency: how fast does a teammate's edit show up?
 
@@ -69,7 +76,7 @@ This is not character-level realtime (no shared cursor, no live keystrokes) - th
 
 - **Push side (debounced, not per-keystroke).** When you edit a mounted file, the plugin waits for `debounceMs` (Settings → Vault Rooms → Sync, default **750ms**) of no further local writes to that file before pushing it to the relay. This avoids pushing a partial file on every keystroke while still keeping the delay small and predictable - not "no delay," but not "wait for a manual sync" either.
 - **Pull side (live, not polled).** Every mounted room keeps an open WebSocket subscription to the relay. The moment the relay accepts a write (from REST push or another device's WebSocket push), it broadcasts the change to every other subscribed device immediately - there is no polling interval on this side. Combined with the push-side debounce, a teammate's edit typically lands on your machine well under a second after they stop typing.
-- **Reconnect catch-up.** If your Obsidian was closed or the connection dropped, reconnecting re-subscribes to each mounted room and reconciles against a fresh snapshot from the server, so you don't miss changes made while you were offline.
+- **Reconnect catch-up.** If your Obsidian was closed, the connection dropped, or the host restarted its server, the plugin automatically reconnects (with backoff) and re-subscribes to every previously-mounted room, then reconciles against a fresh snapshot from the server - you don't need to manually remount or reload Obsidian to start receiving live updates again. The Rooms panel's "Connection" section shows a live badge (connected / reconnecting / offline) so you can tell at a glance whether you're actually getting real-time updates right now.
 - **No ping-pong.** Applying a remote change updates the local file's known server version/hash, so the local file watcher recognizes the resulting "modify" event as already-in-sync and does not push it back.
 
 ## Plugin capability model
@@ -199,7 +206,7 @@ Before submitting to the Obsidian Community directory:
 
 - No TLS; trusted LAN only.
 - No cloud relay, NAT traversal, or mobile support.
-- Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, plus common images (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.svg`) and `.pdf`. Other binary formats (audio, video, Office docs, etc.) aren't synced yet - edits to those files won't reach teammates. Images/PDFs are base64-encoded for transport, so they count against the max file size at roughly 1.33x their real size on disk.
+- Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw` (legacy Excalidraw format - newer `.excalidraw.md` files are already covered by Markdown), plus common images (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.svg`) and `.pdf`. Other binary formats (audio, video, Office docs, etc.) aren't synced yet - edits to those files won't reach teammates. Images/PDFs are base64-encoded for transport, so they count against the max file size at roughly 1.33x their real size on disk.
 - No guaranteed deletion of already-synced collaborator copies (this applies to member revocation and room/team deletion alike - see "Deleting rooms/teams and removing access").
 - No character-level co-editing (edits sync as whole-file pushes, debounced - see "Sync latency" above).
 - Rename is delete plus create.
