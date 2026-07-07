@@ -1,6 +1,6 @@
 import type { SyncClientMessage, SyncServerMessage } from "@vault-rooms/protocol";
 import type { RelayApiClient } from "./apiClient.js";
-import type { RelayServerConfig } from "./settings.js";
+import type { ServerConnection } from "./settings.js";
 import type { MountedRoomState } from "./syncClient.js";
 import { VaultSyncEngine } from "./syncClient.js";
 
@@ -13,6 +13,8 @@ export type RoomSyncSocketDeps = {
   onRevoked: () => void;
   /** Called when the owner/admin deletes a room that this device has mounted or subscribed to. */
   onRoomDeleted: (roomId: string) => void;
+  /** Called when this device's grant to a still-existing room is revoked (e.g. removed from the team that granted it). */
+  onAccessRevoked: (roomId: string) => void;
 };
 
 const MIN_RECONNECT_DELAY_MS = 1000;
@@ -34,7 +36,7 @@ export class RoomSyncSocket {
   private readonly subscribedRooms = new Set<string>();
 
   constructor(
-    private readonly server: RelayServerConfig,
+    private readonly server: ServerConnection,
     private readonly deps: RoomSyncSocketDeps
   ) {}
 
@@ -169,6 +171,11 @@ export class RoomSyncSocket {
       case "room_deleted": {
         this.subscribedRooms.delete(message.roomId);
         this.deps.onRoomDeleted(message.roomId);
+        return;
+      }
+      case "room_access_revoked": {
+        this.subscribedRooms.delete(message.roomId);
+        this.deps.onAccessRevoked(message.roomId);
         return;
       }
       default:

@@ -4,7 +4,7 @@ import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { getActivePrincipal } from "../services/authService.js";
 
 export function registerAuthRoutes(app: FastifyInstance, repo: RelayRepository): void {
-  app.post("/api/join", async (request, reply) => {
+  app.post("/api/join", async (request) => {
     const body = request.body as Partial<{ inviteToken: string; displayName: string; deviceName: string }>;
     if (!body.inviteToken || !body.displayName || !body.deviceName) {
       throw new AppError("VALIDATION_ERROR", "inviteToken, displayName, and deviceName are required.", 422);
@@ -20,12 +20,31 @@ export function registerAuthRoutes(app: FastifyInstance, repo: RelayRepository):
     }
   });
 
+  app.post("/api/invites/accept", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const body = request.body as Partial<{ inviteToken: string }>;
+    if (!body.inviteToken) {
+      throw new AppError("VALIDATION_ERROR", "inviteToken is required.", 422);
+    }
+    try {
+      return repo.acceptInvite({ inviteToken: body.inviteToken, userId: principal.userId });
+    } catch {
+      throw new AppError("UNAUTHORIZED", "Invalid or expired invite.", 401);
+    }
+  });
+
   app.get("/api/me", async (request: FastifyRequest) => {
     const principal = getActivePrincipal(repo, request);
     return {
-      team: { id: principal.teamId, name: principal.teamName },
-      user: { id: principal.userId, displayName: principal.userDisplayName, role: principal.role },
-      device: { id: principal.deviceId, displayName: principal.deviceDisplayName }
+      user: { id: principal.userId, displayName: principal.userDisplayName },
+      device: { id: principal.deviceId, displayName: principal.deviceDisplayName },
+      isServerOwner: principal.isServerOwner,
+      teams: repo.listUserTeams(principal.userId).map((team) => ({
+        id: team.teamId,
+        name: team.name,
+        slug: team.slug,
+        role: team.role
+      }))
     };
   });
 }

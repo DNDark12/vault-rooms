@@ -7,6 +7,7 @@ import { RelayRepository } from "./db/repositories/relayRepository.js";
 import { registerAgentRoutes } from "./routes/agent.routes.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
 import { registerFileRoutes } from "./routes/file.routes.js";
+import { registerFriendRoutes } from "./routes/friend.routes.js";
 import { registerMcpRoutes } from "./routes/mcp.routes.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
@@ -67,6 +68,7 @@ export async function createApp(options: CreateAppOptions = {}) {
     connectionRegistry
   });
   registerRoomRoutes(app, repo, { connectionRegistry });
+  registerFriendRoutes(app, repo, { connectionRegistry });
   registerAgentRoutes(app, repo);
   registerFileRoutes(app, repo, {
     maxFileBytes,

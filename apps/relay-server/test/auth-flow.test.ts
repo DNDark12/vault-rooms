@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 
-describe("team bootstrap and invite flow", () => {
-  it("bootstraps locally, invites B, joins B, and lists members", async () => {
+describe("server bootstrap and invite flow", () => {
+  it("bootstraps locally once, invites B, joins B, and lists members", async () => {
     const app = await createApp({
       dbPath: ":memory:",
       publicUrl: "http://192.168.1.10:8788",
@@ -11,31 +11,42 @@ describe("team bootstrap and invite flow", () => {
 
     const remoteBootstrap = await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "192.168.1.50",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
     });
     expect(remoteBootstrap.statusCode).toBe(403);
 
     const bootstrap = await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "127.0.0.1",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
     });
     expect(bootstrap.statusCode).toBe(200);
     const owner = bootstrap.json();
+    expect(owner.isServerOwner).toBe(true);
     expect(owner.team.slug).toBe("demo");
     expect(owner.deviceToken).toMatch(/^tr_dev_/);
 
+    // Bootstrap is first-owner-wins: once server_meta.owner_user_id is set, a second bootstrap
+    // call is rejected instead of creating a second server owner.
     const secondBootstrap = await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "127.0.0.1",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A2", deviceName: "A2 laptop", teamName: "Demo" }
     });
-    expect(secondBootstrap.statusCode).toBe(200);
-    expect(secondBootstrap.json().team.slug).toBe("demo-2");
+    expect(secondBootstrap.statusCode).toBe(403);
+
+    const duplicateTeam = await app.inject({
+      method: "POST",
+      url: "/api/teams",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Demo" }
+    });
+    expect(duplicateTeam.statusCode).toBe(200);
+    expect(duplicateTeam.json().team.slug).toBe("demo-2");
 
     const unauthenticatedMe = await app.inject({ method: "GET", url: "/api/me" });
     expect(unauthenticatedMe.statusCode).toBe(401);
@@ -60,6 +71,7 @@ describe("team bootstrap and invite flow", () => {
     expect(joined.statusCode).toBe(200);
     const b = joined.json();
     expect(b.team.id).toBe(owner.team.id);
+    expect(b.isServerOwner).toBe(false);
     expect(b.user.displayName).toBe("B");
     expect(b.deviceToken).toMatch(/^tr_dev_/);
 
@@ -69,7 +81,8 @@ describe("team bootstrap and invite flow", () => {
       headers: { authorization: `Bearer ${b.deviceToken}` }
     });
     expect(me.statusCode).toBe(200);
-    expect(me.json().user).toMatchObject({ id: b.user.id, displayName: "B", role: "member" });
+    expect(me.json().user).toMatchObject({ id: b.user.id, displayName: "B" });
+    expect(me.json().teams).toEqual([expect.objectContaining({ id: owner.team.id, role: "member" })]);
 
     const members = await app.inject({
       method: "GET",
@@ -78,7 +91,7 @@ describe("team bootstrap and invite flow", () => {
     });
     expect(members.statusCode).toBe(200);
     expect(members.json().members).toEqual([
-      expect.objectContaining({ displayName: "A", role: "owner", revokedAt: null }),
+      expect.objectContaining({ displayName: "A", role: "admin", revokedAt: null }),
       expect.objectContaining({ displayName: "B", role: "member", revokedAt: null })
     ]);
   });

@@ -12,6 +12,7 @@ export type TeamRow = {
 export type UserRow = {
   id: string;
   display_name: string;
+  revoked_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -22,11 +23,8 @@ export type DevicePrincipalRow = {
   device_revoked_at: string | null;
   user_id: string;
   user_display_name: string;
-  team_id: string;
-  team_name: string;
-  team_slug: string;
-  role: TeamRole;
-  member_revoked_at: string | null;
+  user_revoked_at: string | null;
+  server_owner_id: string | null;
 };
 
 export type InviteRow = {
@@ -51,7 +49,6 @@ export type MemberRow = {
 
 export type RoomRow = {
   id: string;
-  team_id: string;
   name: string;
   type: "file" | "folder";
   source_path: string;
@@ -72,9 +69,8 @@ export type RoomCapabilityRow = {
 
 export type AclRuleRow = {
   id: string;
-  team_id: string;
   room_id: string;
-  subject_type: "user" | "role" | "device" | "agent";
+  subject_type: "user" | "team" | "device" | "agent";
   subject_id: string;
   effect: "allow" | "deny";
   permissions_json: string;
@@ -111,7 +107,6 @@ export type FileVersionWithContentRow = {
 
 export type AgentPrincipalRow = {
   id: string;
-  team_id: string;
   user_id: string;
   display_name: string;
   revoked_at: string | null;

@@ -148,3 +148,36 @@
   gap: 6px;
   font-size: var(--font-ui-small);
 }
+
+.vault-rooms-friend-list,
+.vault-rooms-team-card-list,
+.vault-rooms-team-member-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.vault-rooms-friend,
+.vault-rooms-team-card,
+.vault-rooms-team-member {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.vault-rooms-friend.is-revoked,
+.vault-rooms-team-member.is-revoked {
+  opacity: 0.65;
+}
+
+.vault-rooms-team-member-list {
+  margin: 8px 0;
+}
+
+.vault-rooms-add-friend-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}

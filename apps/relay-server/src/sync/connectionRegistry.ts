@@ -34,19 +34,23 @@ export class ConnectionRegistry {
     }
   }
 
-  closeRevokedUser(teamId: string, userId: string): void {
+  revalidateAccess(isStillAllowed: (roomId: string, principal: DevicePrincipal) => boolean): void {
     for (const connection of this.connections) {
-      if (connection.principal?.teamId === teamId && connection.principal.userId === userId) {
-        sendJson(connection.socket, { type: "revoked", message: "Your access to this team has been revoked." });
-        connection.socket.close();
+      if (!connection.principal) continue;
+      for (const roomId of connection.subscriptions) {
+        if (isStillAllowed(roomId, connection.principal)) continue;
+        connection.subscriptions.delete(roomId);
+        if (connection.socket.readyState === connection.socket.OPEN) {
+          sendJson(connection.socket, { type: "room_access_revoked", roomId });
+        }
       }
     }
   }
 
-  closeTeam(teamId: string): void {
+  closeRevokedUser(userId: string): void {
     for (const connection of this.connections) {
-      if (connection.principal?.teamId === teamId) {
-        sendJson(connection.socket, { type: "revoked", message: "This team has been deleted." });
+      if (connection.principal?.userId === userId) {
+        sendJson(connection.socket, { type: "revoked", message: "Your access to this server has been revoked." });
         connection.socket.close();
       }
     }

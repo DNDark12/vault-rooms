@@ -1,4 +1,4 @@
-import type { AclRule, Permission, TeamRole } from "@vault-rooms/protocol";
+import type { AclRule, Permission } from "@vault-rooms/protocol";
 
 export const READER_PERMISSIONS: Permission[] = ["room:read", "file:read", "sync:subscribe"];
 export const EDITOR_PERMISSIONS: Permission[] = [
@@ -16,12 +16,11 @@ export function expandPreset(preset: PermissionPreset): Permission[] {
 }
 
 export type PolicyInput = {
-  teamId: string;
   subject: {
-    type: "user" | "device" | "agent" | "role";
+    type: "user" | "device" | "agent";
     id: string;
-    role?: TeamRole;
     userId?: string;
+    teamIds?: string[];
   };
   resource: {
     type: "room" | "file" | "tool";
@@ -57,7 +56,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyDecision {
   }
 
   if (hasImplicitAllow(input)) {
-    return { allowed: true, reason: "implicit owner/admin allow", matchedRuleIds: [] };
+    return { allowed: true, reason: "implicit room owner allow", matchedRuleIds: [] };
   }
 
   const allowRules = relevantRules.filter((rule) => rule.effect === "allow" && rule.permissions.includes(input.permission));
@@ -81,20 +80,11 @@ function deny(reason: string): PolicyDecision {
 }
 
 function hasImplicitAllow(input: PolicyInput): boolean {
-  if (input.subject.role === "owner") {
-    return true;
-  }
-  if (input.subject.role === "admin" && input.permission.startsWith("room:")) {
-    return true;
-  }
   const subjectUserId = input.subject.type === "user" ? input.subject.id : input.subject.userId;
   return Boolean(input.resource.roomOwnerUserId && subjectUserId === input.resource.roomOwnerUserId);
 }
 
 function ruleApplies(rule: AclRule, input: PolicyInput): boolean {
-  if (rule.teamId !== input.teamId) {
-    return false;
-  }
   if (input.resource.roomId && rule.roomId !== input.resource.roomId) {
     return false;
   }
@@ -108,7 +98,7 @@ function subjectMatches(rule: AclRule, input: PolicyInput): boolean {
   if (rule.subjectType === input.subject.type && rule.subjectId === input.subject.id) {
     return true;
   }
-  return rule.subjectType === "role" && input.subject.role === rule.subjectId;
+  return rule.subjectType === "team" && Boolean(input.subject.teamIds?.includes(rule.subjectId));
 }
 
 function sortBySpecificity(rules: AclRule[]): AclRule[] {

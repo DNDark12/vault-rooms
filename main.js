@@ -47657,10 +47657,40 @@ var RelayApiClient = class {
       clearTimeout(timeout);
     }
   }
-  async bootstrap(teamName, ownerDisplayName, ownerDeviceName) {
-    return this.request("/api/teams/bootstrap", {
+  async bootstrapServer(input) {
+    return this.request("/api/bootstrap", {
       method: "POST",
-      body: { teamName, ownerDisplayName, ownerDeviceName }
+      body: input
+    });
+  }
+  async me() {
+    return this.request("/api/me");
+  }
+  async acceptInvite(inviteToken) {
+    return this.request("/api/invites/accept", {
+      method: "POST",
+      body: { inviteToken }
+    });
+  }
+  async listFriends() {
+    return this.request("/api/friends");
+  }
+  async revokeFriend(userId) {
+    return this.request(`/api/friends/${userId}/revoke`, { method: "POST" });
+  }
+  async listTeams() {
+    return this.request("/api/teams");
+  }
+  async createTeam(name) {
+    return this.request("/api/teams", {
+      method: "POST",
+      body: { name }
+    });
+  }
+  async addTeamMember(teamId, userId, role = "member") {
+    return this.request(`/api/teams/${teamId}/members`, {
+      method: "POST",
+      body: { userId, role }
     });
   }
   async createInvite(teamId, role = "member") {
@@ -47684,11 +47714,11 @@ var RelayApiClient = class {
       body: { inviteToken, displayName, deviceName }
     });
   }
-  async listRooms(teamId) {
-    return this.request(`/api/teams/${teamId}/rooms`);
+  async listRooms() {
+    return this.request("/api/rooms");
   }
-  async createRoom(teamId, input) {
-    return this.request(`/api/teams/${teamId}/rooms`, {
+  async createRoom(input) {
+    return this.request("/api/rooms", {
       method: "POST",
       body: input
     });
@@ -47768,7 +47798,7 @@ function toRelayError(body) {
 
 // src/syncClient.ts
 function mountPathForRoom(input) {
-  return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.teamSlug, input.mountName].map(stripSlashes).join("/");
+  return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.mountName].map(stripSlashes).join("/");
 }
 async function createConflictCopyPath(vault, path, deviceName, now = /* @__PURE__ */ new Date()) {
   const slash = path.lastIndexOf("/");
@@ -47926,12 +47956,15 @@ function activeServer(settings) {
 }
 
 // src/serverManager.ts
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_node_path2 = require("node:path");
 
 // ../relay-server/src/app.ts
 var import_fastify = __toESM(require_fastify(), 1);
 var import_websocket = __toESM(require_websocket2(), 1);
+
+// ../relay-server/src/db/db.ts
+var import_node_fs2 = require("node:fs");
 
 // ../relay-server/src/db/migrations.ts
 function runMigrations(db) {
@@ -47948,8 +47981,14 @@ function runMigrations(db) {
     create table if not exists users(
       id text primary key,
       display_name text not null,
+      revoked_at text,
       created_at text not null,
       updated_at text not null
+    );
+
+    create table if not exists server_meta(
+      key text primary key,
+      value text not null
     );
 
     create table if not exists team_members(
@@ -47963,7 +48002,6 @@ function runMigrations(db) {
 
     create table if not exists devices(
       id text primary key,
-      team_id text not null,
       user_id text not null,
       display_name text not null,
       token_hash text not null,
@@ -47987,7 +48025,6 @@ function runMigrations(db) {
 
     create table if not exists rooms(
       id text primary key,
-      team_id text not null,
       name text not null,
       type text not null,
       source_path text not null,
@@ -47995,7 +48032,7 @@ function runMigrations(db) {
       owner_user_id text not null,
       created_at text not null,
       updated_at text not null,
-      unique(team_id, mount_name)
+      unique(owner_user_id, mount_name)
     );
 
     create table if not exists room_capabilities(
@@ -48009,7 +48046,6 @@ function runMigrations(db) {
 
     create table if not exists acl_rules(
       id text primary key,
-      team_id text not null,
       room_id text not null,
       subject_type text not null,
       subject_id text not null,
@@ -48055,7 +48091,7 @@ function runMigrations(db) {
 
     create table if not exists audit_events(
       id text primary key,
-      team_id text not null,
+      team_id text,
       actor_type text not null,
       actor_id text not null,
       action text not null,
@@ -48068,7 +48104,6 @@ function runMigrations(db) {
 
     create table if not exists mcp_agent_tokens(
       id text primary key,
-      team_id text not null,
       user_id text not null,
       display_name text not null,
       token_hash text not null,
@@ -48221,10 +48256,30 @@ async function openSqlJsDb(dbPath, locator) {
 
 // ../relay-server/src/db/db.ts
 async function openRelayDb(dbPath, locator) {
+  if (dbPath !== ":memory:" && (0, import_node_fs2.existsSync)(dbPath)) {
+    await archiveLegacyDbIfNeeded(dbPath, locator);
+  }
   const db = await openSqlJsDb(dbPath, locator);
   db.pragma("foreign_keys = ON");
   runMigrations(db);
   return db;
+}
+async function archiveLegacyDbIfNeeded(dbPath, locator) {
+  const probeDb = await openSqlJsDb(dbPath, locator);
+  let isLegacy;
+  try {
+    isLegacy = Boolean(probeDb.prepare("select 1 from pragma_table_info('devices') where name = 'team_id'").get());
+  } finally {
+    probeDb.close();
+  }
+  if (!isLegacy) {
+    return;
+  }
+  const archivePath = `${dbPath}.bak-v1`;
+  if ((0, import_node_fs2.existsSync)(archivePath)) {
+    (0, import_node_fs2.rmSync)(archivePath);
+  }
+  (0, import_node_fs2.renameSync)(dbPath, archivePath);
 }
 
 // ../relay-server/src/db/repositories/relayRepository.ts
@@ -48233,35 +48288,48 @@ var RelayRepository = class {
   constructor(db) {
     this.db = db;
   }
-  bootstrapTeam(input) {
+  getServerOwnerId() {
+    var _a;
+    const row = this.db.prepare("select value from server_meta where key = 'owner_user_id'").get();
+    return (_a = row == null ? void 0 : row.value) != null ? _a : null;
+  }
+  setServerOwner(userId) {
+    this.db.prepare("insert or replace into server_meta(key, value) values ('owner_user_id', ?)").run(userId);
+  }
+  bootstrapServer(input) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const teamId = createId("team");
     const userId = createId("usr");
     const deviceId = createId("dev");
     const deviceToken = createToken("dev");
-    const slug = this.nextTeamSlug(input.teamName);
+    let team;
     const create = this.db.transaction(() => {
-      this.db.prepare("insert into users(id, display_name, created_at, updated_at) values (?, ?, ?, ?)").run(userId, input.ownerDisplayName, now, now);
-      this.db.prepare("insert into teams(id, slug, name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)").run(teamId, slug, input.teamName, userId, now, now);
-      this.db.prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)").run(teamId, userId, "owner", now);
-      this.db.prepare("insert into devices(id, team_id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, ?, null, null, ?)").run(deviceId, teamId, userId, input.ownerDeviceName, hashToken(deviceToken), now);
-      this.audit({
-        teamId,
-        actorType: "user",
-        actorId: userId,
-        action: "team.created",
-        resourceType: "team",
-        resourceId: teamId,
-        metadata: { teamName: input.teamName }
-      });
+      this.db.prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values (?, ?, null, ?, ?)").run(userId, input.displayName, now, now);
+      this.db.prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)").run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
+      this.setServerOwner(userId);
+      if (input.teamName) {
+        const teamId = createId("team");
+        const slug = this.nextTeamSlug(input.teamName);
+        this.db.prepare("insert into teams(id, slug, name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)").run(teamId, slug, input.teamName, userId, now, now);
+        this.db.prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, 'admin', null, ?)").run(teamId, userId, now);
+        this.audit({
+          teamId,
+          actorType: "user",
+          actorId: userId,
+          action: "team.created",
+          resourceType: "team",
+          resourceId: teamId,
+          metadata: { teamName: input.teamName }
+        });
+        team = { id: teamId, slug, name: input.teamName };
+      }
     });
     create();
     return {
-      team: { id: teamId, slug, name: input.teamName },
-      user: { id: userId, displayName: input.ownerDisplayName },
-      device: { id: deviceId, displayName: input.ownerDeviceName },
+      user: { id: userId, displayName: input.displayName },
+      device: { id: deviceId, displayName: input.deviceName },
       deviceToken,
-      role: "owner"
+      isServerOwner: true,
+      ...team ? { team } : {}
     };
   }
   authenticateDeviceToken(token) {
@@ -48273,19 +48341,28 @@ var RelayRepository = class {
             d.revoked_at as device_revoked_at,
             u.id as user_id,
             u.display_name as user_display_name,
-            t.id as team_id,
-            t.name as team_name,
-            t.slug as team_slug,
-            tm.role as role,
-            tm.revoked_at as member_revoked_at
+            u.revoked_at as user_revoked_at,
+            (select value from server_meta where key = 'owner_user_id') as server_owner_id
           from devices d
           join users u on u.id = d.user_id
-          join teams t on t.id = d.team_id
-          join team_members tm on tm.team_id = d.team_id and tm.user_id = d.user_id
           where d.token_hash = ?
         `
     ).get(hashToken(token));
     return row ? mapPrincipal(row) : null;
+  }
+  listUserTeams(userId) {
+    return this.db.prepare(
+      `
+          select t.id as team_id, t.name, t.slug, tm.role
+          from team_members tm
+          join teams t on t.id = tm.team_id
+          where tm.user_id = ? and tm.revoked_at is null
+          order by tm.created_at asc
+        `
+    ).all(userId).map((row) => {
+      const team = row;
+      return { teamId: team.team_id, name: team.name, slug: team.slug, role: team.role };
+    });
   }
   createInvite(input) {
     const now = /* @__PURE__ */ new Date();
@@ -48307,10 +48384,7 @@ var RelayRepository = class {
     return { inviteId, inviteToken };
   }
   joinInvite(input) {
-    const invite = this.db.prepare("select * from invites where token_hash = ?").get(hashToken(input.inviteToken));
-    if (!invite || invite.revoked_at || invite.use_count >= invite.max_uses || Date.parse(invite.expires_at) <= Date.now()) {
-      throw new Error("Invalid or expired invite");
-    }
+    const invite = this.requireValidInvite(input.inviteToken);
     const team = this.getTeam(invite.team_id);
     if (!team) {
       throw new Error("Team not found");
@@ -48320,28 +48394,11 @@ var RelayRepository = class {
     const deviceId = createId("dev");
     const deviceToken = createToken("dev");
     const join3 = this.db.transaction(() => {
-      this.db.prepare("insert into users(id, display_name, created_at, updated_at) values (?, ?, ?, ?)").run(userId, input.displayName, now, now);
+      this.db.prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values (?, ?, null, ?, ?)").run(userId, input.displayName, now, now);
       this.db.prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)").run(team.id, userId, invite.role, now);
-      this.db.prepare("insert into devices(id, team_id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, ?, null, null, ?)").run(deviceId, team.id, userId, input.deviceName, hashToken(deviceToken), now);
+      this.db.prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)").run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
       this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
-      this.audit({
-        teamId: team.id,
-        actorType: "user",
-        actorId: userId,
-        action: "member.joined",
-        resourceType: "user",
-        resourceId: userId,
-        metadata: { inviteId: invite.id }
-      });
-      this.audit({
-        teamId: team.id,
-        actorType: "user",
-        actorId: userId,
-        action: "invite.used",
-        resourceType: "invite",
-        resourceId: invite.id,
-        metadata: { displayName: input.displayName }
-      });
+      this.auditMemberJoined(team.id, userId, invite.id, input.displayName);
     });
     join3();
     return {
@@ -48349,8 +48406,35 @@ var RelayRepository = class {
       user: { id: userId, displayName: input.displayName },
       device: { id: deviceId, displayName: input.deviceName },
       deviceToken,
-      role: invite.role
+      isServerOwner: false
     };
+  }
+  acceptInvite(input) {
+    const invite = this.requireValidInvite(input.inviteToken);
+    const team = this.getTeam(invite.team_id);
+    if (!team) {
+      throw new Error("Team not found");
+    }
+    const existing = this.getTeamMembership(team.id, input.userId);
+    if (existing && !existing.revoked_at) {
+      return { team: { id: team.id, slug: team.slug, name: team.name } };
+    }
+    const user = this.getUser(input.userId);
+    if (!user || user.revoked_at) {
+      throw new Error("User not found");
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const accept = this.db.transaction(() => {
+      if (existing) {
+        this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(invite.role, team.id, input.userId);
+      } else {
+        this.db.prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)").run(team.id, input.userId, invite.role, now);
+      }
+      this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
+      this.auditMemberJoined(team.id, input.userId, invite.id, user.display_name);
+    });
+    accept();
+    return { team: { id: team.id, slug: team.slug, name: team.name } };
   }
   listMembers(teamId, includeRevoked) {
     const where = includeRevoked ? "" : "and tm.revoked_at is null";
@@ -48364,25 +48448,41 @@ var RelayRepository = class {
         `
     ).all(teamId);
   }
-  revokeMember(input) {
+  listFriends() {
+    const users = this.db.prepare("select * from users where revoked_at is null order by created_at asc").all();
+    const memberships = this.db.prepare(
+      `
+          select team_id, user_id, role
+          from team_members
+          where revoked_at is null
+          order by created_at asc
+        `
+    ).all();
+    return users.map((user) => ({
+      id: user.id,
+      displayName: user.display_name,
+      revokedAt: user.revoked_at,
+      teams: memberships.filter((membership) => membership.user_id === user.id).map((membership) => ({ id: membership.team_id, role: membership.role }))
+    }));
+  }
+  revokeUser(input) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    const devices = this.db.prepare("select id from devices where user_id = ? and revoked_at is null").all(input.userId);
     const revoke = this.db.transaction(() => {
-      var _a;
-      this.db.prepare("update team_members set revoked_at = ? where team_id = ? and user_id = ?").run(now, input.teamId, input.userId);
-      const devices = this.db.prepare("select id from devices where team_id = ? and user_id = ? and revoked_at is null").all(input.teamId, input.userId);
-      this.db.prepare("update devices set revoked_at = ? where team_id = ? and user_id = ?").run(now, input.teamId, input.userId);
+      this.db.prepare("update users set revoked_at = ?, updated_at = ? where id = ?").run(now, now, input.userId);
+      this.db.prepare("update devices set revoked_at = ? where user_id = ? and revoked_at is null").run(now, input.userId);
       this.audit({
-        teamId: input.teamId,
+        teamId: null,
         actorType: "user",
         actorId: input.actorUserId,
-        action: "member.revoked",
+        action: "user.revoked",
         resourceType: "user",
         resourceId: input.userId,
-        metadata: { reason: (_a = input.reason) != null ? _a : null }
+        metadata: {}
       });
       for (const device of devices) {
         this.audit({
-          teamId: input.teamId,
+          teamId: null,
           actorType: "user",
           actorId: input.actorUserId,
           action: "device.revoked",
@@ -48394,13 +48494,79 @@ var RelayRepository = class {
     });
     revoke();
   }
+  createTeam(input) {
+    const teamId = createId("team");
+    const slug = this.nextTeamSlug(input.name);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const create = this.db.transaction(() => {
+      this.db.prepare("insert into teams(id, slug, name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)").run(teamId, slug, input.name, input.ownerUserId, now, now);
+      this.db.prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, 'admin', null, ?)").run(teamId, input.ownerUserId, now);
+      this.audit({
+        teamId,
+        actorType: "user",
+        actorId: input.ownerUserId,
+        action: "team.created",
+        resourceType: "team",
+        resourceId: teamId,
+        metadata: { teamName: input.name }
+      });
+    });
+    create();
+    const team = this.getTeam(teamId);
+    if (!team) {
+      throw new Error("Failed to create team");
+    }
+    return team;
+  }
+  addTeamMember(input) {
+    const team = this.getTeam(input.teamId);
+    const user = this.getUser(input.userId);
+    if (!team || !user || user.revoked_at) {
+      throw new AppError("NOT_FOUND", "Team or user not found.", 404);
+    }
+    const existing = this.getTeamMembership(input.teamId, input.userId);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const add = this.db.transaction(() => {
+      if (existing) {
+        this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(input.role, input.teamId, input.userId);
+      } else {
+        this.db.prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)").run(input.teamId, input.userId, input.role, now);
+      }
+      if (!existing || existing.revoked_at) {
+        this.audit({
+          teamId: input.teamId,
+          actorType: "user",
+          actorId: input.actorUserId,
+          action: "member.joined",
+          resourceType: "user",
+          resourceId: input.userId,
+          metadata: { inviteId: null, addedDirectly: true }
+        });
+      }
+    });
+    add();
+  }
+  revokeMember(input) {
+    var _a;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    this.db.prepare("update team_members set revoked_at = ? where team_id = ? and user_id = ?").run(now, input.teamId, input.userId);
+    this.audit({
+      teamId: input.teamId,
+      actorType: "user",
+      actorId: input.actorUserId,
+      action: "member.revoked",
+      resourceType: "user",
+      resourceId: input.userId,
+      metadata: { reason: (_a = input.reason) != null ? _a : null }
+    });
+  }
   createAgentToken(input) {
     const agentId = createId("agt");
     const agentToken = createToken("agt");
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    this.db.prepare("insert into mcp_agent_tokens(id, team_id, user_id, display_name, token_hash, revoked_at, created_at) values (?, ?, ?, ?, ?, null, ?)").run(agentId, input.teamId, input.userId, input.displayName, hashToken(agentToken), now);
+    this.db.prepare("insert into mcp_agent_tokens(id, user_id, display_name, token_hash, revoked_at, created_at) values (?, ?, ?, ?, null, ?)").run(agentId, input.userId, input.displayName, hashToken(agentToken), now);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.userId,
       action: "mcp.agent.created",
@@ -48411,14 +48577,18 @@ var RelayRepository = class {
     return { agent: { id: agentId, displayName: input.displayName }, agentToken };
   }
   authenticateAgentToken(token) {
-    const row = this.db.prepare("select id, team_id, user_id, display_name, revoked_at from mcp_agent_tokens where token_hash = ?").get(hashToken(token));
-    return row ? { agentId: row.id, teamId: row.team_id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
+    const row = this.db.prepare("select id, user_id, display_name, revoked_at from mcp_agent_tokens where token_hash = ?").get(hashToken(token));
+    return row ? { agentId: row.id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
+  }
+  getAgentById(agentId) {
+    const row = this.db.prepare("select id, user_id, display_name, revoked_at from mcp_agent_tokens where id = ?").get(agentId);
+    return row ? { agentId: row.id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
   }
   revokeAgent(input) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    this.db.prepare("update mcp_agent_tokens set revoked_at = ? where team_id = ? and id = ?").run(now, input.teamId, input.agentId);
+    this.db.prepare("update mcp_agent_tokens set revoked_at = ? where id = ?").run(now, input.agentId);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.actorUserId,
       action: "mcp.agent.revoked",
@@ -48432,7 +48602,7 @@ var RelayRepository = class {
     const roomId = createId("room");
     const create = this.db.transaction(() => {
       var _a;
-      this.db.prepare("insert into rooms(id, team_id, name, type, source_path, mount_name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(roomId, input.teamId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, now, now);
+      this.db.prepare("insert into rooms(id, name, type, source_path, mount_name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)").run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, now, now);
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
       );
@@ -48440,7 +48610,7 @@ var RelayRepository = class {
         insertCapability.run(createId("cap"), roomId, capability.pluginId, capability.displayName, capability.mode, (_a = capability.minVersion) != null ? _a : null);
       }
       this.audit({
-        teamId: input.teamId,
+        teamId: null,
         actorType: "user",
         actorId: input.ownerUserId,
         action: "room.created",
@@ -48460,8 +48630,8 @@ var RelayRepository = class {
     var _a;
     return (_a = this.db.prepare("select * from rooms where id = ?").get(roomId)) != null ? _a : null;
   }
-  listTeamRooms(teamId) {
-    return this.db.prepare("select * from rooms where team_id = ? order by created_at asc").all(teamId);
+  listAllRooms() {
+    return this.db.prepare("select * from rooms order by created_at asc").all();
   }
   listCapabilities(roomId) {
     return this.db.prepare("select * from room_capabilities where room_id = ? order by id asc").all(roomId);
@@ -48483,7 +48653,7 @@ var RelayRepository = class {
         insertCapability.run(createId("cap"), input.roomId, capability.pluginId, capability.displayName, capability.mode, (_a = capability.minVersion) != null ? _a : null);
       }
       this.audit({
-        teamId: room.team_id,
+        teamId: null,
         actorType: "user",
         actorId: input.actorUserId,
         action: "room.updated",
@@ -48500,13 +48670,13 @@ var RelayRepository = class {
     return updated;
   }
   deleteAclRule(input) {
-    const rule = this.db.prepare("select * from acl_rules where id = ? and room_id = ? and team_id = ?").get(input.aclId, input.roomId, input.teamId);
+    const rule = this.db.prepare("select * from acl_rules where id = ? and room_id = ?").get(input.aclId, input.roomId);
     if (!rule) {
       throw new AppError("NOT_FOUND", "Access rule not found.", 404);
     }
     this.db.prepare("delete from acl_rules where id = ?").run(input.aclId);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.actorUserId,
       action: "acl.removed",
@@ -48517,7 +48687,7 @@ var RelayRepository = class {
   }
   deleteRoom(input) {
     const room = this.getRoom(input.roomId);
-    if (!room || room.team_id !== input.teamId) {
+    if (!room) {
       throw new AppError("NOT_FOUND", "Room not found.", 404);
     }
     const remove = this.db.transaction(() => {
@@ -48530,7 +48700,7 @@ var RelayRepository = class {
       this.db.prepare("delete from acl_rules where room_id = ?").run(input.roomId);
       this.db.prepare("delete from rooms where id = ?").run(input.roomId);
       this.audit({
-        teamId: input.teamId,
+        teamId: null,
         actorType: "user",
         actorId: input.actorUserId,
         action: "room.deleted",
@@ -48547,31 +48717,18 @@ var RelayRepository = class {
       throw new AppError("NOT_FOUND", "Team not found.", 404);
     }
     const remove = this.db.transaction(() => {
-      const roomIds = this.db.prepare("select id from rooms where team_id = ?").all(input.teamId).map((row) => row.id);
-      for (const roomId of roomIds) {
-        const fileIds = this.db.prepare("select id from files where room_id = ?").all(roomId).map((row) => row.id);
-        for (const fileId of fileIds) {
-          this.db.prepare("delete from file_versions where file_id = ?").run(fileId);
-        }
-        this.db.prepare("delete from files where room_id = ?").run(roomId);
-        this.db.prepare("delete from room_capabilities where room_id = ?").run(roomId);
-      }
-      this.db.prepare("delete from acl_rules where team_id = ?").run(input.teamId);
-      this.db.prepare("delete from rooms where team_id = ?").run(input.teamId);
-      this.db.prepare("delete from mcp_agent_tokens where team_id = ?").run(input.teamId);
+      this.audit({
+        teamId: input.teamId,
+        actorType: "user",
+        actorId: input.actorUserId,
+        action: "team.deleted",
+        resourceType: "team",
+        resourceId: input.teamId,
+        metadata: { teamName: team.name }
+      });
+      this.db.prepare("delete from acl_rules where subject_type = 'team' and subject_id = ?").run(input.teamId);
       this.db.prepare("delete from invites where team_id = ?").run(input.teamId);
-      this.db.prepare("delete from devices where team_id = ?").run(input.teamId);
-      const userIds = this.db.prepare("select user_id from team_members where team_id = ?").all(input.teamId).map(
-        (row) => row.user_id
-      );
       this.db.prepare("delete from team_members where team_id = ?").run(input.teamId);
-      for (const userId of userIds) {
-        const stillMember = this.db.prepare("select 1 from team_members where user_id = ?").get(userId);
-        if (!stillMember) {
-          this.db.prepare("delete from users where id = ?").run(userId);
-        }
-      }
-      this.db.prepare("delete from audit_events where team_id = ?").run(input.teamId);
       this.db.prepare("delete from teams where id = ?").run(input.teamId);
     });
     remove();
@@ -48579,11 +48736,9 @@ var RelayRepository = class {
   createAclRule(input) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const id = createId("acl");
-    this.db.prepare(
-      "insert into acl_rules(id, team_id, room_id, subject_type, subject_id, effect, permissions_json, path_pattern, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(id, input.teamId, input.roomId, input.subjectType, input.subjectId, input.effect, JSON.stringify(input.permissions), input.pathPattern, now);
+    this.db.prepare("insert into acl_rules(id, room_id, subject_type, subject_id, effect, permissions_json, path_pattern, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)").run(id, input.roomId, input.subjectType, input.subjectId, input.effect, JSON.stringify(input.permissions), input.pathPattern, now);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.actorUserId,
       action: input.effect === "allow" ? "acl.granted" : "acl.denied",
@@ -48593,7 +48748,6 @@ var RelayRepository = class {
     });
     return {
       id,
-      teamId: input.teamId,
       roomId: input.roomId,
       subjectType: input.subjectType,
       subjectId: input.subjectId,
@@ -48602,9 +48756,6 @@ var RelayRepository = class {
       pathPattern: input.pathPattern,
       createdAt: now
     };
-  }
-  listAclRulesForTeam(teamId) {
-    return this.db.prepare("select * from acl_rules where team_id = ? order by created_at asc").all(teamId).map(mapAclRule);
   }
   listAclRulesForRoom(roomId) {
     return this.db.prepare("select * from acl_rules where room_id = ? order by created_at asc").all(roomId).map(mapAclRule);
@@ -48703,8 +48854,19 @@ var RelayRepository = class {
     var _a;
     return (_a = this.db.prepare("select * from teams where id = ?").get(teamId)) != null ? _a : null;
   }
-  audit(input) {
+  listTeams() {
+    return this.db.prepare("select * from teams order by created_at asc").all();
+  }
+  getUser(userId) {
     var _a;
+    return (_a = this.db.prepare("select * from users where id = ?").get(userId)) != null ? _a : null;
+  }
+  getTeamMembership(teamId, userId) {
+    var _a;
+    return (_a = this.db.prepare("select role, revoked_at from team_members where team_id = ? and user_id = ?").get(teamId, userId)) != null ? _a : null;
+  }
+  audit(input) {
+    var _a, _b;
     this.db.prepare(
       "insert into audit_events(id, team_id, actor_type, actor_id, action, resource_type, resource_id, metadata_json, ip_address, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
@@ -48715,10 +48877,37 @@ var RelayRepository = class {
       input.action,
       input.resourceType,
       input.resourceId,
-      JSON.stringify(input.metadata),
-      (_a = input.ipAddress) != null ? _a : null,
+      JSON.stringify((_a = input.metadata) != null ? _a : {}),
+      (_b = input.ipAddress) != null ? _b : null,
       (/* @__PURE__ */ new Date()).toISOString()
     );
+  }
+  requireValidInvite(inviteToken) {
+    const invite = this.db.prepare("select * from invites where token_hash = ?").get(hashToken(inviteToken));
+    if (!invite || invite.revoked_at || invite.use_count >= invite.max_uses || Date.parse(invite.expires_at) <= Date.now()) {
+      throw new Error("Invalid or expired invite");
+    }
+    return invite;
+  }
+  auditMemberJoined(teamId, userId, inviteId, displayName) {
+    this.audit({
+      teamId,
+      actorType: "user",
+      actorId: userId,
+      action: "member.joined",
+      resourceType: "user",
+      resourceId: userId,
+      metadata: { inviteId }
+    });
+    this.audit({
+      teamId,
+      actorType: "user",
+      actorId: userId,
+      action: "invite.used",
+      resourceType: "invite",
+      resourceId: inviteId,
+      metadata: { displayName }
+    });
   }
   insertFileVersion(input) {
     this.db.prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)").run(input.storageKey, input.content, input.now);
@@ -48735,10 +48924,8 @@ var RelayRepository = class {
     });
   }
   auditFileEvent(roomId, actorUserId, action, fileId, relativePath, version) {
-    var _a;
-    const room = this.getRoom(roomId);
     this.audit({
-      teamId: (_a = room == null ? void 0 : room.team_id) != null ? _a : "unknown",
+      teamId: null,
       actorType: "user",
       actorId: actorUserId,
       action,
@@ -48759,10 +48946,24 @@ var RelayRepository = class {
   }
 };
 function isActivePrincipal(principal) {
-  return Boolean(principal && !principal.memberRevokedAt && !principal.deviceRevokedAt);
+  return Boolean(principal && !principal.userRevokedAt && !principal.deviceRevokedAt);
 }
-function canManageTeam(principal, teamId) {
-  return principal.teamId === teamId && (principal.role === "owner" || principal.role === "admin");
+function canManageTeam(repo, principal, teamId) {
+  if (principal.isServerOwner) {
+    return true;
+  }
+  const team = repo.getTeam(teamId);
+  if (!team) {
+    return false;
+  }
+  if (team.owner_user_id === principal.userId) {
+    return true;
+  }
+  const membership = repo.getTeamMembership(teamId, principal.userId);
+  return Boolean(membership && !membership.revoked_at && membership.role === "admin");
+}
+function canManageRoom(principal, room) {
+  return principal.isServerOwner || room.owner_user_id === principal.userId;
 }
 function mapPrincipal(row) {
   return {
@@ -48771,11 +48972,8 @@ function mapPrincipal(row) {
     deviceRevokedAt: row.device_revoked_at,
     userId: row.user_id,
     userDisplayName: row.user_display_name,
-    teamId: row.team_id,
-    teamName: row.team_name,
-    teamSlug: row.team_slug,
-    role: row.role,
-    memberRevokedAt: row.member_revoked_at
+    userRevokedAt: row.user_revoked_at,
+    isServerOwner: row.server_owner_id === row.user_id
   };
 }
 function slugify(name) {
@@ -48788,7 +48986,6 @@ function sha256Text(content) {
 function mapAclRule(row) {
   return {
     id: row.id,
-    teamId: row.team_id,
     roomId: row.room_id,
     subjectType: row.subject_type,
     subjectId: row.subject_id,
@@ -48815,32 +49012,32 @@ function getActivePrincipal(repo, request) {
 
 // ../relay-server/src/routes/agent.routes.ts
 function registerAgentRoutes(app, repo) {
-  app.post("/api/teams/:teamId/agents", async (request) => {
+  app.post("/api/agents", async (request) => {
     const principal = getActivePrincipal(repo, request);
-    const { teamId } = request.params;
-    if (!canManageTeam(principal, teamId)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can create agent tokens.", 403);
-    }
     const body = request.body;
     if (!body.displayName) {
       throw new AppError("VALIDATION_ERROR", "displayName is required.", 422);
     }
-    return repo.createAgentToken({ teamId, userId: principal.userId, displayName: body.displayName });
+    return repo.createAgentToken({ userId: principal.userId, displayName: body.displayName });
   });
-  app.post("/api/teams/:teamId/agents/:agentId/revoke", async (request) => {
+  app.post("/api/agents/:agentId/revoke", async (request) => {
     const principal = getActivePrincipal(repo, request);
-    const { teamId, agentId } = request.params;
-    if (!canManageTeam(principal, teamId)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can revoke agent tokens.", 403);
+    const { agentId } = request.params;
+    const agent = repo.getAgentById(agentId);
+    if (!agent) {
+      throw new AppError("NOT_FOUND", "Agent not found.", 404);
     }
-    repo.revokeAgent({ teamId, agentId, actorUserId: principal.userId });
+    if (agent.userId !== principal.userId) {
+      throw new AppError("PERMISSION_DENIED", "Only the agent owner can revoke this token.", 403);
+    }
+    repo.revokeAgent({ agentId, actorUserId: principal.userId });
     return { ok: true };
   });
 }
 
 // ../relay-server/src/routes/auth.routes.ts
 function registerAuthRoutes(app, repo) {
-  app.post("/api/join", async (request, reply) => {
+  app.post("/api/join", async (request) => {
     const body = request.body;
     if (!body.inviteToken || !body.displayName || !body.deviceName) {
       throw new AppError("VALIDATION_ERROR", "inviteToken, displayName, and deviceName are required.", 422);
@@ -48855,12 +49052,30 @@ function registerAuthRoutes(app, repo) {
       throw new AppError("UNAUTHORIZED", "Invalid or expired credentials.", 401);
     }
   });
+  app.post("/api/invites/accept", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const body = request.body;
+    if (!body.inviteToken) {
+      throw new AppError("VALIDATION_ERROR", "inviteToken is required.", 422);
+    }
+    try {
+      return repo.acceptInvite({ inviteToken: body.inviteToken, userId: principal.userId });
+    } catch (e) {
+      throw new AppError("UNAUTHORIZED", "Invalid or expired invite.", 401);
+    }
+  });
   app.get("/api/me", async (request) => {
     const principal = getActivePrincipal(repo, request);
     return {
-      team: { id: principal.teamId, name: principal.teamName },
-      user: { id: principal.userId, displayName: principal.userDisplayName, role: principal.role },
-      device: { id: principal.deviceId, displayName: principal.deviceDisplayName }
+      user: { id: principal.userId, displayName: principal.userDisplayName },
+      device: { id: principal.deviceId, displayName: principal.deviceDisplayName },
+      isServerOwner: principal.isServerOwner,
+      teams: repo.listUserTeams(principal.userId).map((team) => ({
+        id: team.teamId,
+        name: team.name,
+        slug: team.slug,
+        role: team.role
+      }))
     };
   });
 }
@@ -48890,7 +49105,7 @@ function evaluatePolicy(input) {
     return { allowed: false, reason: "explicit deny", matchedRuleIds: denyRules.map((rule) => rule.id) };
   }
   if (hasImplicitAllow(input)) {
-    return { allowed: true, reason: "implicit owner/admin allow", matchedRuleIds: [] };
+    return { allowed: true, reason: "implicit room owner allow", matchedRuleIds: [] };
   }
   const allowRules = relevantRules.filter((rule) => rule.effect === "allow" && rule.permissions.includes(input.permission));
   if (allowRules.length > 0) {
@@ -48902,20 +49117,11 @@ function deny(reason) {
   return { allowed: false, reason, matchedRuleIds: [] };
 }
 function hasImplicitAllow(input) {
-  if (input.subject.role === "owner") {
-    return true;
-  }
-  if (input.subject.role === "admin" && input.permission.startsWith("room:")) {
-    return true;
-  }
   const subjectUserId = input.subject.type === "user" ? input.subject.id : input.subject.userId;
   return Boolean(input.resource.roomOwnerUserId && subjectUserId === input.resource.roomOwnerUserId);
 }
 function ruleApplies(rule, input) {
   var _a;
-  if (rule.teamId !== input.teamId) {
-    return false;
-  }
   if (input.resource.roomId && rule.roomId !== input.resource.roomId) {
     return false;
   }
@@ -48925,10 +49131,11 @@ function ruleApplies(rule, input) {
   return pathMatches(rule.pathPattern, (_a = input.resource.relativePath) != null ? _a : "");
 }
 function subjectMatches(rule, input) {
+  var _a;
   if (rule.subjectType === input.subject.type && rule.subjectId === input.subject.id) {
     return true;
   }
-  return rule.subjectType === "role" && input.subject.role === rule.subjectId;
+  return rule.subjectType === "team" && Boolean((_a = input.subject.teamIds) == null ? void 0 : _a.includes(rule.subjectId));
 }
 function sortBySpecificity(rules) {
   return [...rules].sort((a, b) => specificity(b.pathPattern) - specificity(a.pathPattern));
@@ -48952,21 +49159,42 @@ function pathMatches(pattern, relativePath) {
 }
 
 // ../relay-server/src/services/policyService.ts
+function hasRoomPermission(input) {
+  var _a;
+  const resource = input.permission.startsWith("room:") ? { type: "room", roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id } : { type: "file", roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id, relativePath: (_a = input.relativePath) != null ? _a : "" };
+  return evaluatePolicy({
+    subject: {
+      type: "user",
+      id: input.principal.userId,
+      userId: input.principal.userId,
+      teamIds: input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
+    },
+    resource,
+    permission: input.permission,
+    aclRules: input.repo.listAclRulesForRoom(input.room.id),
+    membershipRevokedAt: input.principal.userRevokedAt,
+    deviceRevokedAt: input.principal.deviceRevokedAt
+  }).allowed;
+}
 function assertRoomPermission(input) {
   var _a;
   const resource = input.permission.startsWith("room:") ? { type: "room", roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id } : { type: "file", roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id, relativePath: (_a = input.relativePath) != null ? _a : "" };
   const decision = evaluatePolicy({
-    teamId: input.room.team_id,
-    subject: { type: "user", id: input.principal.userId, role: input.principal.role, userId: input.principal.userId },
+    subject: {
+      type: "user",
+      id: input.principal.userId,
+      userId: input.principal.userId,
+      teamIds: input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
+    },
     resource,
     permission: input.permission,
-    aclRules: input.repo.listAclRulesForTeam(input.room.team_id),
-    membershipRevokedAt: input.principal.memberRevokedAt,
+    aclRules: input.repo.listAclRulesForRoom(input.room.id),
+    membershipRevokedAt: input.principal.userRevokedAt,
     deviceRevokedAt: input.principal.deviceRevokedAt
   });
   if (!decision.allowed) {
     input.repo.audit({
-      teamId: input.room.team_id,
+      teamId: null,
       actorType: "user",
       actorId: input.principal.userId,
       action: "acl.denied",
@@ -48976,6 +49204,13 @@ function assertRoomPermission(input) {
     });
     throw new AppError("PERMISSION_DENIED", `You do not have ${input.permission} permission for this path.`, 403);
   }
+}
+function revalidateRoomAccess(repo, registry) {
+  registry == null ? void 0 : registry.revalidateAccess((roomId, principal) => {
+    const room = repo.getRoom(roomId);
+    if (!room) return true;
+    return hasRoomPermission({ repo, principal, room, permission: "sync:subscribe" });
+  });
 }
 
 // ../relay-server/src/routes/file.routes.ts
@@ -49092,6 +49327,31 @@ function requireRoom(repo, roomId) {
     throw new AppError("NOT_FOUND", "Room not found.", 404);
   }
   return room;
+}
+
+// ../relay-server/src/routes/friend.routes.ts
+function registerFriendRoutes(app, repo, options = {}) {
+  app.get("/api/friends", async (request) => {
+    getActivePrincipal(repo, request);
+    return { friends: repo.listFriends() };
+  });
+  app.post("/api/friends/:userId/revoke", async (request) => {
+    var _a;
+    const principal = getActivePrincipal(repo, request);
+    if (!principal.isServerOwner) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner can revoke users.", 403);
+    }
+    const { userId } = request.params;
+    if (!repo.getUser(userId)) {
+      throw new AppError("NOT_FOUND", "User not found.", 404);
+    }
+    if (repo.getServerOwnerId() === userId) {
+      throw new AppError("VALIDATION_ERROR", "The server owner cannot be revoked.", 400);
+    }
+    repo.revokeUser({ userId, actorUserId: principal.userId });
+    (_a = options.connectionRegistry) == null ? void 0 : _a.closeRevokedUser(userId);
+    return { ok: true };
+  });
 }
 
 // ../../packages/markdown-adapters/src/markdown.ts
@@ -49332,7 +49592,7 @@ function registerMcpRoutes(app, repo) {
       throw new AppError("VALIDATION_ERROR", "Unknown MCP tool.", 422);
     }
     repo.audit({
-      teamId: agent.teamId,
+      teamId: null,
       actorType: "agent",
       actorId: agent.agentId,
       action: "mcp.tool.called",
@@ -49343,7 +49603,7 @@ function registerMcpRoutes(app, repo) {
     try {
       const result = handleTool(repo, agent, tool, input);
       repo.audit({
-        teamId: agent.teamId,
+        teamId: null,
         actorType: "agent",
         actorId: agent.agentId,
         action: "mcp.tool.succeeded",
@@ -49354,7 +49614,7 @@ function registerMcpRoutes(app, repo) {
       return { result };
     } catch (error) {
       repo.audit({
-        teamId: agent.teamId,
+        teamId: null,
         actorType: "agent",
         actorId: agent.agentId,
         action: error instanceof AppError && error.code === "PERMISSION_DENIED" ? "mcp.tool.denied" : "mcp.tool.failed",
@@ -49371,7 +49631,7 @@ function handleTool(repo, agent, tool, input) {
   switch (tool) {
     case "list_rooms":
       return {
-        rooms: repo.listTeamRooms(agent.teamId).filter((room) => canAgent(repo, agent, room, "room:read")).map((room) => ({
+        rooms: repo.listAllRooms().filter((room) => canAgent(repo, agent, room, "room:read")).map((room) => ({
           id: room.id,
           name: room.name,
           type: room.type,
@@ -49519,11 +49779,10 @@ function assertToolPermissions(repo, agent, room, tool, relativePath = "") {
 }
 function canAgent(repo, agent, room, permission, relativePath = "") {
   return evaluatePolicy({
-    teamId: room.team_id,
     subject: { type: "agent", id: agent.agentId },
     resource: permission.startsWith("room:") ? { type: "room", roomId: room.id, roomOwnerUserId: room.owner_user_id } : permission.startsWith("tool:") ? { type: "tool", roomId: room.id, relativePath, toolName: permission.slice("tool:".length) } : { type: "file", roomId: room.id, roomOwnerUserId: room.owner_user_id, relativePath },
     permission,
-    aclRules: repo.listAclRulesForTeam(room.team_id)
+    aclRules: repo.listAclRulesForRoom(room.id)
   }).allowed;
 }
 function requireRoom2(repo, roomId) {
@@ -49554,26 +49813,13 @@ var LISTED_PERMISSIONS = [
   "sync:push"
 ];
 function registerRoomRoutes(app, repo, options = {}) {
-  app.post("/api/teams/:teamId/rooms", async (request) => {
+  app.post("/api/rooms", async (request) => {
     var _a;
     const principal = getActivePrincipal(repo, request);
-    const { teamId } = request.params;
-    if (!canManageTeam(principal, teamId)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can create rooms.", 403);
-    }
     const body = request.body;
-    if (!body.name || !body.type || !body.sourcePath || !body.mountName) {
-      throw new AppError("VALIDATION_ERROR", "name, type, sourcePath, and mountName are required.", 422);
-    }
-    if (body.type !== "file" && body.type !== "folder") {
-      throw new AppError("VALIDATION_ERROR", "type must be file or folder.", 422);
-    }
-    if (!isSafeMountName(body.mountName)) {
-      throw new AppError("INVALID_PATH", "mountName must be a safe single path segment.", 422);
-    }
+    validateRoomBody(body);
     try {
       const room = repo.createRoom({
-        teamId,
         name: body.name,
         type: body.type,
         sourcePath: body.sourcePath,
@@ -49584,42 +49830,27 @@ function registerRoomRoutes(app, repo, options = {}) {
       return { room: toRoomResponse(room) };
     } catch (error) {
       if (error instanceof Error && error.message.includes("UNIQUE")) {
-        throw new AppError("VALIDATION_ERROR", "mountName must be unique within the team.", 409);
+        throw new AppError("VALIDATION_ERROR", "mountName must be unique for this owner.", 409);
       }
       throw error;
     }
   });
-  app.get("/api/teams/:teamId/rooms", async (request) => {
+  app.get("/api/rooms", async (request) => {
     const principal = getActivePrincipal(repo, request);
-    const { teamId } = request.params;
-    if (principal.teamId !== teamId) {
-      throw new AppError("PERMISSION_DENIED", "You are not a member of this team.", 403);
-    }
-    const aclRules = repo.listAclRulesForTeam(teamId);
-    const rooms = repo.listTeamRooms(teamId).map((room) => visibleRoom(repo, principal, room, aclRules)).filter((room) => room !== null);
+    const teamIds = repo.listUserTeams(principal.userId).map((team) => team.teamId);
+    const rooms = repo.listAllRooms().map((room) => visibleRoom(repo, principal, room, teamIds)).filter((room) => room !== null);
     return { rooms };
   });
   app.patch("/api/rooms/:roomId", async (request) => {
-    var _a;
+    var _a, _b;
     const principal = getActivePrincipal(repo, request);
     const { roomId } = request.params;
-    const room = repo.getRoom(roomId);
-    if (!room) {
-      throw new AppError("NOT_FOUND", "Room not found.", 404);
-    }
-    if (!canManageTeam(principal, room.team_id)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can update room settings.", 403);
+    const room = requireRoom3(repo, roomId);
+    if (!canManageRoom(principal, room)) {
+      throw new AppError("PERMISSION_DENIED", "Only the room owner or server owner can update room settings.", 403);
     }
     const body = request.body;
-    if (!body.name || !body.type || !body.sourcePath || !body.mountName) {
-      throw new AppError("VALIDATION_ERROR", "name, type, sourcePath, and mountName are required.", 422);
-    }
-    if (body.type !== "file" && body.type !== "folder") {
-      throw new AppError("VALIDATION_ERROR", "type must be file or folder.", 422);
-    }
-    if (!isSafeMountName(body.mountName)) {
-      throw new AppError("INVALID_PATH", "mountName must be a safe single path segment.", 422);
-    }
+    validateRoomBody(body);
     try {
       const updated = repo.updateRoom({
         roomId,
@@ -49630,10 +49861,11 @@ function registerRoomRoutes(app, repo, options = {}) {
         mountName: body.mountName,
         capabilities: (_a = body.capabilities) != null ? _a : []
       });
-      return { room: visibleRoom(repo, principal, updated, repo.listAclRulesForTeam(updated.team_id)) };
+      const teamIds = repo.listUserTeams(principal.userId).map((team) => team.teamId);
+      return { room: (_b = visibleRoom(repo, principal, updated, teamIds)) != null ? _b : managedRoomResponse(repo, updated) };
     } catch (error) {
       if (error instanceof Error && error.message.includes("UNIQUE")) {
-        throw new AppError("VALIDATION_ERROR", "mountName must be unique within the team.", 409);
+        throw new AppError("VALIDATION_ERROR", "mountName must be unique for this owner.", 409);
       }
       throw error;
     }
@@ -49641,28 +49873,25 @@ function registerRoomRoutes(app, repo, options = {}) {
   app.get("/api/rooms/:roomId/acl", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { roomId } = request.params;
-    const room = repo.getRoom(roomId);
-    if (!room) {
-      throw new AppError("NOT_FOUND", "Room not found.", 404);
-    }
-    if (!canManageTeam(principal, room.team_id)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can inspect room permissions.", 403);
+    const room = requireRoom3(repo, roomId);
+    if (!canManageRoom(principal, room)) {
+      throw new AppError("PERMISSION_DENIED", "Only the room owner or server owner can inspect room permissions.", 403);
     }
     return { aclRules: repo.listAclRulesForRoom(roomId) };
   });
   app.post("/api/rooms/:roomId/acl", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { roomId } = request.params;
-    const room = repo.getRoom(roomId);
-    if (!room) {
-      throw new AppError("NOT_FOUND", "Room not found.", 404);
-    }
-    if (!canManageTeam(principal, room.team_id)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can grant room permissions.", 403);
+    const room = requireRoom3(repo, roomId);
+    if (!canManageRoom(principal, room)) {
+      throw new AppError("PERMISSION_DENIED", "Only the room owner or server owner can grant room permissions.", 403);
     }
     const body = request.body;
     if (!body.subjectType || !body.subjectId || !body.effect || !body.pathPattern) {
       throw new AppError("VALIDATION_ERROR", "subjectType, subjectId, effect, and pathPattern are required.", 422);
+    }
+    if (!isSubjectType(body.subjectType)) {
+      throw new AppError("VALIDATION_ERROR", "subjectType must be user, team, device, or agent.", 422);
     }
     if (body.effect !== "allow" && body.effect !== "deny") {
       throw new AppError("VALIDATION_ERROR", "effect must be allow or deny.", 422);
@@ -49672,7 +49901,6 @@ function registerRoomRoutes(app, repo, options = {}) {
       throw new AppError("VALIDATION_ERROR", "preset or permissions must be provided.", 422);
     }
     const aclRule = repo.createAclRule({
-      teamId: room.team_id,
       roomId,
       actorUserId: principal.userId,
       subjectType: body.subjectType,
@@ -49681,64 +49909,71 @@ function registerRoomRoutes(app, repo, options = {}) {
       permissions,
       pathPattern: body.pathPattern
     });
+    revalidateRoomAccess(repo, options.connectionRegistry);
     return { aclRule };
   });
   app.delete("/api/rooms/:roomId/acl/:aclId", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { roomId, aclId } = request.params;
-    const room = repo.getRoom(roomId);
-    if (!room) {
-      throw new AppError("NOT_FOUND", "Room not found.", 404);
+    const room = requireRoom3(repo, roomId);
+    if (!canManageRoom(principal, room)) {
+      throw new AppError("PERMISSION_DENIED", "Only the room owner or server owner can remove room permissions.", 403);
     }
-    if (!canManageTeam(principal, room.team_id)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can remove room permissions.", 403);
-    }
-    repo.deleteAclRule({ aclId, roomId, teamId: room.team_id, actorUserId: principal.userId });
+    repo.deleteAclRule({ aclId, roomId, actorUserId: principal.userId });
+    revalidateRoomAccess(repo, options.connectionRegistry);
     return { ok: true };
   });
   app.delete("/api/rooms/:roomId", async (request) => {
     var _a;
     const principal = getActivePrincipal(repo, request);
     const { roomId } = request.params;
-    const room = repo.getRoom(roomId);
-    if (!room) {
-      throw new AppError("NOT_FOUND", "Room not found.", 404);
+    const room = requireRoom3(repo, roomId);
+    if (!canManageRoom(principal, room)) {
+      throw new AppError("PERMISSION_DENIED", "Only the room owner or server owner can delete rooms.", 403);
     }
-    if (!canManageTeam(principal, room.team_id)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can delete rooms.", 403);
-    }
-    repo.deleteRoom({ roomId, teamId: room.team_id, actorUserId: principal.userId });
+    repo.deleteRoom({ roomId, actorUserId: principal.userId });
     (_a = options.connectionRegistry) == null ? void 0 : _a.broadcastToRoom(roomId, { type: "room_deleted", roomId });
     return { ok: true };
   });
 }
-function visibleRoom(repo, principal, room, aclRules) {
-  const subject = { type: "user", id: principal.userId, role: principal.role, userId: principal.userId };
+function visibleRoom(repo, principal, room, teamIds) {
+  const subject = { type: "user", id: principal.userId, userId: principal.userId, teamIds };
   const roomRead = evaluatePolicy({
-    teamId: principal.teamId,
     subject,
     resource: { type: "room", roomId: room.id, roomOwnerUserId: room.owner_user_id },
     permission: "room:read",
-    aclRules,
-    membershipRevokedAt: principal.memberRevokedAt,
+    aclRules: repo.listAclRulesForRoom(room.id),
+    membershipRevokedAt: principal.userRevokedAt,
     deviceRevokedAt: principal.deviceRevokedAt
   });
   if (!roomRead.allowed) {
     return null;
   }
+  const aclRules = repo.listAclRulesForRoom(room.id);
   return {
-    ...toRoomResponse(room),
+    ...managedRoomResponse(repo, room),
     permissions: LISTED_PERMISSIONS.filter(
       (permission) => evaluatePolicy({
-        teamId: principal.teamId,
         subject,
         resource: resourceFor(permission, room),
         permission,
         aclRules,
-        membershipRevokedAt: principal.memberRevokedAt,
+        membershipRevokedAt: principal.userRevokedAt,
         deviceRevokedAt: principal.deviceRevokedAt
       }).allowed
-    ),
+    )
+  };
+}
+function resourceFor(permission, room) {
+  if (permission.startsWith("room:")) {
+    return { type: "room", roomId: room.id, roomOwnerUserId: room.owner_user_id };
+  }
+  return { type: "file", roomId: room.id, roomOwnerUserId: room.owner_user_id, relativePath: "" };
+}
+function managedRoomResponse(repo, room) {
+  return {
+    ...toRoomResponse(room),
+    permissions: [],
     capabilities: repo.listCapabilities(room.id).map((capability) => {
       var _a;
       return {
@@ -49751,12 +49986,6 @@ function visibleRoom(repo, principal, room, aclRules) {
     })
   };
 }
-function resourceFor(permission, room) {
-  if (permission.startsWith("room:")) {
-    return { type: "room", roomId: room.id, roomOwnerUserId: room.owner_user_id };
-  }
-  return { type: "file", roomId: room.id, roomOwnerUserId: room.owner_user_id, relativePath: "" };
-}
 function toRoomResponse(room) {
   return {
     id: room.id,
@@ -49767,36 +49996,78 @@ function toRoomResponse(room) {
     ownerUserId: room.owner_user_id
   };
 }
+function requireRoom3(repo, roomId) {
+  const room = repo.getRoom(roomId);
+  if (!room) {
+    throw new AppError("NOT_FOUND", "Room not found.", 404);
+  }
+  return room;
+}
+function validateRoomBody(body) {
+  if (!body.name || !body.type || !body.sourcePath || !body.mountName) {
+    throw new AppError("VALIDATION_ERROR", "name, type, sourcePath, and mountName are required.", 422);
+  }
+  if (body.type !== "file" && body.type !== "folder") {
+    throw new AppError("VALIDATION_ERROR", "type must be file or folder.", 422);
+  }
+  if (!isSafeMountName(body.mountName)) {
+    throw new AppError("INVALID_PATH", "mountName must be a safe single path segment.", 422);
+  }
+}
+function isSubjectType(value) {
+  return value === "user" || value === "team" || value === "device" || value === "agent";
+}
 function isSafeMountName(value) {
   return Boolean(value) && !value.includes("/") && !value.includes("\\") && !value.startsWith(".") && value !== "." && value !== "..";
 }
 
 // ../relay-server/src/routes/team.routes.ts
 function registerTeamRoutes(app, repo, options) {
-  app.post("/api/teams/bootstrap", async (request) => {
+  app.post("/api/bootstrap", async (request) => {
     if (!options.allowRemoteBootstrap && !isLocalAddress(request.ip)) {
       throw new AppError("PERMISSION_DENIED", "Bootstrap is only allowed from localhost by default.", 403);
     }
-    const body = request.body;
-    if (!body.teamName || !body.ownerDisplayName || !body.ownerDeviceName) {
-      throw new AppError("VALIDATION_ERROR", "teamName, ownerDisplayName, and ownerDeviceName are required.", 422);
+    if (repo.getServerOwnerId()) {
+      throw new AppError("PERMISSION_DENIED", "Bootstrap has already been completed.", 403);
     }
-    return repo.bootstrapTeam({
-      teamName: body.teamName,
-      ownerDisplayName: body.ownerDisplayName,
-      ownerDeviceName: body.ownerDeviceName
+    const body = request.body;
+    if (!body.displayName || !body.deviceName) {
+      throw new AppError("VALIDATION_ERROR", "displayName and deviceName are required.", 422);
+    }
+    return repo.bootstrapServer({
+      displayName: body.displayName,
+      deviceName: body.deviceName,
+      teamName: body.teamName
     });
+  });
+  app.post("/api/teams", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    if (!principal.isServerOwner) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner can create teams.", 403);
+    }
+    const body = request.body;
+    if (!body.name) {
+      throw new AppError("VALIDATION_ERROR", "name is required.", 422);
+    }
+    return { team: toTeamResponse(repo.createTeam({ name: body.name, ownerUserId: principal.userId })) };
+  });
+  app.get("/api/teams", async (request) => {
+    getActivePrincipal(repo, request);
+    return { teams: repo.listTeams().map(toTeamResponse) };
   });
   app.post("/api/teams/:teamId/invites", async (request) => {
     var _a, _b, _c;
     const principal = getActivePrincipal(repo, request);
     const { teamId } = request.params;
-    if (!canManageTeam(principal, teamId)) {
+    if (!repo.getTeam(teamId)) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    if (!canManageTeam(repo, principal, teamId)) {
       throw new AppError("PERMISSION_DENIED", "Only owners and admins can create invites.", 403);
     }
     const body = request.body;
     const role = (_a = body.role) != null ? _a : "member";
-    if (role !== "member" && role !== "admin") {
+    if (!isTeamRole(role)) {
       throw new AppError("VALIDATION_ERROR", "role must be member or admin.", 422);
     }
     const invite = repo.createInvite({
@@ -49817,42 +50088,85 @@ function registerTeamRoutes(app, repo, options) {
   app.get("/api/teams/:teamId/members", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { teamId } = request.params;
-    if (principal.teamId !== teamId) {
+    const team = repo.getTeam(teamId);
+    if (!team) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    const membership = repo.getTeamMembership(teamId, principal.userId);
+    if (!principal.isServerOwner && team.owner_user_id !== principal.userId && (!membership || membership.revoked_at)) {
       throw new AppError("PERMISSION_DENIED", "You are not a member of this team.", 403);
     }
-    const includeRevoked = principal.role === "owner" || principal.role === "admin";
+    const includeRevoked = canManageTeam(repo, principal, teamId);
+    const members = repo.listMembers(teamId, includeRevoked).map((member) => ({
+      userId: member.user_id,
+      displayName: member.display_name,
+      role: member.role,
+      revokedAt: member.revoked_at
+    }));
+    const serverOwnerId = repo.getServerOwnerId();
+    const serverOwner = serverOwnerId && !members.some((member) => member.userId === serverOwnerId) ? repo.getUser(serverOwnerId) : null;
     return {
-      members: repo.listMembers(teamId, includeRevoked).map((member) => ({
-        userId: member.user_id,
-        displayName: member.display_name,
-        role: member.role,
-        revokedAt: member.revoked_at
-      }))
+      members,
+      ...serverOwner ? { serverOwner: { userId: serverOwner.id, displayName: serverOwner.display_name, revokedAt: serverOwner.revoked_at } } : {}
     };
   });
-  app.post("/api/teams/:teamId/members/:userId/revoke", async (request) => {
-    var _a;
-    const principal = getActivePrincipal(repo, request);
-    const { teamId, userId } = request.params;
-    if (!canManageTeam(principal, teamId)) {
-      throw new AppError("PERMISSION_DENIED", "Only owners and admins can revoke members.", 403);
-    }
-    const body = request.body;
-    repo.revokeMember({ teamId, userId, actorUserId: principal.userId, reason: body.reason });
-    (_a = options.connectionRegistry) == null ? void 0 : _a.closeRevokedUser(teamId, userId);
-    return { ok: true };
-  });
-  app.delete("/api/teams/:teamId", async (request) => {
+  app.post("/api/teams/:teamId/members", async (request) => {
     var _a;
     const principal = getActivePrincipal(repo, request);
     const { teamId } = request.params;
-    if (principal.teamId !== teamId || principal.role !== "owner") {
-      throw new AppError("PERMISSION_DENIED", "Only the team owner can delete the team.", 403);
+    if (!repo.getTeam(teamId)) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
     }
-    (_a = options.connectionRegistry) == null ? void 0 : _a.closeTeam(teamId);
-    repo.deleteTeam({ teamId, actorUserId: principal.userId });
+    if (!canManageTeam(repo, principal, teamId)) {
+      throw new AppError("PERMISSION_DENIED", "Only owners and admins can add members.", 403);
+    }
+    const body = request.body;
+    const role = (_a = body.role) != null ? _a : "member";
+    if (!body.userId || !isTeamRole(role)) {
+      throw new AppError("VALIDATION_ERROR", "userId is required and role must be member or admin.", 422);
+    }
+    repo.addTeamMember({ teamId, userId: body.userId, role, actorUserId: principal.userId });
     return { ok: true };
   });
+  app.post("/api/teams/:teamId/members/:userId/revoke", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const { teamId, userId } = request.params;
+    if (!repo.getTeam(teamId)) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    if (!canManageTeam(repo, principal, teamId)) {
+      throw new AppError("PERMISSION_DENIED", "Only owners and admins can revoke members.", 403);
+    }
+    const body = request.body;
+    repo.revokeMember({ teamId, userId, actorUserId: principal.userId, reason: body == null ? void 0 : body.reason });
+    revalidateRoomAccess(repo, options.connectionRegistry);
+    return { ok: true };
+  });
+  app.delete("/api/teams/:teamId", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const { teamId } = request.params;
+    const team = repo.getTeam(teamId);
+    if (!team) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    if (!principal.isServerOwner && team.owner_user_id !== principal.userId) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner or team owner can delete the team.", 403);
+    }
+    repo.deleteTeam({ teamId, actorUserId: principal.userId });
+    revalidateRoomAccess(repo, options.connectionRegistry);
+    return { ok: true };
+  });
+}
+function toTeamResponse(team) {
+  return {
+    id: team.id,
+    slug: team.slug,
+    name: team.name,
+    ownerUserId: team.owner_user_id
+  };
+}
+function isTeamRole(role) {
+  return role === "member" || role === "admin";
 }
 function isLocalAddress(ip) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
@@ -49878,20 +50192,23 @@ var ConnectionRegistry = class {
       sendJson(connection.socket, message);
     }
   }
-  closeRevokedUser(teamId, userId) {
-    var _a;
+  revalidateAccess(isStillAllowed) {
     for (const connection of this.connections) {
-      if (((_a = connection.principal) == null ? void 0 : _a.teamId) === teamId && connection.principal.userId === userId) {
-        sendJson(connection.socket, { type: "revoked", message: "Your access to this team has been revoked." });
-        connection.socket.close();
+      if (!connection.principal) continue;
+      for (const roomId of connection.subscriptions) {
+        if (isStillAllowed(roomId, connection.principal)) continue;
+        connection.subscriptions.delete(roomId);
+        if (connection.socket.readyState === connection.socket.OPEN) {
+          sendJson(connection.socket, { type: "room_access_revoked", roomId });
+        }
       }
     }
   }
-  closeTeam(teamId) {
+  closeRevokedUser(userId) {
     var _a;
     for (const connection of this.connections) {
-      if (((_a = connection.principal) == null ? void 0 : _a.teamId) === teamId) {
-        sendJson(connection.socket, { type: "revoked", message: "This team has been deleted." });
+      if (((_a = connection.principal) == null ? void 0 : _a.userId) === userId) {
+        sendJson(connection.socket, { type: "revoked", message: "Your access to this server has been revoked." });
         connection.socket.close();
       }
     }
@@ -49924,7 +50241,7 @@ function registerSyncRoutes(app, repo, registry, options) {
       if (connection.principal) {
         try {
           repo.audit({
-            teamId: connection.principal.teamId,
+            teamId: null,
             actorType: "device",
             actorId: connection.principal.deviceId,
             action: "sync.disconnected",
@@ -49956,7 +50273,7 @@ async function handleMessage(repo, registry, connection, options, raw) {
     }
     connection.principal = principal;
     repo.audit({
-      teamId: principal.teamId,
+      teamId: null,
       actorType: "device",
       actorId: principal.deviceId,
       action: "sync.connected",
@@ -49967,7 +50284,6 @@ async function handleMessage(repo, registry, connection, options, raw) {
     sendJson(connection.socket, {
       type: "hello_ok",
       requestId: message.requestId,
-      teamId: principal.teamId,
       userId: principal.userId,
       deviceId: principal.deviceId
     });
@@ -49988,7 +50304,7 @@ async function handleMessage(repo, registry, connection, options, raw) {
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:subscribe" });
     } catch (e) {
       repo.audit({
-        teamId: room.team_id,
+        teamId: null,
         actorType: "device",
         actorId: connection.principal.deviceId,
         action: "sync.denied",
@@ -50020,7 +50336,7 @@ async function handleMessage(repo, registry, connection, options, raw) {
   }
   if (message.type === "file_change") {
     try {
-      const room = requireRoom3(repo, message.roomId);
+      const room = requireRoom4(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
       if (!isEligibleTextPath(relativePath)) {
         throw new AppError("INVALID_PATH", "Only v0.1 text file extensions can be synced.", 422);
@@ -50072,7 +50388,7 @@ async function handleMessage(repo, registry, connection, options, raw) {
   }
   if (message.type === "file_delete") {
     try {
-      const room = requireRoom3(repo, message.roomId);
+      const room = requireRoom4(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:delete", relativePath });
@@ -50127,7 +50443,7 @@ function sendRejection(socket, requestId, error) {
     message: "Sync message could not be applied."
   });
 }
-function requireRoom3(repo, roomId) {
+function requireRoom4(repo, roomId) {
   const room = repo.getRoom(roomId);
   if (!room) {
     throw new AppError("NOT_FOUND", "Room not found.", 404);
@@ -50174,6 +50490,7 @@ async function createApp(options = {}) {
     connectionRegistry
   });
   registerRoomRoutes(app, repo, { connectionRegistry });
+  registerFriendRoutes(app, repo, { connectionRegistry });
   registerAgentRoutes(app, repo);
   registerFileRoutes(app, repo, {
     maxFileBytes,
@@ -50275,14 +50592,16 @@ var EmbeddedRelayServer = class {
       return this.status;
     }
     try {
+      const publicUrlOverride = (_a = settings.publicUrlOverride) == null ? void 0 : _a.trim();
       const env = {
         HOST: settings.bindMode === "lan" ? "0.0.0.0" : "127.0.0.1",
         PORT: settings.port ? String(settings.port) : void 0,
+        PUBLIC_URL: publicUrlOverride || void 0,
         MAX_FILE_BYTES: String(settings.maxFileBytes),
         ALLOW_REMOTE_BOOTSTRAP: settings.allowRemoteBootstrap ? "true" : "false"
       };
       const config = await resolveRuntimeConfig(env);
-      const wasmBytes = (0, import_node_fs2.readFileSync)((0, import_node_path2.join)(this.pluginDir, "sql-wasm.wasm"));
+      const wasmBytes = (0, import_node_fs3.readFileSync)((0, import_node_path2.join)(this.pluginDir, "sql-wasm.wasm"));
       const app = await createApp({
         dbPath: (0, import_node_path2.join)(this.dataDir, "relay.sqlite"),
         publicUrl: config.publicUrl,
@@ -50292,12 +50611,15 @@ var EmbeddedRelayServer = class {
       });
       await app.listen({ host: config.host, port: config.port });
       this.app = app;
+      const detectedLanIp = publicUrlOverride ? void 0 : detectLanIp();
+      const lanUrl = config.host === "0.0.0.0" ? publicUrlOverride ? config.publicUrl : detectedLanIp ? `http://${detectedLanIp}:${config.port}` : void 0 : void 0;
       this.status = {
         running: true,
         host: config.host,
         port: config.port,
         localUrl: `http://127.0.0.1:${config.port}`,
-        lanUrl: config.host === "0.0.0.0" ? `http://${(_a = detectLanIp()) != null ? _a : "127.0.0.1"}:${config.port}` : void 0
+        lanUrl,
+        lanDetectionFailed: config.host === "0.0.0.0" && !lanUrl
       };
       return this.status;
     } catch (error) {
@@ -50331,7 +50653,7 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Vault Rooms" });
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
-    this.renderTeamsSettings(containerEl);
+    this.renderServersSettings(containerEl);
   }
   renderServerSettings(containerEl) {
     containerEl.createEl("h3", { text: "Relay server" });
@@ -50341,7 +50663,7 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
     });
     const status = this.plugin.getServerStatus();
     new import_obsidian.Setting(containerEl).setName("Status").setDesc(
-      status.running ? `Running \u2014 this device: ${status.localUrl}${status.lanUrl ? `, LAN: ${status.lanUrl}` : ""}` : status.error ? `Stopped \u2014 last error: ${status.error}` : "Stopped"
+      status.running ? `Running \u2014 this device: ${status.localUrl}${status.lanUrl ? `, LAN: ${status.lanUrl}` : status.lanDetectionFailed ? " \u2014 could NOT auto-detect a LAN IP; invite links will point at 127.0.0.1 and won't work for teammates until you set a Public URL override below, then restart the server." : ""}` : status.error ? `Stopped \u2014 last error: ${status.error}` : "Stopped"
     ).addButton(
       (button) => button.setButtonText(status.running ? "Stop" : "Start").setCta().onClick(async () => {
         try {
@@ -50364,6 +50686,21 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
           new import_obsidian.Notice("Restart the server for this change to take effect.");
         }
       })
+    );
+    new import_obsidian.Setting(containerEl).setName("Public URL override").setDesc(
+      `Only needed in "Local network" mode if auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers). Set this to this device's real LAN address, e.g. http://192.168.1.42:8787 - leave blank to auto-detect.`
+    ).addText(
+      (text) => {
+        var _a;
+        return text.setPlaceholder("auto-detect").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
+          const trimmed = value.trim();
+          this.plugin.settings.server.publicUrlOverride = trimmed || void 0;
+          await this.plugin.saveSettings();
+          if (this.plugin.getServerStatus().running) {
+            new import_obsidian.Notice("Restart the server for this change to take effect.");
+          }
+        });
+      }
     );
     new import_obsidian.Setting(containerEl).setName("Port").setDesc("Leave blank to auto-pick a free port starting at 8787.").addText(
       (text) => text.setPlaceholder("auto").setValue(this.plugin.settings.server.port ? String(this.plugin.settings.server.port) : "").onChange(async (value) => {
@@ -50416,18 +50753,18 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
   }
-  renderTeamsSettings(containerEl) {
+  renderServersSettings(containerEl) {
     var _a;
-    containerEl.createEl("h3", { text: "Teams" });
+    containerEl.createEl("h3", { text: "Servers" });
     if (this.plugin.settings.servers.length === 0) {
-      containerEl.createEl("p", { cls: "setting-item-description", text: "No teams connected yet." });
+      containerEl.createEl("p", { cls: "setting-item-description", text: "No servers connected yet." });
       return;
     }
     for (const server of this.plugin.settings.servers) {
       const active = server.id === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.id);
       const isRevoked = server.status === "revoked";
-      const setting = new import_obsidian.Setting(containerEl).setName(`${server.teamName} - ${server.userDisplayName}${active ? " - active" : ""}`).setDesc(
-        isRevoked ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join the team again.` : `${server.baseUrl} (${server.status})`
+      const setting = new import_obsidian.Setting(containerEl).setName(`${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}${active ? " - active" : ""}`).setDesc(
+        isRevoked ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join again.` : `${server.baseUrl} (${server.status})`
       );
       setting.addButton(
         (button) => button.setButtonText("Use").setDisabled(active).onClick(async () => {
@@ -50435,7 +50772,7 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
             await this.plugin.activateServer(server.id);
             this.display();
           } catch (error) {
-            new import_obsidian.Notice(error instanceof Error ? error.message : "Team switch failed");
+            new import_obsidian.Notice(error instanceof Error ? error.message : "Server switch failed");
           }
         })
       );
@@ -50448,26 +50785,9 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
           }
         })
       );
-      if (server.role === "owner") {
-        setting.addButton(
-          (button) => button.setButtonText("Delete team").setWarning().onClick(async () => {
-            if (!window.confirm(
-              `Delete team "${server.teamName}"? This permanently deletes every room, file, and member in the team for everyone. This cannot be undone.`
-            )) {
-              return;
-            }
-            try {
-              await this.plugin.deleteTeam(server.id);
-              this.display();
-            } catch (error) {
-              new import_obsidian.Notice(error instanceof Error ? error.message : "Failed to delete team");
-            }
-          })
-        );
-      }
       setting.addButton(
         (button) => button.setButtonText("Forget").setWarning().onClick(async () => {
-          if (!window.confirm(`Remove "${server.teamName}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
+          if (!window.confirm(`Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
             return;
           }
           await this.plugin.forgetServer(server.id);
@@ -50782,8 +51102,8 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     __publicField(this, "localMountPath");
     __publicField(this, "capabilities");
     __publicField(this, "aclRules", []);
-    __publicField(this, "subjectType", "role");
-    __publicField(this, "subjectId", "member");
+    __publicField(this, "subjectType", "team");
+    __publicField(this, "subjectId", "");
     __publicField(this, "effect", "allow");
     __publicField(this, "preset", "reader");
     __publicField(this, "pathPattern", "**/*");
@@ -50806,7 +51126,8 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
   }
   async loadAccessData() {
     try {
-      await this.plugin.refreshTeamMembers({ notify: false });
+      await this.plugin.refreshTeams({ notify: false });
+      this.subjectId = this.subjectId || this.defaultSubjectId();
       this.aclRules = await this.plugin.listRoomAcl(this.room.id);
       this.render();
     } catch (error) {
@@ -50919,27 +51240,34 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     parent.createEl("h3", { text: "Room access" });
     parent.createEl("p", {
       cls: "vault-rooms-setting-hint",
-      text: "Grant a whole team role, a specific member, or (advanced) a specific device/agent id access to this room."
+      text: "Grant a whole team, a specific friend, or (advanced) a specific device/agent id access to this room."
     });
     new import_obsidian6.Setting(parent).setName("Grant access to").addDropdown(
-      (dropdown) => dropdown.addOption("role", "Whole team role").addOption("user", "Specific team member").addOption("device", "Specific device (advanced)").addOption("agent", "Specific agent (advanced)").setValue(this.subjectType).onChange((value) => {
+      (dropdown) => dropdown.addOption("team", "Team").addOption("user", "Specific friend").addOption("device", "Device id (advanced)").addOption("agent", "Agent id (advanced)").setValue(this.subjectType).onChange((value) => {
         this.subjectType = value;
         this.subjectId = this.defaultSubjectId();
         this.render();
       })
     );
-    if (this.subjectType === "role") {
-      new import_obsidian6.Setting(parent).setName("Role").addDropdown(
-        (dropdown) => dropdown.addOption("member", "Member").addOption("admin", "Admin").addOption("owner", "Owner").setValue(this.subjectId).onChange((value) => this.subjectId = value)
-      );
-    } else if (this.subjectType === "user") {
-      const activeMembers = this.plugin.teamMembers.filter((member) => !member.revokedAt);
-      if (activeMembers.length === 0) {
-        new import_obsidian6.Setting(parent).setDesc("No active team members yet - invite someone first.");
+    if (this.subjectType === "team") {
+      if (this.plugin.teams.length === 0) {
+        new import_obsidian6.Setting(parent).setDesc("No teams yet - create one from the Vault Rooms panel first.");
       } else {
-        new import_obsidian6.Setting(parent).setName("Team member").addDropdown((dropdown) => {
-          for (const member of activeMembers) {
-            dropdown.addOption(member.userId, `${member.displayName} (${member.role})`);
+        new import_obsidian6.Setting(parent).setName("Team").addDropdown((dropdown) => {
+          for (const team of this.plugin.teams) {
+            dropdown.addOption(team.id, team.name);
+          }
+          dropdown.setValue(this.subjectId).onChange((value) => this.subjectId = value);
+        });
+      }
+    } else if (this.subjectType === "user") {
+      const activeFriends = this.plugin.friends.filter((friend) => !friend.revokedAt);
+      if (activeFriends.length === 0) {
+        new import_obsidian6.Setting(parent).setDesc("No friends yet - invite someone first.");
+      } else {
+        new import_obsidian6.Setting(parent).setName("Friend").addDropdown((dropdown) => {
+          for (const friend of activeFriends) {
+            dropdown.addOption(friend.id, friend.displayName);
           }
           dropdown.setValue(this.subjectId).onChange((value) => this.subjectId = value);
         });
@@ -50972,11 +51300,19 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
         label.createSpan({ text: permission });
       }
     }
-    new import_obsidian6.Setting(parent).addButton(
-      (button) => button.setButtonText("Add whole team as editor").onClick(async () => {
-        await this.grantWholeTeamEditor();
-      })
-    ).addButton(
+    const applyRow = new import_obsidian6.Setting(parent);
+    if (this.subjectType === "team") {
+      applyRow.addButton(
+        (button) => button.setButtonText("Add team as editor").onClick(async () => {
+          if (!this.subjectId) {
+            new import_obsidian6.Notice("Pick a team first.");
+            return;
+          }
+          await this.grantAccess({ subjectType: "team", subjectId: this.subjectId, effect: "allow", preset: "editor", pathPattern: "**/*" });
+        })
+      );
+    }
+    applyRow.addButton(
       (button) => button.setCta().setButtonText("Apply access").onClick(async () => {
         await this.grantAccess({
           subjectType: this.subjectType,
@@ -51043,30 +51379,24 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
       new import_obsidian6.Notice(error instanceof Error ? error.message : "Room access update failed");
     }
   }
-  async grantWholeTeamEditor() {
-    try {
-      await this.plugin.grantRoomAccess(this.room.id, { subjectType: "role", subjectId: "member", effect: "allow", preset: "editor", pathPattern: "**/*" });
-      await this.plugin.grantRoomAccess(this.room.id, { subjectType: "role", subjectId: "admin", effect: "allow", preset: "editor", pathPattern: "**/*" });
-      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
-      this.render();
-    } catch (error) {
-      new import_obsidian6.Notice(error instanceof Error ? error.message : "Whole team access update failed");
-    }
-  }
   defaultSubjectId() {
-    var _a, _b;
-    if (this.subjectType === "role") {
-      return "member";
+    var _a, _b, _c, _d;
+    if (this.subjectType === "team") {
+      return (_b = (_a = this.plugin.teams[0]) == null ? void 0 : _a.id) != null ? _b : "";
     }
     if (this.subjectType === "user") {
-      return (_b = (_a = this.plugin.teamMembers.find((member) => !member.revokedAt)) == null ? void 0 : _a.userId) != null ? _b : "";
+      return (_d = (_c = this.plugin.friends.find((friend) => !friend.revokedAt)) == null ? void 0 : _c.id) != null ? _d : "";
     }
     return "";
   }
   subjectLabel(rule) {
     if (rule.subjectType === "user") {
-      const member = this.plugin.teamMembers.find((candidate) => candidate.userId === rule.subjectId);
-      return member ? `${member.displayName} (${member.role})` : rule.subjectId;
+      const friend = this.plugin.friends.find((candidate) => candidate.id === rule.subjectId);
+      return friend ? friend.displayName : rule.subjectId;
+    }
+    if (rule.subjectType === "team") {
+      const team = this.plugin.teams.find((candidate) => candidate.id === rule.subjectId);
+      return team ? team.name : rule.subjectId;
     }
     return `${rule.subjectType}:${rule.subjectId}`;
   }
@@ -51083,7 +51413,7 @@ var SetupTeamModal = class extends import_obsidian7.Modal {
     super(plugin.app);
     this.plugin = plugin;
     __publicField(this, "serverUrl");
-    __publicField(this, "teamName", "Demo");
+    __publicField(this, "teamName", "");
     __publicField(this, "displayName", "A");
     __publicField(this, "deviceName", "A laptop");
     this.serverUrl = defaultServerUrl;
@@ -51093,21 +51423,21 @@ var SetupTeamModal = class extends import_obsidian7.Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: "Set Up Vault Rooms" });
     new import_obsidian7.Setting(contentEl).setName("Server URL").addText((text) => text.setValue(this.serverUrl).onChange((value) => this.serverUrl = value.trim()));
-    new import_obsidian7.Setting(contentEl).setName("Team name").addText((text) => text.setValue(this.teamName).onChange((value) => this.teamName = value.trim()));
     new import_obsidian7.Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => this.displayName = value.trim()));
     new import_obsidian7.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName).onChange((value) => this.deviceName = value.trim()));
+    new import_obsidian7.Setting(contentEl).setName("First team name").setDesc("Optional - creates a team you own right away. You can create more teams later.").addText((text) => text.setValue(this.teamName).onChange((value) => this.teamName = value.trim()));
     new import_obsidian7.Setting(contentEl).addButton(
       (button) => button.setButtonText("Test connection").onClick(async () => {
         await this.plugin.testConnection(this.serverUrl);
       })
     );
     new import_obsidian7.Setting(contentEl).addButton(
-      (button) => button.setCta().setButtonText("Set up team").onClick(async () => {
+      (button) => button.setCta().setButtonText("Set up server").onClick(async () => {
         try {
-          await this.plugin.setupTeam(this.serverUrl, this.teamName, this.displayName, this.deviceName);
+          await this.plugin.setupServer(this.serverUrl, this.displayName, this.deviceName, this.teamName || void 0);
           this.close();
         } catch (error) {
-          new import_obsidian7.Notice(error instanceof Error ? error.message : "Team setup failed");
+          new import_obsidian7.Notice(error instanceof Error ? error.message : "Server setup failed");
         }
       })
     );
@@ -51254,6 +51584,11 @@ var RoomSyncSocket = class {
         this.deps.onRoomDeleted(message.roomId);
         return;
       }
+      case "room_access_revoked": {
+        this.subscribedRooms.delete(message.roomId);
+        this.deps.onAccessRevoked(message.roomId);
+        return;
+      }
       default:
         return;
     }
@@ -51376,7 +51711,7 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
   }
   async onOpen() {
     if (this.plugin.getActiveServer()) {
-      await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeamMembers({ notify: false })]).catch((error) => {
+      await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
         new import_obsidian8.Notice(error instanceof Error ? error.message : "Failed to load rooms");
       });
     }
@@ -51391,15 +51726,16 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
     const server = this.plugin.getActiveServer();
     header.createEl("div", {
       cls: "vault-rooms-status",
-      text: server ? `${server.teamName} / ${server.userDisplayName} / ${server.status}` : "No team connected yet"
+      text: server ? `${server.userDisplayName} / ${server.baseUrl} / ${server.status}` : "No server connected yet"
     });
     this.renderServerSection(container);
-    this.renderTeamSection(container);
+    this.renderConnectionSection(container);
     if (!server) {
-      container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a team above to load rooms." });
+      container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a server above to load teams and rooms." });
       return;
     }
-    this.renderMembers(container);
+    this.renderFriendsSection(container);
+    this.renderTeamsSection(container);
     this.renderRoomsSection(container);
   }
   renderServerSection(parent) {
@@ -51419,6 +51755,11 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
           await navigator.clipboard.writeText((_a = status.lanUrl) != null ? _a : "");
           new import_obsidian8.Notice("LAN URL copied.");
         });
+      } else if (status.lanDetectionFailed) {
+        card.createEl("div", {
+          cls: "vault-rooms-error",
+          text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings \u2192 Vault Rooms \u2192 Relay server, then restart the server."
+        });
       } else {
         card.createEl("div", {
           cls: "vault-rooms-room-meta",
@@ -51428,7 +51769,7 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
     } else if (!status.running && status.error) {
       card.createEl("div", { cls: "vault-rooms-error", text: status.error });
     } else {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Start it to set up or join a team." });
+      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Start it to set up or join a server." });
     }
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     if (status.running) {
@@ -51444,17 +51785,17 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
       );
     }
   }
-  renderTeamSection(parent) {
+  renderConnectionSection(parent) {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Team" });
+    section.createEl("h3", { text: "Connection" });
     const serverRunning = this.plugin.getServerStatus().running;
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Set Up Team", () => this.plugin.openSetupTeamModal(), true);
-    this.addPanelButton(actions, "Join Team", () => this.plugin.openJoinTeamModal());
+    this.addPanelButton(actions, "Set Up Server", () => this.plugin.openSetupServerModal(), true);
+    this.addPanelButton(actions, "Join Server", () => this.plugin.openJoinTeamModal());
     if (this.plugin.settings.servers.length === 0) {
       section.createDiv({
         cls: "vault-rooms-empty",
-        text: serverRunning ? "No teams yet. Set up a team on this server, or join one via an invite link." : "Start the server above, then set up or join a team."
+        text: serverRunning ? "Not connected yet. Set up a server, or join one via an invite link." : "Start the server above, then set up or join one."
       });
       return;
     }
@@ -51463,35 +51804,120 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
     for (const server of this.plugin.settings.servers) {
       const item = list.createDiv({ cls: server.id === (active == null ? void 0 : active.id) ? "vault-rooms-team is-active" : "vault-rooms-team" });
       const title = item.createDiv({ cls: "vault-rooms-team-title" });
-      title.createEl("strong", { text: server.teamName });
+      title.createEl("strong", { text: server.baseUrl });
       title.createEl("span", { text: server.id === (active == null ? void 0 : active.id) ? "active" : server.status });
-      item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName} / ${server.baseUrl}` });
+      item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
       const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
       const useButton = this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
       useButton.disabled = server.id === (active == null ? void 0 : active.id);
       this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl));
     }
   }
-  renderMembers(parent) {
+  renderFriendsSection(parent) {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Team Members" });
-    const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Invite Member", () => this.plugin.createInvite("member"));
-    this.addPanelButton(actions, "Invite Admin", () => this.plugin.createInvite("admin"));
+    section.createEl("h3", { text: "Friends" });
     const server = this.plugin.getActiveServer();
-    const list = section.createDiv({ cls: "vault-rooms-member-list" });
-    if (this.plugin.teamMembers.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty", text: "No members loaded." });
+    const list = section.createDiv({ cls: "vault-rooms-friend-list" });
+    if (this.plugin.friends.length === 0) {
+      list.createDiv({ cls: "vault-rooms-empty", text: "No friends loaded." });
       return;
     }
-    for (const member of this.plugin.teamMembers) {
-      const item = list.createDiv({ cls: member.revokedAt ? "vault-rooms-member is-revoked" : "vault-rooms-member" });
-      item.createEl("strong", { text: member.displayName });
-      item.createSpan({ text: ` ${member.role}${member.revokedAt ? " / revoked" : ""}` });
-      const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-      const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeTeamMember(member.userId));
-      revoke.disabled = member.userId === (server == null ? void 0 : server.userId) || member.role === "owner" || Boolean(member.revokedAt);
+    for (const friend of this.plugin.friends) {
+      const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
+      item.createEl("strong", { text: friend.displayName });
+      item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
+      if (server == null ? void 0 : server.isServerOwner) {
+        const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+        const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
+        revoke.disabled = friend.id === server.userId || Boolean(friend.revokedAt);
+      }
     }
+  }
+  renderTeamsSection(parent) {
+    const section = parent.createDiv({ cls: "vault-rooms-section" });
+    section.createEl("h3", { text: "Teams" });
+    const server = this.plugin.getActiveServer();
+    if (server == null ? void 0 : server.isServerOwner) {
+      const actions = section.createDiv({ cls: "vault-rooms-actions" });
+      let newTeamName = "";
+      const nameInput = actions.createEl("input", { type: "text", attr: { placeholder: "New team name" } });
+      nameInput.oninput = () => newTeamName = nameInput.value.trim();
+      this.addPanelButton(actions, "Create team", async () => {
+        if (!newTeamName) {
+          new import_obsidian8.Notice("Team name is required.");
+          return;
+        }
+        await this.plugin.createTeam(newTeamName);
+        this.render();
+      });
+    }
+    if (this.plugin.teams.length === 0) {
+      section.createDiv({ cls: "vault-rooms-empty", text: "No teams yet." });
+      return;
+    }
+    const list = section.createDiv({ cls: "vault-rooms-team-card-list" });
+    for (const team of this.plugin.teams) {
+      this.renderTeamCard(list, team);
+    }
+  }
+  renderTeamCard(parent, team) {
+    const canManage = this.plugin.canManageTeam(team);
+    const canDelete = this.plugin.canDeleteTeam(team);
+    const members = this.plugin.teamMembersByTeam[team.id];
+    const card = parent.createDiv({ cls: "vault-rooms-team-card" });
+    const title = card.createDiv({ cls: "vault-rooms-team-title" });
+    title.createEl("strong", { text: team.name });
+    const role = this.plugin.myTeamRoles[team.id];
+    if (role) {
+      title.createEl("span", { text: role });
+    }
+    const memberList = card.createDiv({ cls: "vault-rooms-team-member-list" });
+    if (!members) {
+      memberList.createDiv({ cls: "vault-rooms-empty", text: "You are not a member of this team." });
+    } else if (members.length === 0) {
+      memberList.createDiv({ cls: "vault-rooms-empty", text: "No members." });
+    } else {
+      for (const member of members) {
+        const item = memberList.createDiv({ cls: member.revokedAt ? "vault-rooms-team-member is-revoked" : "vault-rooms-team-member" });
+        item.createEl("strong", { text: member.displayName });
+        item.createSpan({ text: ` ${member.role}${member.revokedAt ? " / revoked" : ""}` });
+        if (canManage) {
+          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+          const remove = this.addPanelButton(rowActions, "Remove", () => this.plugin.removeTeamMember(team.id, member.userId));
+          remove.disabled = Boolean(member.revokedAt);
+        }
+      }
+    }
+    const cardActions = card.createDiv({ cls: "vault-rooms-room-actions" });
+    if (canManage) {
+      const candidateFriends = this.plugin.friends.filter((friend) => !friend.revokedAt && !(members == null ? void 0 : members.some((member) => member.userId === friend.id)));
+      if (candidateFriends.length > 0) {
+        const addFriendRow = card.createDiv({ cls: "vault-rooms-add-friend-row" });
+        const select = addFriendRow.createEl("select");
+        for (const friend of candidateFriends) {
+          select.createEl("option", { text: friend.displayName, value: friend.id });
+        }
+        this.addPanelButton(addFriendRow, "Add friend", async () => {
+          if (!select.value) {
+            return;
+          }
+          await this.plugin.addFriendToTeam(team.id, select.value);
+          this.render();
+        });
+      }
+      this.addPanelButton(cardActions, "Invite link", () => this.plugin.createInvite(team.id));
+    }
+    if (canDelete) {
+      const deleteButton = this.addPanelButton(cardActions, "Delete team", () => this.deleteTeamWithConfirm(team));
+      deleteButton.addClass("mod-warning");
+    }
+  }
+  async deleteTeamWithConfirm(team) {
+    if (!window.confirm(`Delete team "${team.name}"? This removes its members, invites, and room access grants for everyone. Rooms are not deleted. This cannot be undone.`)) {
+      return;
+    }
+    await this.plugin.deleteTeam(team.id);
+    this.render();
   }
   renderRoomsSection(parent) {
     var _a;
@@ -51500,7 +51926,7 @@ var VaultRoomsView = class extends import_obsidian8.ItemView {
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     this.addPanelButton(actions, "Create Room", () => this.plugin.openCreateRoomModal());
     this.addPanelButton(actions, "Refresh", async () => {
-      await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeamMembers()]);
+      await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
     });
     if (this.plugin.visibleRooms.length === 0) {
       section.createDiv({ cls: "vault-rooms-empty", text: "No rooms loaded." });
@@ -51580,7 +52006,13 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
     super(...arguments);
     __publicField(this, "settings", DEFAULT_SETTINGS);
     __publicField(this, "visibleRooms", []);
-    __publicField(this, "teamMembers", []);
+    /** All teams on the active server (any active caller may list these - used for the room ACL "Team" picker). */
+    __publicField(this, "teams", []);
+    /** This device's own team memberships/roles, keyed by team id - used to decide what this user can manage. */
+    __publicField(this, "myTeamRoles", {});
+    __publicField(this, "friends", []);
+    /** Populated only for teams this device can actually list members of (its own teams, or all teams if server owner). */
+    __publicField(this, "teamMembersByTeam", {});
     __publicField(this, "vaultAdapter");
     __publicField(this, "syncEngine");
     __publicField(this, "watchedRoomStates", /* @__PURE__ */ new WeakSet());
@@ -51615,14 +52047,9 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
       callback: () => this.openRoomsPanel()
     });
     this.addCommand({
-      id: "setup-team",
-      name: "Set Up Team",
-      callback: () => this.openSetupTeamModal()
-    });
-    this.addCommand({
-      id: "create-invite",
-      name: "Create Invite",
-      callback: () => this.createInvite()
+      id: "setup-server",
+      name: "Set Up Server",
+      callback: () => this.openSetupServerModal()
     });
     this.addCommand({
       id: "create-room",
@@ -51678,11 +52105,20 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
     const handleJoinLink = (params) => {
       var _a, _b;
       const mode = (_b = (_a = params.mode) != null ? _a : params.op) != null ? _b : "join";
-      if (mode === "join" && params.server && params.token) {
-        new JoinTeamModal(this, "join", params.server, params.token).open();
-      } else {
+      if (mode !== "join" || !params.server || !params.token) {
         new import_obsidian9.Notice("Vault Rooms invite link is missing server/token parameters.");
+        return;
       }
+      const existing = this.settings.servers.find(
+        (server) => server.status === "active" && normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(params.server)
+      );
+      if (existing) {
+        this.acceptInviteForServer(existing, params.token).catch((error) => {
+          new import_obsidian9.Notice(error instanceof Error ? error.message : "Failed to accept invite");
+        });
+        return;
+      }
+      new JoinTeamModal(this, "join", params.server, params.token).open();
     };
     this.registerObsidianProtocolHandler("vault-rooms", handleJoinLink);
     this.registerObsidianProtocolHandler("vault-rooms/join", (params) => handleJoinLink({ ...params, mode: "join" }));
@@ -51697,13 +52133,22 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
     await ((_b = this.embeddedServer) == null ? void 0 : _b.stop());
   }
   async loadSettings() {
-    var _a;
+    var _a, _b, _c, _d, _e, _f;
     const loaded = await this.loadData();
+    const isLegacy = (_b = (_a = loaded == null ? void 0 : loaded.servers) == null ? void 0 : _a.some((server) => "teamId" in server)) != null ? _b : false;
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...loaded,
-      server: { ...DEFAULT_SERVER_SETTINGS, ...(_a = loaded == null ? void 0 : loaded.server) != null ? _a : {} }
+      servers: isLegacy ? [] : (_c = loaded == null ? void 0 : loaded.servers) != null ? _c : DEFAULT_SETTINGS.servers,
+      activeServerId: isLegacy ? void 0 : loaded == null ? void 0 : loaded.activeServerId,
+      mountedRooms: isLegacy ? {} : (_d = loaded == null ? void 0 : loaded.mountedRooms) != null ? _d : DEFAULT_SETTINGS.mountedRooms,
+      roomMountPaths: isLegacy ? {} : (_e = loaded == null ? void 0 : loaded.roomMountPaths) != null ? _e : DEFAULT_SETTINGS.roomMountPaths,
+      server: { ...DEFAULT_SERVER_SETTINGS, ...(_f = loaded == null ? void 0 : loaded.server) != null ? _f : {} }
     };
+    if (isLegacy) {
+      await this.saveSettings();
+      new import_obsidian9.Notice("Vault Rooms was upgraded \u2014 set up or join your server again.");
+    }
   }
   getServerStatus() {
     var _a, _b;
@@ -51744,54 +52189,122 @@ var VaultRoomsPlugin = class extends import_obsidian9.Plugin {
     return activeServer(this.settings);
   }
   async testConnection(baseUrl) {
-    const result = await new RelayApiClient(baseUrl).testConnection();
+    await new RelayApiClient(baseUrl).testConnection();
     new import_obsidian9.Notice(`Connected to Vault Rooms`);
   }
-  async setupTeam(baseUrl, teamName, displayName, deviceName) {
-    const response = await new RelayApiClient(baseUrl).bootstrap(teamName, displayName, deviceName);
+  async setupServer(baseUrl, displayName, deviceName, teamName) {
+    const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
     this.connectSyncSocket();
-    await this.refreshTeamMembers({ notify: false }).catch(() => void 0);
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
     await this.openRoomsPanel();
     this.renderOpenRoomsViews();
-    new import_obsidian9.Notice(`Set up ${response.team.name}`);
+    new import_obsidian9.Notice(response.team ? `Set up server and team ${response.team.name}` : "Set up server");
   }
   async joinServer(baseUrl, inviteToken, displayName, deviceName) {
     const response = await new RelayApiClient(baseUrl).join(inviteToken, displayName, deviceName);
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
     this.connectSyncSocket();
-    await this.refreshTeamMembers({ notify: false }).catch(() => void 0);
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
     this.renderOpenRoomsViews();
     new import_obsidian9.Notice(`Joined ${response.team.name}`);
   }
-  async createInvite(role = "member") {
+  /** Accepts an invite onto an already-connected server, adding the caller's existing account to that invite's team. */
+  async acceptInviteForServer(server, inviteToken) {
+    var _a;
+    const result = await this.apiFor(server).acceptInvite(inviteToken);
+    if (((_a = this.getActiveServer()) == null ? void 0 : _a.id) === server.id) {
+      await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
+      this.renderOpenRoomsViews();
+    }
+    new import_obsidian9.Notice(`Joined team ${result.team.name}`);
+  }
+  async createInvite(teamId, role = "member") {
     const server = this.requireActiveServer();
-    const invite = await this.apiFor(server).createInvite(server.teamId, role);
+    const status = this.getServerStatus();
+    if (status.running && status.lanDetectionFailed) {
+      new import_obsidian9.Notice(
+        "Warning: could not auto-detect this device's LAN IP, so this invite link still points at 127.0.0.1 and will NOT work for teammates. Set a Public URL override in Settings \u2192 Vault Rooms \u2192 Relay server, then create a new invite.",
+        12e3
+      );
+    }
+    const invite = await this.apiFor(server).createInvite(teamId, role);
     new InviteMemberModal(this, `${invite.serverUrl}
 ${invite.inviteToken}
 ${invite.joinUrl}`, invite.joinUrl).open();
   }
-  async refreshTeamMembers(options = {}) {
+  /**
+   * Refreshes friends, all teams on the server (needed for the room ACL "Team" picker), this
+   * device's own team memberships/roles, and - for teams this device is actually allowed to list
+   * members of (its own teams, or every team if it is the server owner) - each team's members.
+   */
+  async refreshTeams(options = {}) {
     var _a;
     const server = this.requireActiveServer();
-    const result = await this.apiFor(server).listMembers(server.teamId);
-    this.teamMembers = result.members;
+    const api = this.apiFor(server);
+    const [me, teamsResult, friendsResult] = await Promise.all([api.me(), api.listTeams(), api.listFriends()]);
+    this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
+    this.teams = teamsResult.teams;
+    this.friends = friendsResult.friends;
+    const memberVisibleTeamIds = server.isServerOwner ? this.teams.map((team) => team.id) : me.teams.map((team) => team.id);
+    const memberEntries = await Promise.all(
+      memberVisibleTeamIds.map(async (teamId) => [teamId, (await api.listMembers(teamId)).members])
+    );
+    this.teamMembersByTeam = Object.fromEntries(memberEntries);
     if ((_a = options.notify) != null ? _a : true) {
-      new import_obsidian9.Notice(`Loaded ${this.teamMembers.length} member(s).`);
+      new import_obsidian9.Notice(`Loaded ${this.teams.length} team(s).`);
     }
     this.renderOpenRoomsViews();
   }
-  async revokeTeamMember(userId) {
+  /** True if this device can manage (add/remove members, create invites for) the given team. */
+  canManageTeam(team) {
+    const server = this.getActiveServer();
+    if (!server) {
+      return false;
+    }
+    return server.isServerOwner || team.ownerUserId === server.userId || this.myTeamRoles[team.id] === "admin";
+  }
+  /** Only the server owner or the team's creator can delete it (stricter than canManageTeam). */
+  canDeleteTeam(team) {
+    const server = this.getActiveServer();
+    if (!server) {
+      return false;
+    }
+    return server.isServerOwner || team.ownerUserId === server.userId;
+  }
+  /** Server owner only. Creates a new permission-group team on the active server. */
+  async createTeam(name) {
     const server = this.requireActiveServer();
-    await this.apiFor(server).revokeMember(server.teamId, userId);
-    await this.refreshTeamMembers({ notify: false });
-    new import_obsidian9.Notice("Member revoked.");
+    const result = await this.apiFor(server).createTeam(name);
+    await this.refreshTeams({ notify: false });
+    new import_obsidian9.Notice(`Created team ${result.team.name}`);
+  }
+  /** Owner/team-admin only. Adds an existing friend to a team directly - no invite link needed. */
+  async addFriendToTeam(teamId, userId, role = "member") {
+    const server = this.requireActiveServer();
+    await this.apiFor(server).addTeamMember(teamId, userId, role);
+    await this.refreshTeams({ notify: false });
+    new import_obsidian9.Notice("Added to team.");
+  }
+  /** Owner/team-admin only. Removes a member from a team (their user account and other teams are untouched). */
+  async removeTeamMember(teamId, userId) {
+    const server = this.requireActiveServer();
+    await this.apiFor(server).revokeMember(teamId, userId);
+    await this.refreshTeams({ notify: false });
+    new import_obsidian9.Notice("Removed from team.");
+  }
+  /** Server owner only. Revokes a friend's user account and all of their devices on this server. */
+  async revokeFriend(userId) {
+    const server = this.requireActiveServer();
+    await this.apiFor(server).revokeFriend(userId);
+    await this.refreshTeams({ notify: false });
+    new import_obsidian9.Notice("Friend revoked.");
   }
   async createRoom(input) {
     const server = this.requireActiveServer();
-    await this.apiFor(server).createRoom(server.teamId, input);
+    await this.apiFor(server).createRoom(input);
     await this.refreshRooms();
     new import_obsidian9.Notice(`Created room ${input.name}`);
   }
@@ -51834,42 +52347,20 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     this.renderOpenRoomsViews();
     new import_obsidian9.Notice(`Deleted room ${room.name}`);
   }
-  /** Owner only (enforced server-side). Deletes the entire team - all rooms, members, and invites. */
-  async deleteTeam(serverId) {
-    var _a, _b;
-    const server = this.settings.servers.find((candidate) => candidate.id === serverId);
-    if (!server) {
-      throw new Error("Team not found.");
-    }
-    const isActive = ((_a = this.getActiveServer()) == null ? void 0 : _a.id) === server.id;
-    await this.apiFor(server).deleteTeam(server.teamId);
-    this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
-    if (this.settings.activeServerId === server.id) {
-      this.settings.activeServerId = void 0;
-    }
-    if (isActive) {
-      (_b = this.syncSocket) == null ? void 0 : _b.disconnect();
-      this.syncSocket = null;
-      for (const room of this.visibleRooms) {
-        delete this.settings.mountedRooms[room.id];
-        delete this.settings.roomMountPaths[room.id];
-      }
-      this.visibleRooms = [];
-      this.teamMembers = [];
-    }
-    await this.saveSettings();
-    if (isActive) {
-      this.connectSyncSocket();
-    }
-    this.renderOpenRoomsViews();
-    new import_obsidian9.Notice(`Deleted team ${server.teamName}`);
+  /** Server owner or team creator only (enforced server-side). Deletes the team's memberships, invites, and ACL grants - NOT rooms, which are independently owned and outlive the team. */
+  async deleteTeam(teamId) {
+    var _a;
+    const server = this.requireActiveServer();
+    const team = this.teams.find((candidate) => candidate.id === teamId);
+    await this.apiFor(server).deleteTeam(teamId);
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]);
+    new import_obsidian9.Notice(`Deleted team ${(_a = team == null ? void 0 : team.name) != null ? _a : teamId}`);
   }
   /**
-   * Purely local cleanup - removes a saved team/server entry without calling the server at all.
-   * This is the recovery path for a team whose saved device token no longer works there (see
-   * `markServerRevoked`): `deleteTeam` can't help in that case since it also needs a valid,
-   * working token to authenticate the delete request. Use this to drop the stale entry, then set
-   * up or join that team again to get a fresh, working identity.
+   * Purely local cleanup - removes a saved server entry without calling the server at all. This
+   * is the recovery path for a server whose saved device token no longer works there (see
+   * `markServerRevoked`): the server can't be reached to undo anything, so just drop the stale
+   * local entry, then set up or join that server again to get a fresh, working identity.
    */
   async forgetServer(serverId) {
     var _a, _b;
@@ -51886,35 +52377,41 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       (_b = this.syncSocket) == null ? void 0 : _b.disconnect();
       this.syncSocket = null;
       this.visibleRooms = [];
-      this.teamMembers = [];
+      this.teams = [];
+      this.friends = [];
+      this.myTeamRoles = {};
+      this.teamMembersByTeam = {};
     }
     await this.saveSettings();
     if (isActive) {
       this.connectSyncSocket();
     }
     this.renderOpenRoomsViews();
-    new import_obsidian9.Notice(`Removed ${server.teamName} from this device.`);
+    new import_obsidian9.Notice(`Removed ${server.baseUrl} from this device.`);
   }
   async activateServer(serverId) {
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
     if (!server) {
-      throw new Error("Team not found.");
+      throw new Error("Server not found.");
     }
     this.settings.activeServerId = serverId;
     this.visibleRooms = [];
-    this.teamMembers = [];
+    this.teams = [];
+    this.friends = [];
+    this.myTeamRoles = {};
+    this.teamMembersByTeam = {};
     await this.saveSettings();
     this.connectSyncSocket();
-    await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeamMembers({ notify: false })]).catch((error) => {
-      new import_obsidian9.Notice(error instanceof Error ? error.message : "Failed to load team");
+    await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
+      new import_obsidian9.Notice(error instanceof Error ? error.message : "Failed to load server");
     });
     this.renderOpenRoomsViews();
-    new import_obsidian9.Notice(`Using ${server.teamName}`);
+    new import_obsidian9.Notice(`Using ${server.baseUrl}`);
   }
   async refreshRooms(options = {}) {
     var _a;
     const server = this.requireActiveServer();
-    const result = await this.apiFor(server).listRooms(server.teamId);
+    const result = await this.apiFor(server).listRooms();
     this.visibleRooms = result.rooms.map((room) => withInstalledCapabilities(this.app, room));
     if ((_a = options.notify) != null ? _a : true) {
       new import_obsidian9.Notice(`Loaded ${this.visibleRooms.length} room(s).`);
@@ -52019,12 +52516,11 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     return mountPathForRoom({
       owner: isOwner,
       mountRoot: this.settings.mountRoot,
-      teamSlug: server.teamSlug,
       mountName: room.mountName,
       sourcePath: room.sourcePath
     });
   }
-  openSetupTeamModal() {
+  openSetupServerModal() {
     const status = this.getServerStatus();
     new SetupTeamModal(this, status.running ? status.localUrl : void 0).open();
   }
@@ -52094,7 +52590,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
         this.renderOpenRoomsViews();
       },
       onRevoked: () => {
-        new import_obsidian9.Notice(`Your access to ${server.teamName} was revoked.`);
+        new import_obsidian9.Notice(`Your access to ${server.baseUrl} was revoked.`);
         if (this.settings.activeServerId === server.id) {
           this.settings.activeServerId = void 0;
         }
@@ -52110,6 +52606,15 @@ ${invite.joinUrl}`, invite.joinUrl).open();
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new import_obsidian9.Notice(`${(_a2 = room == null ? void 0 : room.name) != null ? _a2 : "A room"} was deleted by the owner/admin.`);
+      },
+      onAccessRevoked: (roomId) => {
+        var _a2;
+        const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+        this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
+        delete this.settings.mountedRooms[roomId];
+        void this.saveSettings();
+        this.renderOpenRoomsViews();
+        new import_obsidian9.Notice(`Your access to ${(_a2 = room == null ? void 0 : room.name) != null ? _a2 : "a room"} was revoked.`);
       }
     });
     socket.connect();
@@ -52128,9 +52633,9 @@ ${invite.joinUrl}`, invite.joinUrl).open();
    * A 401 from a server means the saved device token no longer resolves to anything there - most
    * commonly because that server's data was reset/recreated since the token was issued (fresh
    * install, wiped data dir, or switching between embedded/standalone with different data files).
-   * Reflect that in the UI (Settings → Vault Rooms → Teams already shows `status`) instead of
-   * leaving it as a one-off error toast with no lasting trace, so it's clear this team needs to be
-   * removed and set up/joined again rather than retried.
+   * Reflect that in the UI (Settings → Vault Rooms → Servers already shows `status`) instead of
+   * leaving it as a one-off error toast with no lasting trace, so it's clear this server needs to
+   * be removed and set up/joined again rather than retried.
    */
   markServerRevoked(server) {
     if (server.status === "revoked") {
@@ -52139,7 +52644,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     server.status = "revoked";
     void this.saveSettings();
     this.renderOpenRoomsViews();
-    new import_obsidian9.Notice(`"${server.teamName}" - saved login is no longer valid on this server. Remove it and set up/join the team again from Settings \u2192 Vault Rooms \u2192 Teams.`);
+    new import_obsidian9.Notice(`"${server.baseUrl}" - saved login is no longer valid on this server. Remove it and set up/join again from Settings \u2192 Vault Rooms \u2192 Servers.`);
   }
   requireActiveServer() {
     const server = this.getActiveServer();
@@ -52152,21 +52657,21 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const config = {
       id: response.device.id,
       baseUrl,
-      teamId: response.team.id,
-      teamName: response.team.name,
-      teamSlug: response.team.slug,
       userId: response.user.id,
       userDisplayName: response.user.displayName,
       deviceId: response.device.id,
       deviceName: response.device.displayName,
       deviceToken: response.deviceToken,
-      status: "active",
-      role: response.role
+      isServerOwner: response.isServerOwner,
+      status: "active"
     };
     this.settings.servers = [...this.settings.servers.filter((server) => server.id !== config.id), config];
     this.settings.activeServerId = config.id;
   }
 };
+function normalizeBaseUrl(url) {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
+}
 /*! Bundled license information:
 
 @fastify/proxy-addr/index.js:

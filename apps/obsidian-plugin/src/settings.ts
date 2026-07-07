@@ -1,18 +1,16 @@
 import type { MountedRoomState } from "./syncClient.js";
 
-export type RelayServerConfig = {
+/** One entry per SERVER (a device identity on that relay), not per team - a user can belong to many teams on the same server. */
+export type ServerConnection = {
   id: string;
   baseUrl: string;
-  teamId: string;
-  teamName: string;
-  teamSlug: string;
   userId: string;
   userDisplayName: string;
   deviceId: string;
   deviceName: string;
   deviceToken: string;
+  isServerOwner: boolean;
   status: "active" | "revoked";
-  role?: "owner" | "admin" | "member";
 };
 
 export type ServerBindMode = "local" | "lan";
@@ -36,7 +34,7 @@ export type EmbeddedServerSettings = {
 };
 
 export type VaultRoomsSettings = {
-  servers: RelayServerConfig[];
+  servers: ServerConnection[];
   activeServerId?: string;
   mountRoot: string;
   debounceMs: number;
@@ -61,6 +59,6 @@ export const DEFAULT_SETTINGS: VaultRoomsSettings = {
   server: DEFAULT_SERVER_SETTINGS
 };
 
-export function activeServer(settings: VaultRoomsSettings): RelayServerConfig | undefined {
+export function activeServer(settings: VaultRoomsSettings): ServerConnection | undefined {
   return settings.servers.find((server) => server.id === settings.activeServerId) ?? settings.servers[0];
 }

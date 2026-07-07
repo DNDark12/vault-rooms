@@ -14,7 +14,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
 
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
-    this.renderTeamsSettings(containerEl);
+    this.renderServersSettings(containerEl);
   }
 
   private renderServerSettings(containerEl: HTMLElement): void {
@@ -173,11 +173,11 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       );
   }
 
-  private renderTeamsSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "Teams" });
+  private renderServersSettings(containerEl: HTMLElement): void {
+    containerEl.createEl("h3", { text: "Servers" });
 
     if (this.plugin.settings.servers.length === 0) {
-      containerEl.createEl("p", { cls: "setting-item-description", text: "No teams connected yet." });
+      containerEl.createEl("p", { cls: "setting-item-description", text: "No servers connected yet." });
       return;
     }
 
@@ -185,10 +185,10 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       const active = server.id === this.plugin.getActiveServer()?.id;
       const isRevoked = server.status === "revoked";
       const setting = new Setting(containerEl)
-        .setName(`${server.teamName} - ${server.userDisplayName}${active ? " - active" : ""}`)
+        .setName(`${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}${active ? " - active" : ""}`)
         .setDesc(
           isRevoked
-            ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join the team again.`
+            ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join again.`
             : `${server.baseUrl} (${server.status})`
         );
       setting.addButton((button) =>
@@ -197,7 +197,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             await this.plugin.activateServer(server.id);
             this.display();
           } catch (error) {
-            new Notice(error instanceof Error ? error.message : "Team switch failed");
+            new Notice(error instanceof Error ? error.message : "Server switch failed");
           }
         })
       );
@@ -210,34 +210,12 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
           }
         })
       );
-      if (server.role === "owner") {
-        setting.addButton((button) =>
-          button
-            .setButtonText("Delete team")
-            .setWarning()
-            .onClick(async () => {
-              if (
-                !window.confirm(
-                  `Delete team "${server.teamName}"? This permanently deletes every room, file, and member in the team for everyone. This cannot be undone.`
-                )
-              ) {
-                return;
-              }
-              try {
-                await this.plugin.deleteTeam(server.id);
-                this.display();
-              } catch (error) {
-                new Notice(error instanceof Error ? error.message : "Failed to delete team");
-              }
-            })
-        );
-      }
       setting.addButton((button) =>
         button
           .setButtonText("Forget")
           .setWarning()
           .onClick(async () => {
-            if (!window.confirm(`Remove "${server.teamName}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
+            if (!window.confirm(`Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
               return;
             }
             await this.plugin.forgetServer(server.id);

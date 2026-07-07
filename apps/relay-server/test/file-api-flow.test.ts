@@ -10,9 +10,9 @@ async function setupFileFlow() {
   const owner = (
     await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "127.0.0.1",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
     })
   ).json();
   const invite = (
@@ -33,7 +33,7 @@ async function setupFileFlow() {
   const room = (
     await app.inject({
       method: "POST",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
       payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
     })

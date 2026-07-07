@@ -2,6 +2,32 @@ import { AppError, type Permission } from "@vault-rooms/protocol";
 import { evaluatePolicy } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import type { RoomRow } from "../db/schema.js";
+import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+
+export function hasRoomPermission(input: {
+  repo: RelayRepository;
+  principal: DevicePrincipal;
+  room: RoomRow;
+  permission: Permission;
+  relativePath?: string;
+}): boolean {
+  const resource = input.permission.startsWith("room:")
+    ? { type: "room" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id }
+    : { type: "file" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id, relativePath: input.relativePath ?? "" };
+  return evaluatePolicy({
+    subject: {
+      type: "user",
+      id: input.principal.userId,
+      userId: input.principal.userId,
+      teamIds: input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
+    },
+    resource,
+    permission: input.permission,
+    aclRules: input.repo.listAclRulesForRoom(input.room.id),
+    membershipRevokedAt: input.principal.userRevokedAt,
+    deviceRevokedAt: input.principal.deviceRevokedAt
+  }).allowed;
+}
 
 export function assertRoomPermission(input: {
   repo: RelayRepository;
@@ -14,17 +40,21 @@ export function assertRoomPermission(input: {
     ? { type: "room" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id }
     : { type: "file" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id, relativePath: input.relativePath ?? "" };
   const decision = evaluatePolicy({
-    teamId: input.room.team_id,
-    subject: { type: "user", id: input.principal.userId, role: input.principal.role, userId: input.principal.userId },
+    subject: {
+      type: "user",
+      id: input.principal.userId,
+      userId: input.principal.userId,
+      teamIds: input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
+    },
     resource,
     permission: input.permission,
-    aclRules: input.repo.listAclRulesForTeam(input.room.team_id),
-    membershipRevokedAt: input.principal.memberRevokedAt,
+    aclRules: input.repo.listAclRulesForRoom(input.room.id),
+    membershipRevokedAt: input.principal.userRevokedAt,
     deviceRevokedAt: input.principal.deviceRevokedAt
   });
   if (!decision.allowed) {
     input.repo.audit({
-      teamId: input.room.team_id,
+      teamId: null,
       actorType: "user",
       actorId: input.principal.userId,
       action: "acl.denied",
@@ -34,4 +64,12 @@ export function assertRoomPermission(input: {
     });
     throw new AppError("PERMISSION_DENIED", `You do not have ${input.permission} permission for this path.`, 403);
   }
+}
+
+export function revalidateRoomAccess(repo: RelayRepository, registry: ConnectionRegistry | undefined): void {
+  registry?.revalidateAccess((roomId, principal) => {
+    const room = repo.getRoom(roomId);
+    if (!room) return true; // handled separately by room_deleted broadcast
+    return hasRoomPermission({ repo, principal, room, permission: "sync:subscribe" });
+  });
 }

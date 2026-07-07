@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { AppError } from "@vault-rooms/protocol";
+import { AppError, type TeamRole } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageTeam } from "../db/repositories/relayRepository.js";
+import type { TeamRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
+import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
 
 export type TeamRoutesOptions = {
@@ -12,33 +14,56 @@ export type TeamRoutesOptions = {
 };
 
 export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, options: TeamRoutesOptions): void {
-  app.post("/api/teams/bootstrap", async (request) => {
+  app.post("/api/bootstrap", async (request) => {
     if (!options.allowRemoteBootstrap && !isLocalAddress(request.ip)) {
       throw new AppError("PERMISSION_DENIED", "Bootstrap is only allowed from localhost by default.", 403);
     }
-
-    const body = request.body as Partial<{ teamName: string; ownerDisplayName: string; ownerDeviceName: string }>;
-    if (!body.teamName || !body.ownerDisplayName || !body.ownerDeviceName) {
-      throw new AppError("VALIDATION_ERROR", "teamName, ownerDisplayName, and ownerDeviceName are required.", 422);
+    if (repo.getServerOwnerId()) {
+      throw new AppError("PERMISSION_DENIED", "Bootstrap has already been completed.", 403);
     }
 
-    return repo.bootstrapTeam({
-      teamName: body.teamName,
-      ownerDisplayName: body.ownerDisplayName,
-      ownerDeviceName: body.ownerDeviceName
+    const body = request.body as Partial<{ displayName: string; deviceName: string; teamName: string }>;
+    if (!body.displayName || !body.deviceName) {
+      throw new AppError("VALIDATION_ERROR", "displayName and deviceName are required.", 422);
+    }
+
+    return repo.bootstrapServer({
+      displayName: body.displayName,
+      deviceName: body.deviceName,
+      teamName: body.teamName
     });
+  });
+
+  app.post("/api/teams", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    if (!principal.isServerOwner) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner can create teams.", 403);
+    }
+    const body = request.body as Partial<{ name: string }>;
+    if (!body.name) {
+      throw new AppError("VALIDATION_ERROR", "name is required.", 422);
+    }
+    return { team: toTeamResponse(repo.createTeam({ name: body.name, ownerUserId: principal.userId })) };
+  });
+
+  app.get("/api/teams", async (request) => {
+    getActivePrincipal(repo, request);
+    return { teams: repo.listTeams().map(toTeamResponse) };
   });
 
   app.post("/api/teams/:teamId/invites", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { teamId } = request.params as { teamId: string };
-    if (!canManageTeam(principal, teamId)) {
+    if (!repo.getTeam(teamId)) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    if (!canManageTeam(repo, principal, teamId)) {
       throw new AppError("PERMISSION_DENIED", "Only owners and admins can create invites.", 403);
     }
 
-    const body = request.body as Partial<{ role: "member" | "admin"; expiresInMinutes: number; maxUses: number }>;
+    const body = request.body as Partial<{ role: TeamRole; expiresInMinutes: number; maxUses: number }>;
     const role = body.role ?? "member";
-    if (role !== "member" && role !== "admin") {
+    if (!isTeamRole(role)) {
       throw new AppError("VALIDATION_ERROR", "role must be member or admin.", 422);
     }
 
@@ -59,46 +84,93 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     };
   });
 
-  app.get("/api/teams/:teamId/members", async (request) => {
+  app.get("/api/teams/:teamId/members", async (request: FastifyRequest) => {
     const principal = getActivePrincipal(repo, request);
     const { teamId } = request.params as { teamId: string };
-    if (principal.teamId !== teamId) {
+    const team = repo.getTeam(teamId);
+    if (!team) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    const membership = repo.getTeamMembership(teamId, principal.userId);
+    if (!principal.isServerOwner && team.owner_user_id !== principal.userId && (!membership || membership.revoked_at)) {
       throw new AppError("PERMISSION_DENIED", "You are not a member of this team.", 403);
     }
 
-    const includeRevoked = principal.role === "owner" || principal.role === "admin";
+    const includeRevoked = canManageTeam(repo, principal, teamId);
+    const members = repo.listMembers(teamId, includeRevoked).map((member) => ({
+      userId: member.user_id,
+      displayName: member.display_name,
+      role: member.role,
+      revokedAt: member.revoked_at
+    }));
+    const serverOwnerId = repo.getServerOwnerId();
+    const serverOwner = serverOwnerId && !members.some((member) => member.userId === serverOwnerId) ? repo.getUser(serverOwnerId) : null;
     return {
-      members: repo.listMembers(teamId, includeRevoked).map((member) => ({
-        userId: member.user_id,
-        displayName: member.display_name,
-        role: member.role,
-        revokedAt: member.revoked_at
-      }))
+      members,
+      ...(serverOwner ? { serverOwner: { userId: serverOwner.id, displayName: serverOwner.display_name, revokedAt: serverOwner.revoked_at } } : {})
     };
+  });
+
+  app.post("/api/teams/:teamId/members", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const { teamId } = request.params as { teamId: string };
+    if (!repo.getTeam(teamId)) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    if (!canManageTeam(repo, principal, teamId)) {
+      throw new AppError("PERMISSION_DENIED", "Only owners and admins can add members.", 403);
+    }
+    const body = request.body as Partial<{ userId: string; role: TeamRole }>;
+    const role = body.role ?? "member";
+    if (!body.userId || !isTeamRole(role)) {
+      throw new AppError("VALIDATION_ERROR", "userId is required and role must be member or admin.", 422);
+    }
+    repo.addTeamMember({ teamId, userId: body.userId, role, actorUserId: principal.userId });
+    return { ok: true };
   });
 
   app.post("/api/teams/:teamId/members/:userId/revoke", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { teamId, userId } = request.params as { teamId: string; userId: string };
-    if (!canManageTeam(principal, teamId)) {
+    if (!repo.getTeam(teamId)) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
+    }
+    if (!canManageTeam(repo, principal, teamId)) {
       throw new AppError("PERMISSION_DENIED", "Only owners and admins can revoke members.", 403);
     }
-    const body = request.body as Partial<{ reason: string }>;
-    repo.revokeMember({ teamId, userId, actorUserId: principal.userId, reason: body.reason });
-    options.connectionRegistry?.closeRevokedUser(teamId, userId);
+    const body = request.body as Partial<{ reason: string }> | undefined;
+    repo.revokeMember({ teamId, userId, actorUserId: principal.userId, reason: body?.reason });
+    revalidateRoomAccess(repo, options.connectionRegistry);
     return { ok: true };
   });
 
   app.delete("/api/teams/:teamId", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const { teamId } = request.params as { teamId: string };
-    if (principal.teamId !== teamId || principal.role !== "owner") {
-      throw new AppError("PERMISSION_DENIED", "Only the team owner can delete the team.", 403);
+    const team = repo.getTeam(teamId);
+    if (!team) {
+      throw new AppError("NOT_FOUND", "Team not found.", 404);
     }
-    options.connectionRegistry?.closeTeam(teamId);
+    if (!principal.isServerOwner && team.owner_user_id !== principal.userId) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner or team owner can delete the team.", 403);
+    }
     repo.deleteTeam({ teamId, actorUserId: principal.userId });
+    revalidateRoomAccess(repo, options.connectionRegistry);
     return { ok: true };
   });
+}
+
+function toTeamResponse(team: TeamRow) {
+  return {
+    id: team.id,
+    slug: team.slug,
+    name: team.name,
+    ownerUserId: team.owner_user_id
+  };
+}
+
+function isTeamRole(role: string): role is TeamRole {
+  return role === "member" || role === "admin";
 }
 
 function isLocalAddress(ip: string): boolean {

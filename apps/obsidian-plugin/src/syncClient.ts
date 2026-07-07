@@ -31,11 +31,10 @@ export type MountedRoomState = {
 export function mountPathForRoom(input: {
   owner: boolean;
   mountRoot: string;
-  teamSlug: string;
   mountName: string;
   sourcePath: string;
 }): string {
-  return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.teamSlug, input.mountName].map(stripSlashes).join("/");
+  return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.mountName].map(stripSlashes).join("/");
 }
 
 export async function createConflictCopyPath(vault: VaultAdapter, path: string, deviceName: string, now = new Date()): Promise<string> {

@@ -68,10 +68,10 @@ class FakeApi implements RelayFileApi {
 
 describe("plugin sync core", () => {
   it("computes member and owner mount paths", () => {
-    expect(mountPathForRoom({ owner: false, mountRoot: "Vault Rooms", teamSlug: "demo", mountName: "Projects Demo", sourcePath: "Projects/Demo" })).toBe(
-      "Vault Rooms/demo/Projects Demo"
+    expect(mountPathForRoom({ owner: false, mountRoot: "Vault Rooms", mountName: "Projects Demo", sourcePath: "Projects/Demo" })).toBe(
+      "Vault Rooms/Projects Demo"
     );
-    expect(mountPathForRoom({ owner: true, mountRoot: "Vault Rooms", teamSlug: "demo", mountName: "Projects Demo", sourcePath: "Projects/Demo" })).toBe(
+    expect(mountPathForRoom({ owner: true, mountRoot: "Vault Rooms", mountName: "Projects Demo", sourcePath: "Projects/Demo" })).toBe(
       "Projects/Demo"
     );
   });

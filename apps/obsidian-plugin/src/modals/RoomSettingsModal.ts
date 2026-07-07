@@ -34,8 +34,8 @@ export class RoomSettingsModal extends Modal {
   private localMountPath: string;
   private capabilities: CapabilityDraft[];
   private aclRules: AclRuleSummary[] = [];
-  private subjectType: "role" | "user" | "device" | "agent" = "role";
-  private subjectId = "member";
+  private subjectType: "team" | "user" | "device" | "agent" = "team";
+  private subjectId = "";
   private effect: "allow" | "deny" = "allow";
   private preset: "reader" | "editor" | "custom" = "reader";
   private pathPattern = "**/*";
@@ -66,7 +66,8 @@ export class RoomSettingsModal extends Modal {
 
   private async loadAccessData(): Promise<void> {
     try {
-      await this.plugin.refreshTeamMembers({ notify: false });
+      await this.plugin.refreshTeams({ notify: false });
+      this.subjectId = this.subjectId || this.defaultSubjectId();
       this.aclRules = await this.plugin.listRoomAcl(this.room.id);
       this.render();
     } catch (error) {
@@ -203,40 +204,42 @@ export class RoomSettingsModal extends Modal {
     parent.createEl("h3", { text: "Room access" });
     parent.createEl("p", {
       cls: "vault-rooms-setting-hint",
-      text: "Grant a whole team role, a specific member, or (advanced) a specific device/agent id access to this room."
+      text: "Grant a whole team, a specific friend, or (advanced) a specific device/agent id access to this room."
     });
 
     new Setting(parent).setName("Grant access to").addDropdown((dropdown) =>
       dropdown
-        .addOption("role", "Whole team role")
-        .addOption("user", "Specific team member")
-        .addOption("device", "Specific device (advanced)")
-        .addOption("agent", "Specific agent (advanced)")
+        .addOption("team", "Team")
+        .addOption("user", "Specific friend")
+        .addOption("device", "Device id (advanced)")
+        .addOption("agent", "Agent id (advanced)")
         .setValue(this.subjectType)
         .onChange((value) => {
-          this.subjectType = value as "role" | "user" | "device" | "agent";
+          this.subjectType = value as "team" | "user" | "device" | "agent";
           this.subjectId = this.defaultSubjectId();
           this.render();
         })
     );
 
-    if (this.subjectType === "role") {
-      new Setting(parent).setName("Role").addDropdown((dropdown) =>
-        dropdown
-          .addOption("member", "Member")
-          .addOption("admin", "Admin")
-          .addOption("owner", "Owner")
-          .setValue(this.subjectId)
-          .onChange((value) => (this.subjectId = value))
-      );
-    } else if (this.subjectType === "user") {
-      const activeMembers = this.plugin.teamMembers.filter((member) => !member.revokedAt);
-      if (activeMembers.length === 0) {
-        new Setting(parent).setDesc("No active team members yet - invite someone first.");
+    if (this.subjectType === "team") {
+      if (this.plugin.teams.length === 0) {
+        new Setting(parent).setDesc("No teams yet - create one from the Vault Rooms panel first.");
       } else {
-        new Setting(parent).setName("Team member").addDropdown((dropdown) => {
-          for (const member of activeMembers) {
-            dropdown.addOption(member.userId, `${member.displayName} (${member.role})`);
+        new Setting(parent).setName("Team").addDropdown((dropdown) => {
+          for (const team of this.plugin.teams) {
+            dropdown.addOption(team.id, team.name);
+          }
+          dropdown.setValue(this.subjectId).onChange((value) => (this.subjectId = value));
+        });
+      }
+    } else if (this.subjectType === "user") {
+      const activeFriends = this.plugin.friends.filter((friend) => !friend.revokedAt);
+      if (activeFriends.length === 0) {
+        new Setting(parent).setDesc("No friends yet - invite someone first.");
+      } else {
+        new Setting(parent).setName("Friend").addDropdown((dropdown) => {
+          for (const friend of activeFriends) {
+            dropdown.addOption(friend.id, friend.displayName);
           }
           dropdown.setValue(this.subjectId).onChange((value) => (this.subjectId = value));
         });
@@ -287,23 +290,29 @@ export class RoomSettingsModal extends Modal {
       }
     }
 
-    new Setting(parent)
-      .addButton((button) =>
-        button.setButtonText("Add whole team as editor").onClick(async () => {
-          await this.grantWholeTeamEditor();
-        })
-      )
-      .addButton((button) =>
-        button.setCta().setButtonText("Apply access").onClick(async () => {
-          await this.grantAccess({
-            subjectType: this.subjectType,
-            subjectId: this.subjectId,
-            effect: this.effect,
-            ...(this.preset === "custom" ? { permissions: [...this.customPermissions] } : { preset: this.preset }),
-            pathPattern: this.pathPattern
-          });
+    const applyRow = new Setting(parent);
+    if (this.subjectType === "team") {
+      applyRow.addButton((button) =>
+        button.setButtonText("Add team as editor").onClick(async () => {
+          if (!this.subjectId) {
+            new Notice("Pick a team first.");
+            return;
+          }
+          await this.grantAccess({ subjectType: "team", subjectId: this.subjectId, effect: "allow", preset: "editor", pathPattern: "**/*" });
         })
       );
+    }
+    applyRow.addButton((button) =>
+      button.setCta().setButtonText("Apply access").onClick(async () => {
+        await this.grantAccess({
+          subjectType: this.subjectType,
+          subjectId: this.subjectId,
+          effect: this.effect,
+          ...(this.preset === "custom" ? { permissions: [...this.customPermissions] } : { preset: this.preset }),
+          pathPattern: this.pathPattern
+        });
+      })
+    );
 
     const acl = parent.createDiv({ cls: "vault-rooms-acl-list" });
     if (this.aclRules.length === 0) {
@@ -358,7 +367,7 @@ export class RoomSettingsModal extends Modal {
   }
 
   private async grantAccess(input: {
-    subjectType: "user" | "role" | "device" | "agent";
+    subjectType: "user" | "team" | "device" | "agent";
     subjectId: string;
     effect: "allow" | "deny";
     preset?: "reader" | "editor";
@@ -382,31 +391,24 @@ export class RoomSettingsModal extends Modal {
     }
   }
 
-  private async grantWholeTeamEditor(): Promise<void> {
-    try {
-      await this.plugin.grantRoomAccess(this.room.id, { subjectType: "role", subjectId: "member", effect: "allow", preset: "editor", pathPattern: "**/*" });
-      await this.plugin.grantRoomAccess(this.room.id, { subjectType: "role", subjectId: "admin", effect: "allow", preset: "editor", pathPattern: "**/*" });
-      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
-      this.render();
-    } catch (error) {
-      new Notice(error instanceof Error ? error.message : "Whole team access update failed");
-    }
-  }
-
   private defaultSubjectId(): string {
-    if (this.subjectType === "role") {
-      return "member";
+    if (this.subjectType === "team") {
+      return this.plugin.teams[0]?.id ?? "";
     }
     if (this.subjectType === "user") {
-      return this.plugin.teamMembers.find((member) => !member.revokedAt)?.userId ?? "";
+      return this.plugin.friends.find((friend) => !friend.revokedAt)?.id ?? "";
     }
     return "";
   }
 
   private subjectLabel(rule: AclRuleSummary): string {
     if (rule.subjectType === "user") {
-      const member = this.plugin.teamMembers.find((candidate) => candidate.userId === rule.subjectId);
-      return member ? `${member.displayName} (${member.role})` : rule.subjectId;
+      const friend = this.plugin.friends.find((candidate) => candidate.id === rule.subjectId);
+      return friend ? friend.displayName : rule.subjectId;
+    }
+    if (rule.subjectType === "team") {
+      const team = this.plugin.teams.find((candidate) => candidate.id === rule.subjectId);
+      return team ? team.name : rule.subjectId;
     }
     return `${rule.subjectType}:${rule.subjectId}`;
   }

@@ -1,6 +1,6 @@
-export type TeamRole = "owner" | "admin" | "member";
+export type TeamRole = "admin" | "member";
 export type RoomType = "file" | "folder";
-export type SubjectType = "user" | "role" | "device" | "agent";
+export type SubjectType = "user" | "team" | "device" | "agent";
 export type AclEffect = "allow" | "deny";
 export type CapabilityMode = "required" | "recommended" | "optional";
 export type FileKind = "file" | "folder";
@@ -28,7 +28,6 @@ export type Permission =
 
 export type AclRule = {
   id: string;
-  teamId: string;
   roomId: string;
   subjectType: SubjectType;
   subjectId: string;

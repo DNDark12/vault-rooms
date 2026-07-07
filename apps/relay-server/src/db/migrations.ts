@@ -14,8 +14,14 @@ export function runMigrations(db: RelayDb): void {
     create table if not exists users(
       id text primary key,
       display_name text not null,
+      revoked_at text,
       created_at text not null,
       updated_at text not null
+    );
+
+    create table if not exists server_meta(
+      key text primary key,
+      value text not null
     );
 
     create table if not exists team_members(
@@ -29,7 +35,6 @@ export function runMigrations(db: RelayDb): void {
 
     create table if not exists devices(
       id text primary key,
-      team_id text not null,
       user_id text not null,
       display_name text not null,
       token_hash text not null,
@@ -53,7 +58,6 @@ export function runMigrations(db: RelayDb): void {
 
     create table if not exists rooms(
       id text primary key,
-      team_id text not null,
       name text not null,
       type text not null,
       source_path text not null,
@@ -61,7 +65,7 @@ export function runMigrations(db: RelayDb): void {
       owner_user_id text not null,
       created_at text not null,
       updated_at text not null,
-      unique(team_id, mount_name)
+      unique(owner_user_id, mount_name)
     );
 
     create table if not exists room_capabilities(
@@ -75,7 +79,6 @@ export function runMigrations(db: RelayDb): void {
 
     create table if not exists acl_rules(
       id text primary key,
-      team_id text not null,
       room_id text not null,
       subject_type text not null,
       subject_id text not null,
@@ -121,7 +124,7 @@ export function runMigrations(db: RelayDb): void {
 
     create table if not exists audit_events(
       id text primary key,
-      team_id text not null,
+      team_id text,
       actor_type text not null,
       actor_id text not null,
       action text not null,
@@ -134,7 +137,6 @@ export function runMigrations(db: RelayDb): void {
 
     create table if not exists mcp_agent_tokens(
       id text primary key,
-      team_id text not null,
       user_id text not null,
       display_name text not null,
       token_hash text not null,

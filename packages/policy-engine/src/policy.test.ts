@@ -4,7 +4,6 @@ import { EDITOR_PERMISSIONS, evaluatePolicy, expandPreset, requireToolAndFilePer
 
 const baseRule = {
   id: "acl_1",
-  teamId: "team_1",
   roomId: "room_1",
   subjectType: "user",
   subjectId: "usr_b",
@@ -16,8 +15,7 @@ const baseRule = {
 
 function decide(permission: Permission, rules: AclRule[] = [], overrides = {}) {
   return evaluatePolicy({
-    teamId: "team_1",
-    subject: { type: "user", id: "usr_b", role: "member" },
+    subject: { type: "user", id: "usr_b", userId: "usr_b" },
     resource: { type: "file", roomId: "room_1", roomOwnerUserId: "usr_a", relativePath: "Board.md" },
     permission,
     aclRules: rules,
@@ -55,8 +53,7 @@ describe("policy engine", () => {
 
   it("allows room owners implicitly unless explicitly denied", () => {
     const ownerInput = {
-      teamId: "team_1",
-      subject: { type: "user" as const, id: "usr_a", role: "member" as const },
+      subject: { type: "user" as const, id: "usr_a", userId: "usr_a" },
       resource: { type: "file" as const, roomId: "room_1", roomOwnerUserId: "usr_a", relativePath: "Board.md" },
       permission: "file:write" as const,
       aclRules: []
@@ -65,25 +62,34 @@ describe("policy engine", () => {
     expect(evaluatePolicy({ ...ownerInput, aclRules: [{ ...baseRule, subjectId: "usr_a", effect: "deny", permissions: ["file:write"] }] }).allowed).toBe(false);
   });
 
-  it("allows admins to create rooms but denies members", () => {
+  it("matches team subject rules against active team ids", () => {
+    const teamRule = { ...baseRule, subjectType: "team" as const, subjectId: "team_2", permissions: ["room:read"] } satisfies AclRule;
+
     expect(
-      evaluatePolicy({
-        teamId: "team_1",
-        subject: { type: "user", id: "usr_admin", role: "admin" },
-        resource: { type: "room" },
-        permission: "room:write",
-        aclRules: []
+      decide("room:read", [teamRule], {
+        subject: { type: "user", id: "usr_b", userId: "usr_b", teamIds: ["team_1", "team_2"] },
+        resource: { type: "room", roomId: "room_1", roomOwnerUserId: "usr_a" }
       }).allowed
     ).toBe(true);
     expect(
-      evaluatePolicy({
-        teamId: "team_1",
-        subject: { type: "user", id: "usr_member", role: "member" },
-        resource: { type: "room" },
-        permission: "room:write",
-        aclRules: []
+      decide("room:read", [teamRule], {
+        subject: { type: "user", id: "usr_b", userId: "usr_b", teamIds: ["team_1"] },
+        resource: { type: "room", roomId: "room_1", roomOwnerUserId: "usr_a" }
       }).allowed
     ).toBe(false);
+  });
+
+  it("does not filter matching rules by a separate team context", () => {
+    const teamRule = { ...baseRule, subjectType: "team" as const, subjectId: "team_2", permissions: ["file:read"] } satisfies AclRule;
+
+    expect(
+      evaluatePolicy({
+        subject: { type: "user", id: "usr_b", userId: "usr_b", teamIds: ["team_2"] },
+        resource: { type: "file", roomId: "room_1", roomOwnerUserId: "usr_a", relativePath: "Board.md" },
+        permission: "file:read",
+        aclRules: [teamRule]
+      }).allowed
+    ).toBe(true);
   });
 
   it("requires tool permission and underlying file permission", () => {

@@ -1,4 +1,5 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import type { TeamSummary } from "../apiClient.js";
 import type VaultRoomsPlugin from "../main.js";
 
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
@@ -25,7 +26,7 @@ export class VaultRoomsView extends ItemView {
 
   async onOpen(): Promise<void> {
     if (this.plugin.getActiveServer()) {
-      await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeamMembers({ notify: false })]).catch((error) => {
+      await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
         new Notice(error instanceof Error ? error.message : "Failed to load rooms");
       });
     }
@@ -42,18 +43,19 @@ export class VaultRoomsView extends ItemView {
     const server = this.plugin.getActiveServer();
     header.createEl("div", {
       cls: "vault-rooms-status",
-      text: server ? `${server.teamName} / ${server.userDisplayName} / ${server.status}` : "No team connected yet"
+      text: server ? `${server.userDisplayName} / ${server.baseUrl} / ${server.status}` : "No server connected yet"
     });
 
     this.renderServerSection(container);
-    this.renderTeamSection(container);
+    this.renderConnectionSection(container);
 
     if (!server) {
-      container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a team above to load rooms." });
+      container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a server above to load teams and rooms." });
       return;
     }
 
-    this.renderMembers(container);
+    this.renderFriendsSection(container);
+    this.renderTeamsSection(container);
     this.renderRoomsSection(container);
   }
 
@@ -89,7 +91,7 @@ export class VaultRoomsView extends ItemView {
     } else if (!status.running && status.error) {
       card.createEl("div", { cls: "vault-rooms-error", text: status.error });
     } else {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Start it to set up or join a team." });
+      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Start it to set up or join a server." });
     }
 
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
@@ -107,19 +109,19 @@ export class VaultRoomsView extends ItemView {
     }
   }
 
-  private renderTeamSection(parent: HTMLElement): void {
+  private renderConnectionSection(parent: HTMLElement): void {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Team" });
+    section.createEl("h3", { text: "Connection" });
 
     const serverRunning = this.plugin.getServerStatus().running;
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Set Up Team", () => this.plugin.openSetupTeamModal(), true);
-    this.addPanelButton(actions, "Join Team", () => this.plugin.openJoinTeamModal());
+    this.addPanelButton(actions, "Set Up Server", () => this.plugin.openSetupServerModal(), true);
+    this.addPanelButton(actions, "Join Server", () => this.plugin.openJoinTeamModal());
 
     if (this.plugin.settings.servers.length === 0) {
       section.createDiv({
         cls: "vault-rooms-empty",
-        text: serverRunning ? "No teams yet. Set up a team on this server, or join one via an invite link." : "Start the server above, then set up or join a team."
+        text: serverRunning ? "Not connected yet. Set up a server, or join one via an invite link." : "Start the server above, then set up or join one."
       });
       return;
     }
@@ -129,9 +131,9 @@ export class VaultRoomsView extends ItemView {
     for (const server of this.plugin.settings.servers) {
       const item = list.createDiv({ cls: server.id === active?.id ? "vault-rooms-team is-active" : "vault-rooms-team" });
       const title = item.createDiv({ cls: "vault-rooms-team-title" });
-      title.createEl("strong", { text: server.teamName });
+      title.createEl("strong", { text: server.baseUrl });
       title.createEl("span", { text: server.id === active?.id ? "active" : server.status });
-      item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName} / ${server.baseUrl}` });
+      item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
       const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
       const useButton = this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
       useButton.disabled = server.id === active?.id;
@@ -139,26 +141,121 @@ export class VaultRoomsView extends ItemView {
     }
   }
 
-  private renderMembers(parent: HTMLElement): void {
+  private renderFriendsSection(parent: HTMLElement): void {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Team Members" });
-    const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Invite Member", () => this.plugin.createInvite("member"));
-    this.addPanelButton(actions, "Invite Admin", () => this.plugin.createInvite("admin"));
+    section.createEl("h3", { text: "Friends" });
+
     const server = this.plugin.getActiveServer();
-    const list = section.createDiv({ cls: "vault-rooms-member-list" });
-    if (this.plugin.teamMembers.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty", text: "No members loaded." });
+    const list = section.createDiv({ cls: "vault-rooms-friend-list" });
+    if (this.plugin.friends.length === 0) {
+      list.createDiv({ cls: "vault-rooms-empty", text: "No friends loaded." });
       return;
     }
-    for (const member of this.plugin.teamMembers) {
-      const item = list.createDiv({ cls: member.revokedAt ? "vault-rooms-member is-revoked" : "vault-rooms-member" });
-      item.createEl("strong", { text: member.displayName });
-      item.createSpan({ text: ` ${member.role}${member.revokedAt ? " / revoked" : ""}` });
-      const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-      const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeTeamMember(member.userId));
-      revoke.disabled = member.userId === server?.userId || member.role === "owner" || Boolean(member.revokedAt);
+    for (const friend of this.plugin.friends) {
+      const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
+      item.createEl("strong", { text: friend.displayName });
+      item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
+      if (server?.isServerOwner) {
+        const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+        const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
+        revoke.disabled = friend.id === server.userId || Boolean(friend.revokedAt);
+      }
     }
+  }
+
+  private renderTeamsSection(parent: HTMLElement): void {
+    const section = parent.createDiv({ cls: "vault-rooms-section" });
+    section.createEl("h3", { text: "Teams" });
+
+    const server = this.plugin.getActiveServer();
+    if (server?.isServerOwner) {
+      const actions = section.createDiv({ cls: "vault-rooms-actions" });
+      let newTeamName = "";
+      const nameInput = actions.createEl("input", { type: "text", attr: { placeholder: "New team name" } });
+      nameInput.oninput = () => (newTeamName = nameInput.value.trim());
+      this.addPanelButton(actions, "Create team", async () => {
+        if (!newTeamName) {
+          new Notice("Team name is required.");
+          return;
+        }
+        await this.plugin.createTeam(newTeamName);
+        this.render();
+      });
+    }
+
+    if (this.plugin.teams.length === 0) {
+      section.createDiv({ cls: "vault-rooms-empty", text: "No teams yet." });
+      return;
+    }
+
+    const list = section.createDiv({ cls: "vault-rooms-team-card-list" });
+    for (const team of this.plugin.teams) {
+      this.renderTeamCard(list, team);
+    }
+  }
+
+  private renderTeamCard(parent: HTMLElement, team: TeamSummary): void {
+    const canManage = this.plugin.canManageTeam(team);
+    const canDelete = this.plugin.canDeleteTeam(team);
+    const members = this.plugin.teamMembersByTeam[team.id];
+
+    const card = parent.createDiv({ cls: "vault-rooms-team-card" });
+    const title = card.createDiv({ cls: "vault-rooms-team-title" });
+    title.createEl("strong", { text: team.name });
+    const role = this.plugin.myTeamRoles[team.id];
+    if (role) {
+      title.createEl("span", { text: role });
+    }
+
+    const memberList = card.createDiv({ cls: "vault-rooms-team-member-list" });
+    if (!members) {
+      memberList.createDiv({ cls: "vault-rooms-empty", text: "You are not a member of this team." });
+    } else if (members.length === 0) {
+      memberList.createDiv({ cls: "vault-rooms-empty", text: "No members." });
+    } else {
+      for (const member of members) {
+        const item = memberList.createDiv({ cls: member.revokedAt ? "vault-rooms-team-member is-revoked" : "vault-rooms-team-member" });
+        item.createEl("strong", { text: member.displayName });
+        item.createSpan({ text: ` ${member.role}${member.revokedAt ? " / revoked" : ""}` });
+        if (canManage) {
+          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+          const remove = this.addPanelButton(rowActions, "Remove", () => this.plugin.removeTeamMember(team.id, member.userId));
+          remove.disabled = Boolean(member.revokedAt);
+        }
+      }
+    }
+
+    const cardActions = card.createDiv({ cls: "vault-rooms-room-actions" });
+    if (canManage) {
+      const candidateFriends = this.plugin.friends.filter((friend) => !friend.revokedAt && !members?.some((member) => member.userId === friend.id));
+      if (candidateFriends.length > 0) {
+        const addFriendRow = card.createDiv({ cls: "vault-rooms-add-friend-row" });
+        const select = addFriendRow.createEl("select");
+        for (const friend of candidateFriends) {
+          select.createEl("option", { text: friend.displayName, value: friend.id });
+        }
+        this.addPanelButton(addFriendRow, "Add friend", async () => {
+          if (!select.value) {
+            return;
+          }
+          await this.plugin.addFriendToTeam(team.id, select.value);
+          this.render();
+        });
+      }
+      this.addPanelButton(cardActions, "Invite link", () => this.plugin.createInvite(team.id));
+    }
+    if (canDelete) {
+      const deleteButton = this.addPanelButton(cardActions, "Delete team", () => this.deleteTeamWithConfirm(team));
+      deleteButton.addClass("mod-warning");
+    }
+  }
+
+  private async deleteTeamWithConfirm(team: TeamSummary): Promise<void> {
+    if (!window.confirm(`Delete team "${team.name}"? This removes its members, invites, and room access grants for everyone. Rooms are not deleted. This cannot be undone.`)) {
+      return;
+    }
+    await this.plugin.deleteTeam(team.id);
+    this.render();
   }
 
   private renderRoomsSection(parent: HTMLElement): void {
@@ -167,7 +264,7 @@ export class VaultRoomsView extends ItemView {
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     this.addPanelButton(actions, "Create Room", () => this.plugin.openCreateRoomModal());
     this.addPanelButton(actions, "Refresh", async () => {
-      await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeamMembers()]);
+      await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
     });
 
     if (this.plugin.visibleRooms.length === 0) {

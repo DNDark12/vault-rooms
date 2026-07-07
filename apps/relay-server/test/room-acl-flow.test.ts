@@ -10,9 +10,9 @@ async function bootstrapOwnerAndMember() {
   const owner = (
     await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "127.0.0.1",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
     })
   ).json();
   const invite = (
@@ -40,7 +40,7 @@ describe("rooms and ACL", () => {
 
     const created = await app.inject({
       method: "POST",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
       payload: {
         name: "Projects Demo",
@@ -53,13 +53,13 @@ describe("rooms and ACL", () => {
     expect(created.statusCode).toBe(200);
     const room = created.json().room;
     // The Obsidian plugin needs this to decide whether a device should mount in place at
-    // sourcePath (the owner) or into a separate folder under the team's mount root (everyone
-    // else) - see roomMountPathFor() in apps/obsidian-plugin/src/main.ts.
+    // sourcePath (the owner) or into a separate folder under the mount root (everyone else) -
+    // see roomMountPathFor() in apps/obsidian-plugin/src/main.ts.
     expect(room.ownerUserId).toBe(owner.user.id);
 
     const duplicate = await app.inject({
       method: "POST",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
       payload: { name: "Dup", type: "folder", sourcePath: "Other", mountName: "Projects Demo", capabilities: [] }
     });
@@ -67,7 +67,7 @@ describe("rooms and ACL", () => {
 
     const ownerRooms = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
     expect(ownerRooms.statusCode).toBe(200);
@@ -101,7 +101,7 @@ describe("rooms and ACL", () => {
 
     const bBeforeGrant = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${member.deviceToken}` }
     });
     expect(bBeforeGrant.statusCode).toBe(200);
@@ -125,7 +125,7 @@ describe("rooms and ACL", () => {
 
     const bAfterGrant = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${member.deviceToken}` }
     });
     expect(bAfterGrant.statusCode).toBe(200);
@@ -146,7 +146,7 @@ describe("rooms and ACL", () => {
 
     const bAfterDeny = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${member.deviceToken}` }
     });
     expect(bAfterDeny.statusCode).toBe(200);

@@ -36,7 +36,7 @@ export function registerSyncRoutes(
       if (connection.principal) {
         try {
           repo.audit({
-            teamId: connection.principal.teamId,
+            teamId: null,
             actorType: "device",
             actorId: connection.principal.deviceId,
             action: "sync.disconnected",
@@ -77,7 +77,7 @@ async function handleMessage(
     }
     connection.principal = principal;
     repo.audit({
-      teamId: principal.teamId,
+      teamId: null,
       actorType: "device",
       actorId: principal.deviceId,
       action: "sync.connected",
@@ -88,7 +88,6 @@ async function handleMessage(
     sendJson(connection.socket, {
       type: "hello_ok",
       requestId: message.requestId,
-      teamId: principal.teamId,
       userId: principal.userId,
       deviceId: principal.deviceId
     });
@@ -116,7 +115,7 @@ async function handleMessage(
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:subscribe" });
     } catch {
       repo.audit({
-        teamId: room.team_id,
+        teamId: null,
         actorType: "device",
         actorId: connection.principal.deviceId,
         action: "sync.denied",

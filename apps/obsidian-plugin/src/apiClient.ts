@@ -14,15 +14,35 @@ export type RoomSummary = {
 export type TeamMemberSummary = {
   userId: string;
   displayName: string;
-  role: "owner" | "admin" | "member";
+  role: "admin" | "member";
   revokedAt: string | null;
+};
+
+export type TeamSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  ownerUserId: string;
+};
+
+export type MyTeamSummary = {
+  id: string;
+  name: string;
+  slug: string;
+  role: "admin" | "member";
+};
+
+export type FriendSummary = {
+  id: string;
+  displayName: string;
+  revokedAt: string | null;
+  teams: Array<{ id: string; role: "admin" | "member" }>;
 };
 
 export type AclRuleSummary = {
   id: string;
-  teamId: string;
   roomId: string;
-  subjectType: "user" | "role" | "device" | "agent";
+  subjectType: "user" | "team" | "device" | "agent";
   subjectId: string;
   effect: "allow" | "deny";
   permissions: string[];
@@ -60,10 +80,52 @@ export class RelayApiClient implements RelayFileApi {
     }
   }
 
-  async bootstrap(teamName: string, ownerDisplayName: string, ownerDeviceName: string) {
-    return this.request("/api/teams/bootstrap", {
+  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string }) {
+    return this.request("/api/bootstrap", {
       method: "POST",
-      body: { teamName, ownerDisplayName, ownerDeviceName }
+      body: input
+    });
+  }
+
+  async me(): Promise<{
+    user: { id: string; displayName: string };
+    device: { id: string; displayName: string };
+    isServerOwner: boolean;
+    teams: MyTeamSummary[];
+  }> {
+    return this.request("/api/me");
+  }
+
+  async acceptInvite(inviteToken: string): Promise<{ team: { id: string; slug: string; name: string } }> {
+    return this.request("/api/invites/accept", {
+      method: "POST",
+      body: { inviteToken }
+    });
+  }
+
+  async listFriends(): Promise<{ friends: FriendSummary[] }> {
+    return this.request("/api/friends");
+  }
+
+  async revokeFriend(userId: string): Promise<{ ok: true }> {
+    return this.request(`/api/friends/${userId}/revoke`, { method: "POST" });
+  }
+
+  async listTeams(): Promise<{ teams: TeamSummary[] }> {
+    return this.request("/api/teams");
+  }
+
+  async createTeam(name: string): Promise<{ team: TeamSummary }> {
+    return this.request("/api/teams", {
+      method: "POST",
+      body: { name }
+    });
+  }
+
+  async addTeamMember(teamId: string, userId: string, role: "member" | "admin" = "member"): Promise<{ ok: true }> {
+    return this.request(`/api/teams/${teamId}/members`, {
+      method: "POST",
+      body: { userId, role }
     });
   }
 
@@ -92,15 +154,18 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async listRooms(teamId: string): Promise<{ rooms: RoomSummary[] }> {
-    return this.request(`/api/teams/${teamId}/rooms`);
+  async listRooms(): Promise<{ rooms: RoomSummary[] }> {
+    return this.request("/api/rooms");
   }
 
-  async createRoom(
-    teamId: string,
-    input: { name: string; type: "file" | "folder"; sourcePath: string; mountName: string; capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }> }
-  ) {
-    return this.request(`/api/teams/${teamId}/rooms`, {
+  async createRoom(input: {
+    name: string;
+    type: "file" | "folder";
+    sourcePath: string;
+    mountName: string;
+    capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
+  }) {
+    return this.request("/api/rooms", {
       method: "POST",
       body: input
     });
@@ -116,7 +181,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async grantAcl(roomId: string, input: { subjectType: "user" | "role" | "device" | "agent"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }) {
+  async grantAcl(roomId: string, input: { subjectType: "user" | "team" | "device" | "agent"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }) {
     return this.request(`/api/rooms/${roomId}/acl`, {
       method: "POST",
       body: input

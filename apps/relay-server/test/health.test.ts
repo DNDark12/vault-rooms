@@ -13,7 +13,7 @@ describe("health", () => {
 
   it("handles browser preflight requests", async () => {
     const app = await createApp();
-    const response = await app.inject({ method: "OPTIONS", url: "/api/teams/bootstrap" });
+    const response = await app.inject({ method: "OPTIONS", url: "/api/bootstrap" });
 
     expect(response.statusCode).toBe(204);
     expect(response.headers["access-control-allow-methods"]).toContain("POST");

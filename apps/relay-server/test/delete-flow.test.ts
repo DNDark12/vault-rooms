@@ -1,4 +1,3 @@
-import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createApp } from "../src/app.js";
@@ -17,14 +16,11 @@ afterEach(async () => {
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
 
-async function connect(url: string): Promise<JsonSocket> {
-  const socket = new WebSocket(url) as JsonSocket;
+async function connect(app: Awaited<ReturnType<typeof createApp>>): Promise<JsonSocket> {
+  await app.ready();
+  const socket = (await app.injectWS("/sync")) as unknown as JsonSocket;
   socket.sendJson = (payload: unknown) => socket.send(JSON.stringify(payload));
   sockets.push(socket);
-  await new Promise<void>((resolve, reject) => {
-    socket.once("open", resolve);
-    socket.once("error", reject);
-  });
   return socket;
 }
 
@@ -52,9 +48,9 @@ async function bootstrapOwnerAndMember() {
   const owner = (
     await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "127.0.0.1",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
     })
   ).json();
   const invite = (
@@ -75,7 +71,7 @@ async function bootstrapOwnerAndMember() {
 
   const created = await app.inject({
     method: "POST",
-    url: `/api/teams/${owner.team.id}/rooms`,
+    url: "/api/rooms",
     headers: { authorization: `Bearer ${owner.deviceToken}` },
     payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
   });
@@ -85,10 +81,10 @@ async function bootstrapOwnerAndMember() {
 }
 
 describe("delete room/team/acl", () => {
-  it("bootstraps the owner with role=owner and members with their invite role", async () => {
+  it("bootstraps the server owner and members with their invite role", async () => {
     const { owner, member } = await bootstrapOwnerAndMember();
-    expect(owner.role).toBe("owner");
-    expect(member.role).toBe("member");
+    expect(owner.isServerOwner).toBe(true);
+    expect(member.isServerOwner).toBe(false);
   });
 
   it("rejects room deletion from a member with no manage rights, then allows the owner", async () => {
@@ -110,7 +106,7 @@ describe("delete room/team/acl", () => {
 
     const afterDelete = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
     expect(afterDelete.json().rooms).toEqual([]);
@@ -138,7 +134,7 @@ describe("delete room/team/acl", () => {
 
     const bBefore = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${member.deviceToken}` }
     });
     expect(bBefore.json().rooms).toHaveLength(1);
@@ -159,14 +155,14 @@ describe("delete room/team/acl", () => {
 
     const bAfter = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${member.deviceToken}` }
     });
     expect(bAfter.json().rooms).toEqual([]);
   });
 
-  it("rejects team deletion from non-owners, then lets the owner delete the whole team", async () => {
-    const { app, owner, member } = await bootstrapOwnerAndMember();
+  it("rejects team deletion from non-owners, then lets the owner delete the team without touching rooms or devices", async () => {
+    const { app, owner, member, room } = await bootstrapOwnerAndMember();
 
     const memberDelete = await app.inject({
       method: "DELETE",
@@ -182,21 +178,27 @@ describe("delete room/team/acl", () => {
     });
     expect(ownerDelete.statusCode).toBe(200);
 
-    const afterDelete = await app.inject({
+    // Teams are pure permission groups now: deleting one never revokes devices or rooms.
+    const meAfterDelete = await app.inject({
       method: "GET",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/me",
       headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
-    // The owner's own device token is gone along with the team, so this now fails auth.
-    expect(afterDelete.statusCode).toBe(401);
+    expect(meAfterDelete.statusCode).toBe(200);
+    expect(meAfterDelete.json().teams).toEqual([]);
+
+    const roomsAfterDelete = await app.inject({
+      method: "GET",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(roomsAfterDelete.statusCode).toBe(200);
+    expect(roomsAfterDelete.json().rooms).toEqual(expect.arrayContaining([expect.objectContaining({ id: room.id })]));
   });
 
   it("notifies a subscribed WebSocket peer when their room is deleted, and does not crash on re-subscribe to an already-deleted room", async () => {
     const { app, owner, member, room } = await bootstrapOwnerAndMember();
     apps.push(app);
-    await app.listen({ host: "127.0.0.1", port: 0 });
-    const address = app.server.address() as AddressInfo;
-    const syncUrl = `ws://127.0.0.1:${address.port}/sync`;
 
     await app.inject({
       method: "POST",
@@ -205,7 +207,7 @@ describe("delete room/team/acl", () => {
       payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "**/*" }
     });
 
-    const b = await connect(syncUrl);
+    const b = await connect(app);
     b.sendJson({ type: "hello", requestId: "hello-b", token: member.deviceToken, client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: "B laptop" } });
     await nextMessage(b, "hello_ok");
     b.sendJson({ type: "subscribe_room", requestId: "sub-b", roomId: room.id });
@@ -226,5 +228,27 @@ describe("delete room/team/acl", () => {
     // instead of sending a normal response.
     b.sendJson({ type: "subscribe_room", requestId: "sub-b-again", roomId: room.id });
     expect(await nextMessage(b, "room_deleted")).toMatchObject({ roomId: room.id });
+  });
+
+  it("refuses to let the server owner revoke themselves via /api/friends/:userId/revoke", async () => {
+    // Regression test: POST /api/bootstrap permanently refuses to run once server_meta has an
+    // owner, so revoking the owner (self-revoke by mistake, or a compromised owner device token)
+    // would otherwise permanently brick every owner-gated endpoint with no recovery path.
+    const { app, owner } = await bootstrapOwnerAndMember();
+
+    const selfRevoke = await app.inject({
+      method: "POST",
+      url: `/api/friends/${owner.user.id}/revoke`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(selfRevoke.statusCode).toBe(400);
+
+    const me = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().isServerOwner).toBe(true);
   });
 });

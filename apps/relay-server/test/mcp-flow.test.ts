@@ -6,15 +6,15 @@ async function setupMcpFlow() {
   const owner = (
     await app.inject({
       method: "POST",
-      url: "/api/teams/bootstrap",
+      url: "/api/bootstrap",
       remoteAddress: "127.0.0.1",
-      payload: { teamName: "Demo", ownerDisplayName: "A", ownerDeviceName: "A laptop" }
+      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
     })
   ).json();
   const room = (
     await app.inject({
       method: "POST",
-      url: `/api/teams/${owner.team.id}/rooms`,
+      url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
       payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
     })
@@ -34,7 +34,7 @@ async function setupMcpFlow() {
   const agent = (
     await app.inject({
       method: "POST",
-      url: `/api/teams/${owner.team.id}/agents`,
+      url: "/api/agents",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
       payload: { displayName: "Planning agent" }
     })
@@ -124,7 +124,7 @@ describe("MCP gateway", () => {
     const limitedAgent = (
       await app.inject({
         method: "POST",
-        url: `/api/teams/${owner.team.id}/agents`,
+        url: "/api/agents",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
         payload: { displayName: "Limited agent" }
       })
@@ -140,7 +140,7 @@ describe("MCP gateway", () => {
 
     const revoke = await app.inject({
       method: "POST",
-      url: `/api/teams/${owner.team.id}/agents/${agent.agent.id}/revoke`,
+      url: `/api/agents/${agent.agent.id}/revoke`,
       headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
     expect(revoke.statusCode).toBe(200);

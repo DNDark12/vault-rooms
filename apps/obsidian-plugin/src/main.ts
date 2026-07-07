@@ -1,9 +1,17 @@
 import { FileSystemAdapter, Notice, Plugin, type ObsidianProtocolData } from "obsidian";
 import { join } from "node:path";
 import { isEligibleTextPath } from "@vault-rooms/protocol";
-import { RelayApiClient, type AclRuleSummary, type RoomSummary, type TeamMemberSummary } from "./apiClient.js";
+import {
+  RelayApiClient,
+  type AclRuleSummary,
+  type FriendSummary,
+  type MyTeamSummary,
+  type RoomSummary,
+  type TeamMemberSummary,
+  type TeamSummary
+} from "./apiClient.js";
 import { registerMountedRoomWatcher } from "./fileWatcher.js";
-import { activeServer, DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type RelayServerConfig, type VaultRoomsSettings } from "./settings.js";
+import { activeServer, DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type ServerConnection, type VaultRoomsSettings } from "./settings.js";
 import { EmbeddedRelayServer, type EmbeddedServerStatus } from "./serverManager.js";
 import { VaultRoomsSettingTab } from "./VaultRoomsSettingTab.js";
 import { CreateRoomModal } from "./modals/CreateRoomModal.js";
@@ -20,7 +28,13 @@ import { withInstalledCapabilities } from "./pluginCapabilities.js";
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
   visibleRooms: RoomSummary[] = [];
-  teamMembers: TeamMemberSummary[] = [];
+  /** All teams on the active server (any active caller may list these - used for the room ACL "Team" picker). */
+  teams: TeamSummary[] = [];
+  /** This device's own team memberships/roles, keyed by team id - used to decide what this user can manage. */
+  myTeamRoles: Record<string, "admin" | "member"> = {};
+  friends: FriendSummary[] = [];
+  /** Populated only for teams this device can actually list members of (its own teams, or all teams if server owner). */
+  teamMembersByTeam: Record<string, TeamMemberSummary[]> = {};
   private vaultAdapter!: ObsidianVaultAdapter;
   private syncEngine!: VaultSyncEngine;
   private watchedRoomStates = new WeakSet<MountedRoomState>();
@@ -58,14 +72,9 @@ export default class VaultRoomsPlugin extends Plugin {
       callback: () => this.openRoomsPanel()
     });
     this.addCommand({
-      id: "setup-team",
-      name: "Set Up Team",
-      callback: () => this.openSetupTeamModal()
-    });
-    this.addCommand({
-      id: "create-invite",
-      name: "Create Invite",
-      callback: () => this.createInvite()
+      id: "setup-server",
+      name: "Set Up Server",
+      callback: () => this.openSetupServerModal()
     });
     this.addCommand({
       id: "create-room",
@@ -117,11 +126,23 @@ export default class VaultRoomsPlugin extends Plugin {
 
     const handleJoinLink = (params: ObsidianProtocolData) => {
       const mode = params.mode ?? params.op ?? "join";
-      if (mode === "join" && params.server && params.token) {
-        new JoinTeamModal(this, "join", params.server, params.token).open();
-      } else {
+      if (mode !== "join" || !params.server || !params.token) {
         new Notice("Vault Rooms invite link is missing server/token parameters.");
+        return;
       }
+      // If we already have an active identity on this exact server, this is a "join another
+      // team" invite for someone who already has an account there - accept it directly onto the
+      // caller's existing user/device instead of running through the (new account) join modal.
+      const existing = this.settings.servers.find(
+        (server) => server.status === "active" && normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(params.server as string)
+      );
+      if (existing) {
+        this.acceptInviteForServer(existing, params.token as string).catch((error) => {
+          new Notice(error instanceof Error ? error.message : "Failed to accept invite");
+        });
+        return;
+      }
+      new JoinTeamModal(this, "join", params.server, params.token).open();
     };
     // Accept both obsidian://vault-rooms?mode=join&... and obsidian://vault-rooms/join?... link shapes.
     this.registerObsidianProtocolHandler("vault-rooms", handleJoinLink);
@@ -140,12 +161,24 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const loaded = (await this.loadData()) as Partial<VaultRoomsSettings> | null;
+    const loaded = (await this.loadData()) as (Partial<VaultRoomsSettings> & { servers?: Array<Record<string, unknown>> }) | null;
+    // v0.1 saved one server entry per TEAM (with a teamId/teamName/teamSlug/role). The redesign
+    // makes rooms/teams independent of the server connection, so any entry shaped like that is
+    // from before the upgrade and can't be reused - drop it and have the user set up/join again.
+    const isLegacy = loaded?.servers?.some((server) => "teamId" in server) ?? false;
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...loaded,
+      servers: isLegacy ? [] : ((loaded?.servers as VaultRoomsSettings["servers"] | undefined) ?? DEFAULT_SETTINGS.servers),
+      activeServerId: isLegacy ? undefined : loaded?.activeServerId,
+      mountedRooms: isLegacy ? {} : (loaded?.mountedRooms ?? DEFAULT_SETTINGS.mountedRooms),
+      roomMountPaths: isLegacy ? {} : (loaded?.roomMountPaths ?? DEFAULT_SETTINGS.roomMountPaths),
       server: { ...DEFAULT_SERVER_SETTINGS, ...(loaded?.server ?? {}) }
     };
+    if (isLegacy) {
+      await this.saveSettings();
+      new Notice("Vault Rooms was upgraded — set up or join your server again.");
+    }
   }
 
   getServerStatus(): EmbeddedServerStatus {
@@ -185,24 +218,24 @@ export default class VaultRoomsPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  getActiveServer(): RelayServerConfig | undefined {
+  getActiveServer(): ServerConnection | undefined {
     return activeServer(this.settings);
   }
 
   async testConnection(baseUrl: string): Promise<void> {
-    const result = await new RelayApiClient(baseUrl).testConnection();
+    await new RelayApiClient(baseUrl).testConnection();
     new Notice(`Connected to Vault Rooms`);
   }
 
-  async setupTeam(baseUrl: string, teamName: string, displayName: string, deviceName: string): Promise<void> {
-    const response = await new RelayApiClient(baseUrl).bootstrap(teamName, displayName, deviceName);
+  async setupServer(baseUrl: string, displayName: string, deviceName: string, teamName?: string): Promise<void> {
+    const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
     this.connectSyncSocket();
-    await this.refreshTeamMembers({ notify: false }).catch(() => undefined);
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     await this.openRoomsPanel();
     this.renderOpenRoomsViews();
-    new Notice(`Set up ${response.team.name}`);
+    new Notice(response.team ? `Set up server and team ${response.team.name}` : "Set up server");
   }
 
   async joinServer(baseUrl: string, inviteToken: string, displayName: string, deviceName: string): Promise<void> {
@@ -210,12 +243,22 @@ export default class VaultRoomsPlugin extends Plugin {
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
     this.connectSyncSocket();
-    await this.refreshTeamMembers({ notify: false }).catch(() => undefined);
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     this.renderOpenRoomsViews();
     new Notice(`Joined ${response.team.name}`);
   }
 
-  async createInvite(role: "member" | "admin" = "member"): Promise<void> {
+  /** Accepts an invite onto an already-connected server, adding the caller's existing account to that invite's team. */
+  private async acceptInviteForServer(server: ServerConnection, inviteToken: string): Promise<void> {
+    const result = await this.apiFor(server).acceptInvite(inviteToken);
+    if (this.getActiveServer()?.id === server.id) {
+      await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
+      this.renderOpenRoomsViews();
+    }
+    new Notice(`Joined team ${result.team.name}`);
+  }
+
+  async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<void> {
     const server = this.requireActiveServer();
     const status = this.getServerStatus();
     if (status.running && status.lanDetectionFailed) {
@@ -224,25 +267,83 @@ export default class VaultRoomsPlugin extends Plugin {
         12_000
       );
     }
-    const invite = await this.apiFor(server).createInvite(server.teamId, role);
+    const invite = await this.apiFor(server).createInvite(teamId, role);
     new InviteMemberModal(this, `${invite.serverUrl}\n${invite.inviteToken}\n${invite.joinUrl}`, invite.joinUrl).open();
   }
 
-  async refreshTeamMembers(options: { notify?: boolean } = {}): Promise<void> {
+  /**
+   * Refreshes friends, all teams on the server (needed for the room ACL "Team" picker), this
+   * device's own team memberships/roles, and - for teams this device is actually allowed to list
+   * members of (its own teams, or every team if it is the server owner) - each team's members.
+   */
+  async refreshTeams(options: { notify?: boolean } = {}): Promise<void> {
     const server = this.requireActiveServer();
-    const result = await this.apiFor(server).listMembers(server.teamId);
-    this.teamMembers = result.members;
+    const api = this.apiFor(server);
+    const [me, teamsResult, friendsResult] = await Promise.all([api.me(), api.listTeams(), api.listFriends()]);
+    this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
+    this.teams = teamsResult.teams;
+    this.friends = friendsResult.friends;
+
+    const memberVisibleTeamIds = server.isServerOwner ? this.teams.map((team) => team.id) : me.teams.map((team) => team.id);
+    const memberEntries = await Promise.all(
+      memberVisibleTeamIds.map(async (teamId): Promise<[string, TeamMemberSummary[]]> => [teamId, (await api.listMembers(teamId)).members])
+    );
+    this.teamMembersByTeam = Object.fromEntries(memberEntries);
+
     if (options.notify ?? true) {
-      new Notice(`Loaded ${this.teamMembers.length} member(s).`);
+      new Notice(`Loaded ${this.teams.length} team(s).`);
     }
     this.renderOpenRoomsViews();
   }
 
-  async revokeTeamMember(userId: string): Promise<void> {
+  /** True if this device can manage (add/remove members, create invites for) the given team. */
+  canManageTeam(team: TeamSummary): boolean {
+    const server = this.getActiveServer();
+    if (!server) {
+      return false;
+    }
+    return server.isServerOwner || team.ownerUserId === server.userId || this.myTeamRoles[team.id] === "admin";
+  }
+
+  /** Only the server owner or the team's creator can delete it (stricter than canManageTeam). */
+  canDeleteTeam(team: TeamSummary): boolean {
+    const server = this.getActiveServer();
+    if (!server) {
+      return false;
+    }
+    return server.isServerOwner || team.ownerUserId === server.userId;
+  }
+
+  /** Server owner only. Creates a new permission-group team on the active server. */
+  async createTeam(name: string): Promise<void> {
     const server = this.requireActiveServer();
-    await this.apiFor(server).revokeMember(server.teamId, userId);
-    await this.refreshTeamMembers({ notify: false });
-    new Notice("Member revoked.");
+    const result = await this.apiFor(server).createTeam(name);
+    await this.refreshTeams({ notify: false });
+    new Notice(`Created team ${result.team.name}`);
+  }
+
+  /** Owner/team-admin only. Adds an existing friend to a team directly - no invite link needed. */
+  async addFriendToTeam(teamId: string, userId: string, role: "member" | "admin" = "member"): Promise<void> {
+    const server = this.requireActiveServer();
+    await this.apiFor(server).addTeamMember(teamId, userId, role);
+    await this.refreshTeams({ notify: false });
+    new Notice("Added to team.");
+  }
+
+  /** Owner/team-admin only. Removes a member from a team (their user account and other teams are untouched). */
+  async removeTeamMember(teamId: string, userId: string): Promise<void> {
+    const server = this.requireActiveServer();
+    await this.apiFor(server).revokeMember(teamId, userId);
+    await this.refreshTeams({ notify: false });
+    new Notice("Removed from team.");
+  }
+
+  /** Server owner only. Revokes a friend's user account and all of their devices on this server. */
+  async revokeFriend(userId: string): Promise<void> {
+    const server = this.requireActiveServer();
+    await this.apiFor(server).revokeFriend(userId);
+    await this.refreshTeams({ notify: false });
+    new Notice("Friend revoked.");
   }
 
   async createRoom(input: {
@@ -253,7 +354,7 @@ export default class VaultRoomsPlugin extends Plugin {
     capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
   }): Promise<void> {
     const server = this.requireActiveServer();
-    await this.apiFor(server).createRoom(server.teamId, input);
+    await this.apiFor(server).createRoom(input);
     await this.refreshRooms();
     new Notice(`Created room ${input.name}`);
   }
@@ -284,7 +385,7 @@ export default class VaultRoomsPlugin extends Plugin {
   async grantRoomAccess(
     roomId: string,
     input: {
-      subjectType: "user" | "role" | "device" | "agent";
+      subjectType: "user" | "team" | "device" | "agent";
       subjectId: string;
       effect: "allow" | "deny";
       preset?: "reader" | "editor";
@@ -322,44 +423,20 @@ export default class VaultRoomsPlugin extends Plugin {
     new Notice(`Deleted room ${room.name}`);
   }
 
-  /** Owner only (enforced server-side). Deletes the entire team - all rooms, members, and invites. */
-  async deleteTeam(serverId: string): Promise<void> {
-    const server = this.settings.servers.find((candidate) => candidate.id === serverId);
-    if (!server) {
-      throw new Error("Team not found.");
-    }
-    const isActive = this.getActiveServer()?.id === server.id;
-    await this.apiFor(server).deleteTeam(server.teamId);
-    this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
-    if (this.settings.activeServerId === server.id) {
-      this.settings.activeServerId = undefined;
-    }
-    if (isActive) {
-      this.syncSocket?.disconnect();
-      this.syncSocket = null;
-      // Only forget local mount state for rooms that belonged to this (active) team - other
-      // teams' mounted rooms, if the vault is connected to more than one team, are untouched.
-      for (const room of this.visibleRooms) {
-        delete this.settings.mountedRooms[room.id];
-        delete this.settings.roomMountPaths[room.id];
-      }
-      this.visibleRooms = [];
-      this.teamMembers = [];
-    }
-    await this.saveSettings();
-    if (isActive) {
-      this.connectSyncSocket();
-    }
-    this.renderOpenRoomsViews();
-    new Notice(`Deleted team ${server.teamName}`);
+  /** Server owner or team creator only (enforced server-side). Deletes the team's memberships, invites, and ACL grants - NOT rooms, which are independently owned and outlive the team. */
+  async deleteTeam(teamId: string): Promise<void> {
+    const server = this.requireActiveServer();
+    const team = this.teams.find((candidate) => candidate.id === teamId);
+    await this.apiFor(server).deleteTeam(teamId);
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]);
+    new Notice(`Deleted team ${team?.name ?? teamId}`);
   }
 
   /**
-   * Purely local cleanup - removes a saved team/server entry without calling the server at all.
-   * This is the recovery path for a team whose saved device token no longer works there (see
-   * `markServerRevoked`): `deleteTeam` can't help in that case since it also needs a valid,
-   * working token to authenticate the delete request. Use this to drop the stale entry, then set
-   * up or join that team again to get a fresh, working identity.
+   * Purely local cleanup - removes a saved server entry without calling the server at all. This
+   * is the recovery path for a server whose saved device token no longer works there (see
+   * `markServerRevoked`): the server can't be reached to undo anything, so just drop the stale
+   * local entry, then set up or join that server again to get a fresh, working identity.
    */
   async forgetServer(serverId: string): Promise<void> {
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
@@ -375,36 +452,42 @@ export default class VaultRoomsPlugin extends Plugin {
       this.syncSocket?.disconnect();
       this.syncSocket = null;
       this.visibleRooms = [];
-      this.teamMembers = [];
+      this.teams = [];
+      this.friends = [];
+      this.myTeamRoles = {};
+      this.teamMembersByTeam = {};
     }
     await this.saveSettings();
     if (isActive) {
       this.connectSyncSocket();
     }
     this.renderOpenRoomsViews();
-    new Notice(`Removed ${server.teamName} from this device.`);
+    new Notice(`Removed ${server.baseUrl} from this device.`);
   }
 
   async activateServer(serverId: string): Promise<void> {
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
     if (!server) {
-      throw new Error("Team not found.");
+      throw new Error("Server not found.");
     }
     this.settings.activeServerId = serverId;
     this.visibleRooms = [];
-    this.teamMembers = [];
+    this.teams = [];
+    this.friends = [];
+    this.myTeamRoles = {};
+    this.teamMembersByTeam = {};
     await this.saveSettings();
     this.connectSyncSocket();
-    await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeamMembers({ notify: false })]).catch((error) => {
-      new Notice(error instanceof Error ? error.message : "Failed to load team");
+    await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
+      new Notice(error instanceof Error ? error.message : "Failed to load server");
     });
     this.renderOpenRoomsViews();
-    new Notice(`Using ${server.teamName}`);
+    new Notice(`Using ${server.baseUrl}`);
   }
 
   async refreshRooms(options: { notify?: boolean } = {}): Promise<void> {
     const server = this.requireActiveServer();
-    const result = await this.apiFor(server).listRooms(server.teamId);
+    const result = await this.apiFor(server).listRooms();
     this.visibleRooms = result.rooms.map((room) => withInstalledCapabilities(this.app, room));
     if (options.notify ?? true) {
       new Notice(`Loaded ${this.visibleRooms.length} room(s).`);
@@ -519,13 +602,12 @@ export default class VaultRoomsPlugin extends Plugin {
     return mountPathForRoom({
       owner: isOwner,
       mountRoot: this.settings.mountRoot,
-      teamSlug: server.teamSlug,
       mountName: room.mountName,
       sourcePath: room.sourcePath
     });
   }
 
-  openSetupTeamModal(): void {
+  openSetupServerModal(): void {
     const status = this.getServerStatus();
     new SetupTeamModal(this, status.running ? status.localUrl : undefined).open();
   }
@@ -600,7 +682,7 @@ export default class VaultRoomsPlugin extends Plugin {
         this.renderOpenRoomsViews();
       },
       onRevoked: () => {
-        new Notice(`Your access to ${server.teamName} was revoked.`);
+        new Notice(`Your access to ${server.baseUrl} was revoked.`);
         if (this.settings.activeServerId === server.id) {
           this.settings.activeServerId = undefined;
         }
@@ -615,6 +697,14 @@ export default class VaultRoomsPlugin extends Plugin {
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`${room?.name ?? "A room"} was deleted by the owner/admin.`);
+      },
+      onAccessRevoked: (roomId) => {
+        const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+        this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
+        delete this.settings.mountedRooms[roomId];
+        void this.saveSettings();
+        this.renderOpenRoomsViews();
+        new Notice(`Your access to ${room?.name ?? "a room"} was revoked.`);
       }
     });
     socket.connect();
@@ -628,7 +718,7 @@ export default class VaultRoomsPlugin extends Plugin {
     await this.app.workspace.getLeaf(true).setViewState({ type: VAULT_ROOMS_VIEW_TYPE, active: true });
   }
 
-  private apiFor(server: RelayServerConfig): RelayApiClient {
+  private apiFor(server: ServerConnection): RelayApiClient {
     return new RelayApiClient(server.baseUrl, server.deviceToken, () => this.markServerRevoked(server));
   }
 
@@ -636,21 +726,21 @@ export default class VaultRoomsPlugin extends Plugin {
    * A 401 from a server means the saved device token no longer resolves to anything there - most
    * commonly because that server's data was reset/recreated since the token was issued (fresh
    * install, wiped data dir, or switching between embedded/standalone with different data files).
-   * Reflect that in the UI (Settings → Vault Rooms → Teams already shows `status`) instead of
-   * leaving it as a one-off error toast with no lasting trace, so it's clear this team needs to be
-   * removed and set up/joined again rather than retried.
+   * Reflect that in the UI (Settings → Vault Rooms → Servers already shows `status`) instead of
+   * leaving it as a one-off error toast with no lasting trace, so it's clear this server needs to
+   * be removed and set up/joined again rather than retried.
    */
-  private markServerRevoked(server: RelayServerConfig): void {
+  private markServerRevoked(server: ServerConnection): void {
     if (server.status === "revoked") {
       return;
     }
     server.status = "revoked";
     void this.saveSettings();
     this.renderOpenRoomsViews();
-    new Notice(`"${server.teamName}" - saved login is no longer valid on this server. Remove it and set up/join the team again from Settings → Vault Rooms → Teams.`);
+    new Notice(`"${server.baseUrl}" - saved login is no longer valid on this server. Remove it and set up/join again from Settings → Vault Rooms → Servers.`);
   }
 
-  private requireActiveServer(): RelayServerConfig {
+  private requireActiveServer(): ServerConnection {
     const server = this.getActiveServer();
     if (!server) {
       throw new Error("No active Vault Rooms server.");
@@ -658,22 +748,31 @@ export default class VaultRoomsPlugin extends Plugin {
     return server;
   }
 
-  private upsertServer(baseUrl: string, response: any): void {
-    const config: RelayServerConfig = {
+  private upsertServer(
+    baseUrl: string,
+    response: {
+      user: { id: string; displayName: string };
+      device: { id: string; displayName: string };
+      deviceToken: string;
+      isServerOwner: boolean;
+    }
+  ): void {
+    const config: ServerConnection = {
       id: response.device.id,
       baseUrl,
-      teamId: response.team.id,
-      teamName: response.team.name,
-      teamSlug: response.team.slug,
       userId: response.user.id,
       userDisplayName: response.user.displayName,
       deviceId: response.device.id,
       deviceName: response.device.displayName,
       deviceToken: response.deviceToken,
-      status: "active",
-      role: response.role
+      isServerOwner: response.isServerOwner,
+      status: "active"
     };
     this.settings.servers = [...this.settings.servers.filter((server) => server.id !== config.id), config];
     this.settings.activeServerId = config.id;
   }
+}
+
+function normalizeBaseUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
 }

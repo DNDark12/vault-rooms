@@ -17,7 +17,7 @@ export function registerMcpRoutes(app: FastifyInstance, repo: RelayRepository): 
     }
 
     repo.audit({
-      teamId: agent.teamId,
+      teamId: null,
       actorType: "agent",
       actorId: agent.agentId,
       action: "mcp.tool.called",
@@ -29,7 +29,7 @@ export function registerMcpRoutes(app: FastifyInstance, repo: RelayRepository): 
     try {
       const result = handleTool(repo, agent, tool, input);
       repo.audit({
-        teamId: agent.teamId,
+        teamId: null,
         actorType: "agent",
         actorId: agent.agentId,
         action: "mcp.tool.succeeded",
@@ -40,7 +40,7 @@ export function registerMcpRoutes(app: FastifyInstance, repo: RelayRepository): 
       return { result };
     } catch (error) {
       repo.audit({
-        teamId: agent.teamId,
+        teamId: null,
         actorType: "agent",
         actorId: agent.agentId,
         action: error instanceof AppError && error.code === "PERMISSION_DENIED" ? "mcp.tool.denied" : "mcp.tool.failed",
@@ -58,7 +58,7 @@ function handleTool(repo: RelayRepository, agent: AgentPrincipal, tool: McpToolN
     case "list_rooms":
       return {
         rooms: repo
-          .listTeamRooms(agent.teamId)
+          .listAllRooms()
           .filter((room) => canAgent(repo, agent, room, "room:read"))
           .map((room) => ({
             id: room.id,
@@ -202,7 +202,6 @@ function assertToolPermissions(repo: RelayRepository, agent: AgentPrincipal, roo
 
 function canAgent(repo: RelayRepository, agent: AgentPrincipal, room: RoomRow, permission: Permission, relativePath = ""): boolean {
   return evaluatePolicy({
-    teamId: room.team_id,
     subject: { type: "agent", id: agent.agentId },
     resource: permission.startsWith("room:")
       ? { type: "room", roomId: room.id, roomOwnerUserId: room.owner_user_id }
@@ -210,7 +209,7 @@ function canAgent(repo: RelayRepository, agent: AgentPrincipal, room: RoomRow, p
         ? { type: "tool", roomId: room.id, relativePath, toolName: permission.slice("tool:".length) }
         : { type: "file", roomId: room.id, roomOwnerUserId: room.owner_user_id, relativePath },
     permission,
-    aclRules: repo.listAclRulesForTeam(room.team_id)
+    aclRules: repo.listAclRulesForRoom(room.id)
   }).allowed;
 }
 

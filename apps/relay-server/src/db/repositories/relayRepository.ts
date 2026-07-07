@@ -1,6 +1,30 @@
 import { createHash } from "node:crypto";
-import { AppError, contentTypeForPath, createId, createToken, hashToken, type AclEffect, type AclRule, type CapabilityMode, type Permission, type SubjectType, type TeamRole } from "@vault-rooms/protocol";
-import type { AclRuleRow, AgentPrincipalRow, DevicePrincipalRow, FileRow, FileVersionWithContentRow, InviteRow, MemberRow, RoomCapabilityRow, RoomRow, TeamRow } from "../schema.js";
+import {
+  AppError,
+  contentTypeForPath,
+  createId,
+  createToken,
+  hashToken,
+  type AclEffect,
+  type AclRule,
+  type CapabilityMode,
+  type Permission,
+  type SubjectType,
+  type TeamRole
+} from "@vault-rooms/protocol";
+import type {
+  AclRuleRow,
+  AgentPrincipalRow,
+  DevicePrincipalRow,
+  FileRow,
+  FileVersionWithContentRow,
+  InviteRow,
+  MemberRow,
+  RoomCapabilityRow,
+  RoomRow,
+  TeamRow,
+  UserRow
+} from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
 
 export type DevicePrincipal = {
@@ -9,27 +33,30 @@ export type DevicePrincipal = {
   deviceRevokedAt: string | null;
   userId: string;
   userDisplayName: string;
-  teamId: string;
-  teamName: string;
-  teamSlug: string;
-  role: TeamRole;
-  memberRevokedAt: string | null;
+  userRevokedAt: string | null;
+  isServerOwner: boolean;
 };
 
 export type AgentPrincipal = {
   agentId: string;
-  teamId: string;
   userId: string;
   displayName: string;
   revokedAt: string | null;
 };
 
+export type UserTeam = {
+  teamId: string;
+  name: string;
+  slug: string;
+  role: TeamRole;
+};
+
 export type BootstrapResult = {
-  team: { id: string; slug: string; name: string };
   user: { id: string; displayName: string };
   device: { id: string; displayName: string };
   deviceToken: string;
-  role: TeamRole;
+  isServerOwner: boolean;
+  team?: { id: string; slug: string; name: string };
 };
 
 export type FileWriteResult = {
@@ -49,45 +76,62 @@ export type FileDeleteResult = {
 export class RelayRepository {
   constructor(private readonly db: RelayDb) {}
 
-  bootstrapTeam(input: { teamName: string; ownerDisplayName: string; ownerDeviceName: string }): BootstrapResult {
+  getServerOwnerId(): string | null {
+    const row = this.db.prepare("select value from server_meta where key = 'owner_user_id'").get() as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setServerOwner(userId: string): void {
+    this.db.prepare("insert or replace into server_meta(key, value) values ('owner_user_id', ?)").run(userId);
+  }
+
+  bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string }): BootstrapResult {
     const now = new Date().toISOString();
-    const teamId = createId("team");
     const userId = createId("usr");
     const deviceId = createId("dev");
     const deviceToken = createToken("dev");
-    const slug = this.nextTeamSlug(input.teamName);
+    let team: { id: string; slug: string; name: string } | undefined;
 
     const create = this.db.transaction(() => {
       this.db
-        .prepare("insert into users(id, display_name, created_at, updated_at) values (?, ?, ?, ?)")
-        .run(userId, input.ownerDisplayName, now, now);
+        .prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values (?, ?, null, ?, ?)")
+        .run(userId, input.displayName, now, now);
       this.db
-        .prepare("insert into teams(id, slug, name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
-        .run(teamId, slug, input.teamName, userId, now, now);
-      this.db
-        .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
-        .run(teamId, userId, "owner", now);
-      this.db
-        .prepare("insert into devices(id, team_id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, ?, null, null, ?)")
-        .run(deviceId, teamId, userId, input.ownerDeviceName, hashToken(deviceToken), now);
-      this.audit({
-        teamId,
-        actorType: "user",
-        actorId: userId,
-        action: "team.created",
-        resourceType: "team",
-        resourceId: teamId,
-        metadata: { teamName: input.teamName }
-      });
+        .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
+        .run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
+      this.setServerOwner(userId);
+
+      if (input.teamName) {
+        const teamId = createId("team");
+        const slug = this.nextTeamSlug(input.teamName);
+        this.db
+          .prepare("insert into teams(id, slug, name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+          .run(teamId, slug, input.teamName, userId, now, now);
+        // Team ownership is stored on teams.owner_user_id. The owner is also an admin member so
+        // listUserTeams and membership UI stay consistent with team ACL evaluation.
+        this.db
+          .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, 'admin', null, ?)")
+          .run(teamId, userId, now);
+        this.audit({
+          teamId,
+          actorType: "user",
+          actorId: userId,
+          action: "team.created",
+          resourceType: "team",
+          resourceId: teamId,
+          metadata: { teamName: input.teamName }
+        });
+        team = { id: teamId, slug, name: input.teamName };
+      }
     });
     create();
 
     return {
-      team: { id: teamId, slug, name: input.teamName },
-      user: { id: userId, displayName: input.ownerDisplayName },
-      device: { id: deviceId, displayName: input.ownerDeviceName },
+      user: { id: userId, displayName: input.displayName },
+      device: { id: deviceId, displayName: input.deviceName },
       deviceToken,
-      role: "owner"
+      isServerOwner: true,
+      ...(team ? { team } : {})
     };
   }
 
@@ -101,15 +145,10 @@ export class RelayRepository {
             d.revoked_at as device_revoked_at,
             u.id as user_id,
             u.display_name as user_display_name,
-            t.id as team_id,
-            t.name as team_name,
-            t.slug as team_slug,
-            tm.role as role,
-            tm.revoked_at as member_revoked_at
+            u.revoked_at as user_revoked_at,
+            (select value from server_meta where key = 'owner_user_id') as server_owner_id
           from devices d
           join users u on u.id = d.user_id
-          join teams t on t.id = d.team_id
-          join team_members tm on tm.team_id = d.team_id and tm.user_id = d.user_id
           where d.token_hash = ?
         `
       )
@@ -117,10 +156,28 @@ export class RelayRepository {
     return row ? mapPrincipal(row) : null;
   }
 
+  listUserTeams(userId: string): UserTeam[] {
+    return this.db
+      .prepare(
+        `
+          select t.id as team_id, t.name, t.slug, tm.role
+          from team_members tm
+          join teams t on t.id = tm.team_id
+          where tm.user_id = ? and tm.revoked_at is null
+          order by tm.created_at asc
+        `
+      )
+      .all(userId)
+      .map((row) => {
+        const team = row as { team_id: string; name: string; slug: string; role: TeamRole };
+        return { teamId: team.team_id, name: team.name, slug: team.slug, role: team.role };
+      });
+  }
+
   createInvite(input: {
     teamId: string;
     createdByUserId: string;
-    role: "member" | "admin";
+    role: TeamRole;
     expiresInMinutes: number;
     maxUses: number;
   }): { inviteId: string; inviteToken: string } {
@@ -145,14 +202,8 @@ export class RelayRepository {
     return { inviteId, inviteToken };
   }
 
-  joinInvite(input: { inviteToken: string; displayName: string; deviceName: string }): BootstrapResult {
-    const invite = this.db
-      .prepare("select * from invites where token_hash = ?")
-      .get(hashToken(input.inviteToken)) as InviteRow | undefined;
-    if (!invite || invite.revoked_at || invite.use_count >= invite.max_uses || Date.parse(invite.expires_at) <= Date.now()) {
-      throw new Error("Invalid or expired invite");
-    }
-
+  joinInvite(input: { inviteToken: string; displayName: string; deviceName: string }): BootstrapResult & { team: { id: string; slug: string; name: string } } {
+    const invite = this.requireValidInvite(input.inviteToken);
     const team = this.getTeam(invite.team_id);
     if (!team) {
       throw new Error("Team not found");
@@ -165,33 +216,16 @@ export class RelayRepository {
 
     const join = this.db.transaction(() => {
       this.db
-        .prepare("insert into users(id, display_name, created_at, updated_at) values (?, ?, ?, ?)")
+        .prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values (?, ?, null, ?, ?)")
         .run(userId, input.displayName, now, now);
       this.db
         .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
         .run(team.id, userId, invite.role, now);
       this.db
-        .prepare("insert into devices(id, team_id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, ?, null, null, ?)")
-        .run(deviceId, team.id, userId, input.deviceName, hashToken(deviceToken), now);
+        .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
+        .run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
       this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
-      this.audit({
-        teamId: team.id,
-        actorType: "user",
-        actorId: userId,
-        action: "member.joined",
-        resourceType: "user",
-        resourceId: userId,
-        metadata: { inviteId: invite.id }
-      });
-      this.audit({
-        teamId: team.id,
-        actorType: "user",
-        actorId: userId,
-        action: "invite.used",
-        resourceType: "invite",
-        resourceId: invite.id,
-        metadata: { displayName: input.displayName }
-      });
+      this.auditMemberJoined(team.id, userId, invite.id, input.displayName);
     });
     join();
 
@@ -200,8 +234,41 @@ export class RelayRepository {
       user: { id: userId, displayName: input.displayName },
       device: { id: deviceId, displayName: input.deviceName },
       deviceToken,
-      role: invite.role
+      isServerOwner: false
     };
+  }
+
+  acceptInvite(input: { inviteToken: string; userId: string }): { team: { id: string; slug: string; name: string } } {
+    const invite = this.requireValidInvite(input.inviteToken);
+    const team = this.getTeam(invite.team_id);
+    if (!team) {
+      throw new Error("Team not found");
+    }
+    const existing = this.getTeamMembership(team.id, input.userId);
+    if (existing && !existing.revoked_at) {
+      return { team: { id: team.id, slug: team.slug, name: team.name } };
+    }
+
+    const user = this.getUser(input.userId);
+    if (!user || user.revoked_at) {
+      throw new Error("User not found");
+    }
+
+    const now = new Date().toISOString();
+    const accept = this.db.transaction(() => {
+      if (existing) {
+        this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(invite.role, team.id, input.userId);
+      } else {
+        this.db
+          .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
+          .run(team.id, input.userId, invite.role, now);
+      }
+      this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
+      this.auditMemberJoined(team.id, input.userId, invite.id, user.display_name);
+    });
+    accept();
+
+    return { team: { id: team.id, slug: team.slug, name: team.name } };
   }
 
   listMembers(teamId: string, includeRevoked: boolean): MemberRow[] {
@@ -219,24 +286,45 @@ export class RelayRepository {
       .all(teamId) as MemberRow[];
   }
 
-  revokeMember(input: { teamId: string; userId: string; actorUserId: string; reason?: string }): void {
+  listFriends(): Array<{ id: string; displayName: string; revokedAt: string | null; teams: Array<{ id: string; role: TeamRole }> }> {
+    const users = this.db.prepare("select * from users where revoked_at is null order by created_at asc").all() as UserRow[];
+    const memberships = this.db
+      .prepare(
+        `
+          select team_id, user_id, role
+          from team_members
+          where revoked_at is null
+          order by created_at asc
+        `
+      )
+      .all() as Array<{ team_id: string; user_id: string; role: TeamRole }>;
+
+    return users.map((user) => ({
+      id: user.id,
+      displayName: user.display_name,
+      revokedAt: user.revoked_at,
+      teams: memberships.filter((membership) => membership.user_id === user.id).map((membership) => ({ id: membership.team_id, role: membership.role }))
+    }));
+  }
+
+  revokeUser(input: { userId: string; actorUserId: string }): void {
     const now = new Date().toISOString();
+    const devices = this.db.prepare("select id from devices where user_id = ? and revoked_at is null").all(input.userId) as Array<{ id: string }>;
     const revoke = this.db.transaction(() => {
-      this.db.prepare("update team_members set revoked_at = ? where team_id = ? and user_id = ?").run(now, input.teamId, input.userId);
-      const devices = this.db.prepare("select id from devices where team_id = ? and user_id = ? and revoked_at is null").all(input.teamId, input.userId) as Array<{ id: string }>;
-      this.db.prepare("update devices set revoked_at = ? where team_id = ? and user_id = ?").run(now, input.teamId, input.userId);
+      this.db.prepare("update users set revoked_at = ?, updated_at = ? where id = ?").run(now, now, input.userId);
+      this.db.prepare("update devices set revoked_at = ? where user_id = ? and revoked_at is null").run(now, input.userId);
       this.audit({
-        teamId: input.teamId,
+        teamId: null,
         actorType: "user",
         actorId: input.actorUserId,
-        action: "member.revoked",
+        action: "user.revoked",
         resourceType: "user",
         resourceId: input.userId,
-        metadata: { reason: input.reason ?? null }
+        metadata: {}
       });
       for (const device of devices) {
         this.audit({
-          teamId: input.teamId,
+          teamId: null,
           actorType: "user",
           actorId: input.actorUserId,
           action: "device.revoked",
@@ -249,15 +337,89 @@ export class RelayRepository {
     revoke();
   }
 
-  createAgentToken(input: { teamId: string; userId: string; displayName: string }): { agent: { id: string; displayName: string }; agentToken: string } {
+  createTeam(input: { name: string; ownerUserId: string }): TeamRow {
+    const teamId = createId("team");
+    const slug = this.nextTeamSlug(input.name);
+    const now = new Date().toISOString();
+    const create = this.db.transaction(() => {
+      this.db
+        .prepare("insert into teams(id, slug, name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
+        .run(teamId, slug, input.name, input.ownerUserId, now, now);
+      this.db
+        .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, 'admin', null, ?)")
+        .run(teamId, input.ownerUserId, now);
+      this.audit({
+        teamId,
+        actorType: "user",
+        actorId: input.ownerUserId,
+        action: "team.created",
+        resourceType: "team",
+        resourceId: teamId,
+        metadata: { teamName: input.name }
+      });
+    });
+    create();
+    const team = this.getTeam(teamId);
+    if (!team) {
+      throw new Error("Failed to create team");
+    }
+    return team;
+  }
+
+  addTeamMember(input: { teamId: string; userId: string; role: TeamRole; actorUserId: string }): void {
+    const team = this.getTeam(input.teamId);
+    const user = this.getUser(input.userId);
+    if (!team || !user || user.revoked_at) {
+      throw new AppError("NOT_FOUND", "Team or user not found.", 404);
+    }
+    const existing = this.getTeamMembership(input.teamId, input.userId);
+    const now = new Date().toISOString();
+    const add = this.db.transaction(() => {
+      if (existing) {
+        this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(input.role, input.teamId, input.userId);
+      } else {
+        this.db
+          .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
+          .run(input.teamId, input.userId, input.role, now);
+      }
+      if (!existing || existing.revoked_at) {
+        this.audit({
+          teamId: input.teamId,
+          actorType: "user",
+          actorId: input.actorUserId,
+          action: "member.joined",
+          resourceType: "user",
+          resourceId: input.userId,
+          metadata: { inviteId: null, addedDirectly: true }
+        });
+      }
+    });
+    add();
+  }
+
+  revokeMember(input: { teamId: string; userId: string; actorUserId: string; reason?: string }): void {
+    const now = new Date().toISOString();
+    this.db.prepare("update team_members set revoked_at = ? where team_id = ? and user_id = ?").run(now, input.teamId, input.userId);
+    this.audit({
+      teamId: input.teamId,
+      actorType: "user",
+      actorId: input.actorUserId,
+      action: "member.revoked",
+      resourceType: "user",
+      resourceId: input.userId,
+      metadata: { reason: input.reason ?? null }
+    });
+  }
+
+  createAgentToken(input: { userId: string; displayName: string }): { agent: { id: string; displayName: string }; agentToken: string } {
     const agentId = createId("agt");
     const agentToken = createToken("agt");
     const now = new Date().toISOString();
     this.db
-      .prepare("insert into mcp_agent_tokens(id, team_id, user_id, display_name, token_hash, revoked_at, created_at) values (?, ?, ?, ?, ?, null, ?)")
-      .run(agentId, input.teamId, input.userId, input.displayName, hashToken(agentToken), now);
+      .prepare("insert into mcp_agent_tokens(id, user_id, display_name, token_hash, revoked_at, created_at) values (?, ?, ?, ?, null, ?)")
+      .run(agentId, input.userId, input.displayName, hashToken(agentToken), now);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.userId,
       action: "mcp.agent.created",
@@ -270,18 +432,21 @@ export class RelayRepository {
 
   authenticateAgentToken(token: string): AgentPrincipal | null {
     const row = this.db
-      .prepare("select id, team_id, user_id, display_name, revoked_at from mcp_agent_tokens where token_hash = ?")
+      .prepare("select id, user_id, display_name, revoked_at from mcp_agent_tokens where token_hash = ?")
       .get(hashToken(token)) as AgentPrincipalRow | undefined;
-    return row
-      ? { agentId: row.id, teamId: row.team_id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at }
-      : null;
+    return row ? { agentId: row.id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
   }
 
-  revokeAgent(input: { teamId: string; agentId: string; actorUserId: string }): void {
+  getAgentById(agentId: string): AgentPrincipal | null {
+    const row = this.db.prepare("select id, user_id, display_name, revoked_at from mcp_agent_tokens where id = ?").get(agentId) as AgentPrincipalRow | undefined;
+    return row ? { agentId: row.id, userId: row.user_id, displayName: row.display_name, revokedAt: row.revoked_at } : null;
+  }
+
+  revokeAgent(input: { agentId: string; actorUserId: string }): void {
     const now = new Date().toISOString();
-    this.db.prepare("update mcp_agent_tokens set revoked_at = ? where team_id = ? and id = ?").run(now, input.teamId, input.agentId);
+    this.db.prepare("update mcp_agent_tokens set revoked_at = ? where id = ?").run(now, input.agentId);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.actorUserId,
       action: "mcp.agent.revoked",
@@ -292,7 +457,6 @@ export class RelayRepository {
   }
 
   createRoom(input: {
-    teamId: string;
     name: string;
     type: "file" | "folder";
     sourcePath: string;
@@ -304,8 +468,8 @@ export class RelayRepository {
     const roomId = createId("room");
     const create = this.db.transaction(() => {
       this.db
-        .prepare("insert into rooms(id, team_id, name, type, source_path, mount_name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(roomId, input.teamId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, now, now);
+        .prepare("insert into rooms(id, name, type, source_path, mount_name, owner_user_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, now, now);
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
       );
@@ -313,7 +477,7 @@ export class RelayRepository {
         insertCapability.run(createId("cap"), roomId, capability.pluginId, capability.displayName, capability.mode, capability.minVersion ?? null);
       }
       this.audit({
-        teamId: input.teamId,
+        teamId: null,
         actorType: "user",
         actorId: input.ownerUserId,
         action: "room.created",
@@ -334,8 +498,8 @@ export class RelayRepository {
     return (this.db.prepare("select * from rooms where id = ?").get(roomId) as RoomRow | undefined) ?? null;
   }
 
-  listTeamRooms(teamId: string): RoomRow[] {
-    return this.db.prepare("select * from rooms where team_id = ? order by created_at asc").all(teamId) as RoomRow[];
+  listAllRooms(): RoomRow[] {
+    return this.db.prepare("select * from rooms order by created_at asc").all() as RoomRow[];
   }
 
   listCapabilities(roomId: string): RoomCapabilityRow[] {
@@ -368,7 +532,7 @@ export class RelayRepository {
         insertCapability.run(createId("cap"), input.roomId, capability.pluginId, capability.displayName, capability.mode, capability.minVersion ?? null);
       }
       this.audit({
-        teamId: room.team_id,
+        teamId: null,
         actorType: "user",
         actorId: input.actorUserId,
         action: "room.updated",
@@ -385,16 +549,14 @@ export class RelayRepository {
     return updated;
   }
 
-  deleteAclRule(input: { aclId: string; teamId: string; roomId: string; actorUserId: string }): void {
-    const rule = this.db.prepare("select * from acl_rules where id = ? and room_id = ? and team_id = ?").get(input.aclId, input.roomId, input.teamId) as
-      | AclRuleRow
-      | undefined;
+  deleteAclRule(input: { aclId: string; roomId: string; actorUserId: string }): void {
+    const rule = this.db.prepare("select * from acl_rules where id = ? and room_id = ?").get(input.aclId, input.roomId) as AclRuleRow | undefined;
     if (!rule) {
       throw new AppError("NOT_FOUND", "Access rule not found.", 404);
     }
     this.db.prepare("delete from acl_rules where id = ?").run(input.aclId);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.actorUserId,
       action: "acl.removed",
@@ -404,9 +566,9 @@ export class RelayRepository {
     });
   }
 
-  deleteRoom(input: { roomId: string; teamId: string; actorUserId: string }): void {
+  deleteRoom(input: { roomId: string; actorUserId: string }): void {
     const room = this.getRoom(input.roomId);
-    if (!room || room.team_id !== input.teamId) {
+    if (!room) {
       throw new AppError("NOT_FOUND", "Room not found.", 404);
     }
     const remove = this.db.transaction(() => {
@@ -419,7 +581,7 @@ export class RelayRepository {
       this.db.prepare("delete from acl_rules where room_id = ?").run(input.roomId);
       this.db.prepare("delete from rooms where id = ?").run(input.roomId);
       this.audit({
-        teamId: input.teamId,
+        teamId: null,
         actorType: "user",
         actorId: input.actorUserId,
         action: "room.deleted",
@@ -437,38 +599,24 @@ export class RelayRepository {
       throw new AppError("NOT_FOUND", "Team not found.", 404);
     }
     const remove = this.db.transaction(() => {
-      const roomIds = (this.db.prepare("select id from rooms where team_id = ?").all(input.teamId) as Array<{ id: string }>).map((row) => row.id);
-      for (const roomId of roomIds) {
-        const fileIds = (this.db.prepare("select id from files where room_id = ?").all(roomId) as Array<{ id: string }>).map((row) => row.id);
-        for (const fileId of fileIds) {
-          this.db.prepare("delete from file_versions where file_id = ?").run(fileId);
-        }
-        this.db.prepare("delete from files where room_id = ?").run(roomId);
-        this.db.prepare("delete from room_capabilities where room_id = ?").run(roomId);
-      }
-      this.db.prepare("delete from acl_rules where team_id = ?").run(input.teamId);
-      this.db.prepare("delete from rooms where team_id = ?").run(input.teamId);
-      this.db.prepare("delete from mcp_agent_tokens where team_id = ?").run(input.teamId);
+      this.audit({
+        teamId: input.teamId,
+        actorType: "user",
+        actorId: input.actorUserId,
+        action: "team.deleted",
+        resourceType: "team",
+        resourceId: input.teamId,
+        metadata: { teamName: team.name }
+      });
+      this.db.prepare("delete from acl_rules where subject_type = 'team' and subject_id = ?").run(input.teamId);
       this.db.prepare("delete from invites where team_id = ?").run(input.teamId);
-      this.db.prepare("delete from devices where team_id = ?").run(input.teamId);
-      const userIds = (this.db.prepare("select user_id from team_members where team_id = ?").all(input.teamId) as Array<{ user_id: string }>).map(
-        (row) => row.user_id
-      );
       this.db.prepare("delete from team_members where team_id = ?").run(input.teamId);
-      for (const userId of userIds) {
-        const stillMember = this.db.prepare("select 1 from team_members where user_id = ?").get(userId);
-        if (!stillMember) {
-          this.db.prepare("delete from users where id = ?").run(userId);
-        }
-      }
-      this.db.prepare("delete from audit_events where team_id = ?").run(input.teamId);
       this.db.prepare("delete from teams where id = ?").run(input.teamId);
     });
     remove();
   }
 
   createAclRule(input: {
-    teamId: string;
     roomId: string;
     actorUserId: string;
     subjectType: SubjectType;
@@ -480,12 +628,10 @@ export class RelayRepository {
     const now = new Date().toISOString();
     const id = createId("acl");
     this.db
-      .prepare(
-        "insert into acl_rules(id, team_id, room_id, subject_type, subject_id, effect, permissions_json, path_pattern, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-      )
-      .run(id, input.teamId, input.roomId, input.subjectType, input.subjectId, input.effect, JSON.stringify(input.permissions), input.pathPattern, now);
+      .prepare("insert into acl_rules(id, room_id, subject_type, subject_id, effect, permissions_json, path_pattern, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, input.roomId, input.subjectType, input.subjectId, input.effect, JSON.stringify(input.permissions), input.pathPattern, now);
     this.audit({
-      teamId: input.teamId,
+      teamId: null,
       actorType: "user",
       actorId: input.actorUserId,
       action: input.effect === "allow" ? "acl.granted" : "acl.denied",
@@ -495,7 +641,6 @@ export class RelayRepository {
     });
     return {
       id,
-      teamId: input.teamId,
       roomId: input.roomId,
       subjectType: input.subjectType,
       subjectId: input.subjectId,
@@ -504,10 +649,6 @@ export class RelayRepository {
       pathPattern: input.pathPattern,
       createdAt: now
     };
-  }
-
-  listAclRulesForTeam(teamId: string): AclRule[] {
-    return (this.db.prepare("select * from acl_rules where team_id = ? order by created_at asc").all(teamId) as AclRuleRow[]).map(mapAclRule);
   }
 
   listAclRulesForRoom(roomId: string): AclRule[] {
@@ -628,14 +769,30 @@ export class RelayRepository {
     return (this.db.prepare("select * from teams where id = ?").get(teamId) as TeamRow | undefined) ?? null;
   }
 
+  listTeams(): TeamRow[] {
+    return this.db.prepare("select * from teams order by created_at asc").all() as TeamRow[];
+  }
+
+  getUser(userId: string): UserRow | null {
+    return (this.db.prepare("select * from users where id = ?").get(userId) as UserRow | undefined) ?? null;
+  }
+
+  getTeamMembership(teamId: string, userId: string): { role: TeamRole; revoked_at: string | null } | null {
+    return (
+      (this.db.prepare("select role, revoked_at from team_members where team_id = ? and user_id = ?").get(teamId, userId) as
+        | { role: TeamRole; revoked_at: string | null }
+        | undefined) ?? null
+    );
+  }
+
   audit(input: {
-    teamId: string;
+    teamId: string | null;
     actorType: "user" | "device" | "agent" | "system";
     actorId: string;
     action: string;
     resourceType: string;
     resourceId: string;
-    metadata: unknown;
+    metadata?: unknown;
     ipAddress?: string;
   }): void {
     this.db
@@ -650,10 +807,39 @@ export class RelayRepository {
         input.action,
         input.resourceType,
         input.resourceId,
-        JSON.stringify(input.metadata),
+        JSON.stringify(input.metadata ?? {}),
         input.ipAddress ?? null,
         new Date().toISOString()
       );
+  }
+
+  private requireValidInvite(inviteToken: string): InviteRow {
+    const invite = this.db.prepare("select * from invites where token_hash = ?").get(hashToken(inviteToken)) as InviteRow | undefined;
+    if (!invite || invite.revoked_at || invite.use_count >= invite.max_uses || Date.parse(invite.expires_at) <= Date.now()) {
+      throw new Error("Invalid or expired invite");
+    }
+    return invite;
+  }
+
+  private auditMemberJoined(teamId: string, userId: string, inviteId: string, displayName: string): void {
+    this.audit({
+      teamId,
+      actorType: "user",
+      actorId: userId,
+      action: "member.joined",
+      resourceType: "user",
+      resourceId: userId,
+      metadata: { inviteId }
+    });
+    this.audit({
+      teamId,
+      actorType: "user",
+      actorId: userId,
+      action: "invite.used",
+      resourceType: "invite",
+      resourceId: inviteId,
+      metadata: { displayName }
+    });
   }
 
   private insertFileVersion(input: {
@@ -684,9 +870,8 @@ export class RelayRepository {
   }
 
   private auditFileEvent(roomId: string, actorUserId: string, action: string, fileId: string, relativePath: string, version: number): void {
-    const room = this.getRoom(roomId);
     this.audit({
-      teamId: room?.team_id ?? "unknown",
+      teamId: null,
       actorType: "user",
       actorId: actorUserId,
       action,
@@ -709,11 +894,26 @@ export class RelayRepository {
 }
 
 export function isActivePrincipal(principal: DevicePrincipal | null): principal is DevicePrincipal {
-  return Boolean(principal && !principal.memberRevokedAt && !principal.deviceRevokedAt);
+  return Boolean(principal && !principal.userRevokedAt && !principal.deviceRevokedAt);
 }
 
-export function canManageTeam(principal: DevicePrincipal, teamId: string): boolean {
-  return principal.teamId === teamId && (principal.role === "owner" || principal.role === "admin");
+export function canManageTeam(repo: RelayRepository, principal: DevicePrincipal, teamId: string): boolean {
+  if (principal.isServerOwner) {
+    return true;
+  }
+  const team = repo.getTeam(teamId);
+  if (!team) {
+    return false;
+  }
+  if (team.owner_user_id === principal.userId) {
+    return true;
+  }
+  const membership = repo.getTeamMembership(teamId, principal.userId);
+  return Boolean(membership && !membership.revoked_at && membership.role === "admin");
+}
+
+export function canManageRoom(principal: DevicePrincipal, room: RoomRow): boolean {
+  return principal.isServerOwner || room.owner_user_id === principal.userId;
 }
 
 function mapPrincipal(row: DevicePrincipalRow): DevicePrincipal {
@@ -723,11 +923,8 @@ function mapPrincipal(row: DevicePrincipalRow): DevicePrincipal {
     deviceRevokedAt: row.device_revoked_at,
     userId: row.user_id,
     userDisplayName: row.user_display_name,
-    teamId: row.team_id,
-    teamName: row.team_name,
-    teamSlug: row.team_slug,
-    role: row.role,
-    memberRevokedAt: row.member_revoked_at
+    userRevokedAt: row.user_revoked_at,
+    isServerOwner: row.server_owner_id === row.user_id
   };
 }
 
@@ -747,7 +944,6 @@ function sha256Text(content: string): string {
 function mapAclRule(row: AclRuleRow): AclRule {
   return {
     id: row.id,
-    teamId: row.team_id,
     roomId: row.room_id,
     subjectType: row.subject_type,
     subjectId: row.subject_id,
