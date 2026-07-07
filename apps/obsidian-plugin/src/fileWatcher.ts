@@ -1,3 +1,4 @@
+import { isEligiblePath } from "@vault-rooms/protocol";
 import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "./syncClient.js";
 
 export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomState): string | null {
@@ -13,7 +14,11 @@ export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomStat
     relativePath.startsWith("node_modules/") ||
     relativePath.endsWith(".tmp") ||
     relativePath.endsWith(".DS_Store") ||
-    isConflictCopyPath(relativePath)
+    isConflictCopyPath(relativePath) ||
+    // Skip file types we don't sync at all (v0.1: text/markdown/canvas/json/csv plus common
+    // image formats and PDF) - avoids a doomed round trip to the server on every keystroke/save
+    // for files that were never eligible in the first place.
+    !isEligiblePath(relativePath)
   ) {
     return null;
   }

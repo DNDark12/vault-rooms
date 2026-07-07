@@ -199,7 +199,7 @@ Before submitting to the Obsidian Community directory:
 
 - No TLS; trusted LAN only.
 - No cloud relay, NAT traversal, or mobile support.
-- No binary file sync.
+- Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, plus common images (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.svg`) and `.pdf`. Other binary formats (audio, video, Office docs, etc.) aren't synced yet - edits to those files won't reach teammates. Images/PDFs are base64-encoded for transport, so they count against the max file size at roughly 1.33x their real size on disk.
 - No guaranteed deletion of already-synced collaborator copies (this applies to member revocation and room/team deletion alike - see "Deleting rooms/teams and removing access").
 - No character-level co-editing (edits sync as whole-file pushes, debounced - see "Sync latency" above).
 - Rename is delete plus create.

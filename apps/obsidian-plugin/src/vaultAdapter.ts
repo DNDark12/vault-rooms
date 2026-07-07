@@ -23,6 +23,20 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     await this.app.vault.create(path, content);
   }
 
+  async readBinary(path: string): Promise<ArrayBuffer> {
+    return this.app.vault.readBinary(this.getFile(path));
+  }
+
+  async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing && isFile(existing)) {
+      await this.app.vault.modifyBinary(existing, data);
+      return;
+    }
+    await this.ensureFolder(path);
+    await this.app.vault.createBinary(path, data);
+  }
+
   async delete(path: string): Promise<void> {
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing) {

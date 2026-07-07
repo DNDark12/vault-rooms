@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, isEligibleTextPath, normalizeRelativePath } from "@vault-rooms/protocol";
+import { AppError, isEligiblePath, normalizeRelativePath } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { assertRoomPermission } from "../services/policyService.js";
@@ -49,8 +49,8 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "relativePath and content are required.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
-    if (!isEligibleTextPath(relativePath)) {
-      throw new AppError("INVALID_PATH", "Only v0.1 text file extensions can be synced.", 422);
+    if (!isEligiblePath(relativePath)) {
+      throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
     }
     if (Buffer.byteLength(body.content, "utf8") > options.maxFileBytes) {
       throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);

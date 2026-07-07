@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, isEligibleTextPath, normalizeRelativePath, type SyncClientMessage } from "@vault-rooms/protocol";
+import { AppError, isEligiblePath, normalizeRelativePath, type SyncClientMessage } from "@vault-rooms/protocol";
 import { createId } from "@vault-rooms/protocol";
 import type WebSocket from "ws";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
@@ -150,8 +150,8 @@ async function handleMessage(
     try {
       const room = requireRoom(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
-      if (!isEligibleTextPath(relativePath)) {
-        throw new AppError("INVALID_PATH", "Only v0.1 text file extensions can be synced.", 422);
+      if (!isEligiblePath(relativePath)) {
+        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
       }
       if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
         throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);

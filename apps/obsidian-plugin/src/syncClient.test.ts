@@ -16,6 +16,22 @@ class FakeVaultAdapter implements VaultAdapter {
     this.files.set(path, content);
   }
 
+  // Binary paths are stored as their base64 form, standing in for "raw bytes on disk" - real
+  // callers only ever reach these through VaultSyncEngine's readContent/writeContent, never
+  // read()/write(), for binary-eligible extensions.
+  async readBinary(path: string): Promise<ArrayBuffer> {
+    const content = this.files.get(path);
+    if (content === undefined) {
+      throw new Error(`Missing file: ${path}`);
+    }
+    const buffer = Buffer.from(content, "base64");
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  }
+
+  async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
+    this.files.set(path, Buffer.from(data).toString("base64"));
+  }
+
   async delete(path: string): Promise<void> {
     this.files.delete(path);
   }
@@ -147,5 +163,23 @@ describe("plugin sync core", () => {
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# server\n");
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe("# local\n");
     expect(room.files["Board.md"]).toMatchObject({ serverVersion: 4, serverSha256: "server-4", dirty: false });
+  });
+
+  it("round-trips binary files (e.g. images) as base64 instead of corrupting them", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api, () => new Date("2026-07-06T12:00:00Z"));
+    const room = { roomId: "room_1", mountPath: "Vault Rooms/demo/Projects Demo", files: {} };
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0xff]);
+    await vault.writeBinary("Vault Rooms/demo/Projects Demo/cover.png", pngBytes.buffer);
+
+    api.nextWrite = { ok: true, relativePath: "cover.png", version: 1, sha256: "png-1" };
+    await engine.pushLocalChange(room, "cover.png", "B laptop");
+    const pushedContent = api.writes[0]?.content;
+    expect(pushedContent).toBe(Buffer.from(pngBytes).toString("base64"));
+
+    await engine.applyRemoteChange(room, { relativePath: "cover.png", version: 2, sha256: "png-2", content: pushedContent! }, "B laptop");
+    const roundTripped = new Uint8Array(await vault.readBinary("Vault Rooms/demo/Projects Demo/cover.png"));
+    expect([...roundTripped]).toEqual([...pngBytes]);
   });
 });

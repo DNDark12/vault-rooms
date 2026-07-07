@@ -2,6 +2,10 @@ import { AppError } from "./errors.js";
 
 const DRIVE_LETTER = /^[a-zA-Z]:[\\/]/;
 const ELIGIBLE_EXTENSIONS = new Set([".md", ".txt", ".canvas", ".json", ".csv"]);
+// Images and other binary assets a note might embed (drawings, exported previews, PDFs). These
+// are synced as base64 text over the same content field - see VaultSyncEngine's readBinary/
+// writeBinary handling on the client, which is the only place that cares about this distinction.
+const ELIGIBLE_BINARY_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"]);
 
 export function normalizeRelativePath(input: string): string {
   if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
@@ -15,11 +19,24 @@ export function normalizeRelativePath(input: string): string {
   return segments.join("/");
 }
 
-export function contentTypeForPath(path: string): "markdown" | "text" {
-  return path.toLowerCase().endsWith(".md") ? "markdown" : "text";
+export function contentTypeForPath(path: string): "markdown" | "text" | "binary" {
+  if (path.toLowerCase().endsWith(".md")) {
+    return "markdown";
+  }
+  return isEligibleBinaryPath(path) ? "binary" : "text";
 }
 
 export function isEligibleTextPath(path: string): boolean {
   const lastDot = path.lastIndexOf(".");
   return lastDot >= 0 && ELIGIBLE_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
+}
+
+export function isEligibleBinaryPath(path: string): boolean {
+  const lastDot = path.lastIndexOf(".");
+  return lastDot >= 0 && ELIGIBLE_BINARY_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
+}
+
+/** Whether a path can be synced at all - text (diffed as UTF-8) or binary (base64, e.g. images/PDFs). */
+export function isEligiblePath(path: string): boolean {
+  return isEligibleTextPath(path) || isEligibleBinaryPath(path);
 }

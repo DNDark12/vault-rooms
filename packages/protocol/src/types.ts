@@ -4,7 +4,7 @@ export type SubjectType = "user" | "team" | "device" | "agent";
 export type AclEffect = "allow" | "deny";
 export type CapabilityMode = "required" | "recommended" | "optional";
 export type FileKind = "file" | "folder";
-export type ContentType = "markdown" | "text";
+export type ContentType = "markdown" | "text" | "binary";
 
 export type Permission =
   | "room:read"

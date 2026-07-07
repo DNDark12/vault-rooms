@@ -1,6 +1,6 @@
 import { FileSystemAdapter, Notice, Plugin, type ObsidianProtocolData } from "obsidian";
 import { join } from "node:path";
-import { isEligibleTextPath } from "@vault-rooms/protocol";
+import { isEligiblePath } from "@vault-rooms/protocol";
 import {
   RelayApiClient,
   type AclRuleSummary,
@@ -576,7 +576,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const localPaths = await this.vaultAdapter.list(mountPath);
     for (const localPath of localPaths) {
       const relativePath = localPath.slice(mountPath.length + 1);
-      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligibleTextPath(relativePath)) {
+      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
         continue;
       }
       try {
@@ -676,7 +676,16 @@ export default class VaultRoomsPlugin extends Plugin {
         if (event.type === "delete") {
           return;
         }
-        void this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName).then(() => this.saveSettings());
+        void this.syncEngine
+          .pushLocalChange(roomState, relativePath, server.deviceName)
+          .then(() => this.saveSettings())
+          .catch((error) => {
+            // Without this, a rejected push (unsupported file type, size limit, stale
+            // permissions, etc.) vanished silently - the file just never showed up for
+            // teammates with no indication anything went wrong.
+            console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
+            new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
+          });
       }, this.settings.debounceMs);
     });
   }

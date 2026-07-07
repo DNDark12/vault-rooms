@@ -43526,6 +43526,7 @@ function createId(prefix) {
 // ../../packages/protocol/src/paths.ts
 var DRIVE_LETTER = /^[a-zA-Z]:[\\/]/;
 var ELIGIBLE_EXTENSIONS = /* @__PURE__ */ new Set([".md", ".txt", ".canvas", ".json", ".csv"]);
+var ELIGIBLE_BINARY_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"]);
 function normalizeRelativePath(input) {
   if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
     throw new AppError("INVALID_PATH", "Path must be a safe relative path.", 422);
@@ -43538,11 +43539,21 @@ function normalizeRelativePath(input) {
   return segments.join("/");
 }
 function contentTypeForPath(path) {
-  return path.toLowerCase().endsWith(".md") ? "markdown" : "text";
+  if (path.toLowerCase().endsWith(".md")) {
+    return "markdown";
+  }
+  return isEligibleBinaryPath(path) ? "binary" : "text";
 }
 function isEligibleTextPath(path) {
   const lastDot = path.lastIndexOf(".");
   return lastDot >= 0 && ELIGIBLE_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
+}
+function isEligibleBinaryPath(path) {
+  const lastDot = path.lastIndexOf(".");
+  return lastDot >= 0 && ELIGIBLE_BINARY_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
+}
+function isEligiblePath(path) {
+  return isEligibleTextPath(path) || isEligibleBinaryPath(path);
 }
 
 // ../../node_modules/.pnpm/zod@3.25.76/node_modules/zod/v3/external.js
@@ -47830,14 +47841,33 @@ var VaultSyncEngine = class _VaultSyncEngine {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
+  /**
+   * Reads a synced file's content as the string form used for hashing/transport: raw text for
+   * Markdown/text/canvas/etc, or base64 for images/PDFs. `vault.read()` decodes bytes as UTF-8, so
+   * it silently corrupts binary files - `isEligibleBinaryPath` (keyed off the room-relative path,
+   * which shares the conflict copy's extension) picks the byte-accurate path instead.
+   */
+  async readContent(path, relativePath) {
+    if (isEligibleBinaryPath(relativePath)) {
+      return arrayBufferToBase64(await this.vault.readBinary(path));
+    }
+    return this.vault.read(path);
+  }
+  async writeContent(path, relativePath, content) {
+    if (isEligibleBinaryPath(relativePath)) {
+      await this.vault.writeBinary(path, base64ToArrayBuffer(content));
+      return;
+    }
+    await this.vault.write(path, content);
+  }
   async applyRemoteChange(room, remote, deviceName) {
     const path = mountedPath(room, remote.relativePath);
     const existingState = room.files[remote.relativePath];
     if ((existingState == null ? void 0 : existingState.dirty) && await this.vault.exists(path)) {
-      const local = await this.vault.read(path);
-      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
+      const local = await this.readContent(path, remote.relativePath);
+      await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
-    await this.vault.write(path, remote.content);
+    await this.writeContent(path, remote.relativePath, remote.content);
     room.files[remote.relativePath] = {
       serverVersion: remote.version,
       serverSha256: remote.sha256,
@@ -47849,8 +47879,8 @@ var VaultSyncEngine = class _VaultSyncEngine {
     const path = mountedPath(room, remote.relativePath);
     const existingState = room.files[remote.relativePath];
     if ((existingState == null ? void 0 : existingState.dirty) && await this.vault.exists(path)) {
-      const local = await this.vault.read(path);
-      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
+      const local = await this.readContent(path, remote.relativePath);
+      await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
     if (await this.vault.exists(path)) {
       await this.vault.delete(path);
@@ -47868,7 +47898,7 @@ var VaultSyncEngine = class _VaultSyncEngine {
       return;
     }
     const path = mountedPath(room, relativePath);
-    const content = await this.vault.read(path);
+    const content = await this.readContent(path, relativePath);
     const current = room.files[relativePath];
     const localSha = await _VaultSyncEngine.sha256(content);
     if ((current == null ? void 0 : current.serverSha256) === localSha) {
@@ -47886,8 +47916,8 @@ var VaultSyncEngine = class _VaultSyncEngine {
       };
     } catch (error) {
       if (isVersionConflict(error)) {
-        await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), content);
-        await this.vault.write(path, error.serverContent);
+        await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), relativePath, content);
+        await this.writeContent(path, relativePath, error.serverContent);
         room.files[relativePath] = {
           serverVersion: error.serverVersion,
           serverSha256: error.serverSha256,
@@ -47900,6 +47930,13 @@ var VaultSyncEngine = class _VaultSyncEngine {
     }
   }
 };
+function arrayBufferToBase64(buffer) {
+  return Buffer.from(buffer).toString("base64");
+}
+function base64ToArrayBuffer(base64) {
+  const buffer = Buffer.from(base64, "base64");
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
 function mountedPath(room, relativePath) {
   return `${stripSlashes(room.mountPath)}/${stripSlashes(relativePath)}`;
 }
@@ -47921,7 +47958,10 @@ function isWatchableChange(event, room) {
     return null;
   }
   const relativePath = event.path.slice(prefix.length);
-  if (!relativePath || relativePath.startsWith(".obsidian/") || relativePath.startsWith(".git/") || relativePath.startsWith("node_modules/") || relativePath.endsWith(".tmp") || relativePath.endsWith(".DS_Store") || isConflictCopyPath(relativePath)) {
+  if (!relativePath || relativePath.startsWith(".obsidian/") || relativePath.startsWith(".git/") || relativePath.startsWith("node_modules/") || relativePath.endsWith(".tmp") || relativePath.endsWith(".DS_Store") || isConflictCopyPath(relativePath) || // Skip file types we don't sync at all (v0.1: text/markdown/canvas/json/csv plus common
+  // image formats and PDF) - avoids a doomed round trip to the server on every keystroke/save
+  // for files that were never eligible in the first place.
+  !isEligiblePath(relativePath)) {
     return null;
   }
   return relativePath;
@@ -49257,8 +49297,8 @@ function registerFileRoutes(app, repo, options) {
       throw new AppError("VALIDATION_ERROR", "relativePath and content are required.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
-    if (!isEligibleTextPath(relativePath)) {
-      throw new AppError("INVALID_PATH", "Only v0.1 text file extensions can be synced.", 422);
+    if (!isEligiblePath(relativePath)) {
+      throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
     }
     if (Buffer.byteLength(body.content, "utf8") > options.maxFileBytes) {
       throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
@@ -50342,8 +50382,8 @@ async function handleMessage(repo, registry, connection, options, raw) {
     try {
       const room = requireRoom4(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
-      if (!isEligibleTextPath(relativePath)) {
-        throw new AppError("INVALID_PATH", "Only v0.1 text file extensions can be synced.", 422);
+      if (!isEligiblePath(relativePath)) {
+        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
       }
       if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
         throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
@@ -51771,6 +51811,18 @@ var ObsidianVaultAdapter = class {
     await this.ensureFolder(path);
     await this.app.vault.create(path, content);
   }
+  async readBinary(path) {
+    return this.app.vault.readBinary(this.getFile(path));
+  }
+  async writeBinary(path, data) {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing && isFile(existing)) {
+      await this.app.vault.modifyBinary(existing, data);
+      return;
+    }
+    await this.ensureFolder(path);
+    await this.app.vault.createBinary(path, data);
+  }
   async delete(path) {
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing) {
@@ -52603,7 +52655,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const localPaths = await this.vaultAdapter.list(mountPath);
     for (const localPath of localPaths) {
       const relativePath = localPath.slice(mountPath.length + 1);
-      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligibleTextPath(relativePath)) {
+      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
         continue;
       }
       try {
@@ -52695,7 +52747,10 @@ ${invite.joinUrl}`, invite.joinUrl).open();
         if (event.type === "delete") {
           return;
         }
-        void this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName).then(() => this.saveSettings());
+        void this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName).then(() => this.saveSettings()).catch((error) => {
+          console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
+          new import_obsidian9.Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
+        });
       }, this.settings.debounceMs);
     });
   }

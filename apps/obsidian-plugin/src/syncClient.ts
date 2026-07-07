@@ -1,8 +1,13 @@
+import { isEligibleBinaryPath } from "@vault-rooms/protocol";
+
 export type VaultChangeEvent = { type: "create" | "modify" | "delete"; path: string };
 
 export interface VaultAdapter {
   read(path: string): Promise<string>;
   write(path: string, content: string): Promise<void>;
+  /** Byte-accurate read for images/PDFs - `read()` decodes as UTF-8 text and corrupts these. */
+  readBinary(path: string): Promise<ArrayBuffer>;
+  writeBinary(path: string, data: ArrayBuffer): Promise<void>;
   delete(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   list(prefix: string): Promise<string[]>;
@@ -71,6 +76,27 @@ export class VaultSyncEngine {
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
+  /**
+   * Reads a synced file's content as the string form used for hashing/transport: raw text for
+   * Markdown/text/canvas/etc, or base64 for images/PDFs. `vault.read()` decodes bytes as UTF-8, so
+   * it silently corrupts binary files - `isEligibleBinaryPath` (keyed off the room-relative path,
+   * which shares the conflict copy's extension) picks the byte-accurate path instead.
+   */
+  private async readContent(path: string, relativePath: string): Promise<string> {
+    if (isEligibleBinaryPath(relativePath)) {
+      return arrayBufferToBase64(await this.vault.readBinary(path));
+    }
+    return this.vault.read(path);
+  }
+
+  private async writeContent(path: string, relativePath: string, content: string): Promise<void> {
+    if (isEligibleBinaryPath(relativePath)) {
+      await this.vault.writeBinary(path, base64ToArrayBuffer(content));
+      return;
+    }
+    await this.vault.write(path, content);
+  }
+
   async applyRemoteChange(
     room: MountedRoomState,
     remote: { relativePath: string; version: number; sha256: string; content: string },
@@ -79,10 +105,10 @@ export class VaultSyncEngine {
     const path = mountedPath(room, remote.relativePath);
     const existingState = room.files[remote.relativePath];
     if (existingState?.dirty && (await this.vault.exists(path))) {
-      const local = await this.vault.read(path);
-      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
+      const local = await this.readContent(path, remote.relativePath);
+      await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
-    await this.vault.write(path, remote.content);
+    await this.writeContent(path, remote.relativePath, remote.content);
     room.files[remote.relativePath] = {
       serverVersion: remote.version,
       serverSha256: remote.sha256,
@@ -99,8 +125,8 @@ export class VaultSyncEngine {
     const path = mountedPath(room, remote.relativePath);
     const existingState = room.files[remote.relativePath];
     if (existingState?.dirty && (await this.vault.exists(path))) {
-      const local = await this.vault.read(path);
-      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
+      const local = await this.readContent(path, remote.relativePath);
+      await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
     if (await this.vault.exists(path)) {
       await this.vault.delete(path);
@@ -118,7 +144,7 @@ export class VaultSyncEngine {
       return;
     }
     const path = mountedPath(room, relativePath);
-    const content = await this.vault.read(path);
+    const content = await this.readContent(path, relativePath);
     const current = room.files[relativePath];
     const localSha = await VaultSyncEngine.sha256(content);
     if (current?.serverSha256 === localSha) {
@@ -137,8 +163,8 @@ export class VaultSyncEngine {
       };
     } catch (error) {
       if (isVersionConflict(error)) {
-        await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), content);
-        await this.vault.write(path, error.serverContent);
+        await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), relativePath, content);
+        await this.writeContent(path, relativePath, error.serverContent);
         room.files[relativePath] = {
           serverVersion: error.serverVersion,
           serverSha256: error.serverSha256,
@@ -150,6 +176,15 @@ export class VaultSyncEngine {
       throw error;
     }
   }
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  return Buffer.from(buffer).toString("base64");
+}
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const buffer = Buffer.from(base64, "base64");
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }
 
 function mountedPath(room: MountedRoomState, relativePath: string): string {
