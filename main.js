@@ -43498,298 +43498,6 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian9 = require("obsidian");
 var import_node_path3 = require("node:path");
 
-// src/apiClient.ts
-var RelayApiClient = class {
-  constructor(baseUrl, token) {
-    this.baseUrl = baseUrl;
-    this.token = token;
-  }
-  async testConnection() {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3e3);
-    try {
-      const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
-      const body = await response.json();
-      if (body.name !== "vault-rooms") {
-        throw new Error("Something answered, but it is not a Vault Rooms server.");
-      }
-      return { ok: true, version: body.version };
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async bootstrap(teamName, ownerDisplayName, ownerDeviceName) {
-    return this.request("/api/teams/bootstrap", {
-      method: "POST",
-      body: { teamName, ownerDisplayName, ownerDeviceName }
-    });
-  }
-  async createInvite(teamId, role = "member") {
-    return this.request(`/api/teams/${teamId}/invites`, {
-      method: "POST",
-      body: { role, expiresInMinutes: 60, maxUses: 1 }
-    });
-  }
-  async listMembers(teamId) {
-    return this.request(`/api/teams/${teamId}/members`);
-  }
-  async revokeMember(teamId, userId, reason) {
-    return this.request(`/api/teams/${teamId}/members/${userId}/revoke`, {
-      method: "POST",
-      body: { reason: reason != null ? reason : "Revoked from Vault Rooms plugin" }
-    });
-  }
-  async join(inviteToken, displayName, deviceName) {
-    return this.request("/api/join", {
-      method: "POST",
-      body: { inviteToken, displayName, deviceName }
-    });
-  }
-  async listRooms(teamId) {
-    return this.request(`/api/teams/${teamId}/rooms`);
-  }
-  async createRoom(teamId, input) {
-    return this.request(`/api/teams/${teamId}/rooms`, {
-      method: "POST",
-      body: input
-    });
-  }
-  async updateRoom(roomId, input) {
-    return this.request(`/api/rooms/${roomId}`, {
-      method: "PATCH",
-      body: input
-    });
-  }
-  async grantAcl(roomId, input) {
-    return this.request(`/api/rooms/${roomId}/acl`, {
-      method: "POST",
-      body: input
-    });
-  }
-  async listRoomAcl(roomId) {
-    return this.request(`/api/rooms/${roomId}/acl`);
-  }
-  async removeAcl(roomId, aclId) {
-    return this.request(`/api/rooms/${roomId}/acl/${aclId}`, { method: "DELETE" });
-  }
-  async deleteRoom(roomId) {
-    return this.request(`/api/rooms/${roomId}`, { method: "DELETE" });
-  }
-  async deleteTeam(teamId) {
-    return this.request(`/api/teams/${teamId}`, { method: "DELETE" });
-  }
-  async listFiles(roomId) {
-    return this.request(`/api/rooms/${roomId}/files`);
-  }
-  async readFile(roomId, relativePath) {
-    return this.request(`/api/rooms/${roomId}/files/content?path=${encodeURIComponent(relativePath)}`);
-  }
-  async writeFile(roomId, relativePath, baseVersion, content) {
-    return this.request(`/api/rooms/${roomId}/files/content`, {
-      method: "PUT",
-      body: { relativePath, baseVersion, content }
-    });
-  }
-  async deleteFile(roomId, relativePath, baseVersion) {
-    await this.request(`/api/rooms/${roomId}/files/delete`, {
-      method: "POST",
-      body: { relativePath, baseVersion }
-    });
-  }
-  async request(path, options = {}) {
-    var _a;
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: (_a = options.method) != null ? _a : "GET",
-      headers: {
-        ...this.token ? { authorization: `Bearer ${this.token}` } : {},
-        ...options.body ? { "content-type": "application/json" } : {}
-      },
-      body: options.body ? JSON.stringify(options.body) : void 0
-    });
-    const body = await response.json();
-    if (!response.ok) {
-      throw toRelayError(body);
-    }
-    return body;
-  }
-};
-function toRelayError(body) {
-  var _a, _b, _c, _d;
-  const error = new Error((_b = (_a = body == null ? void 0 : body.error) == null ? void 0 : _a.message) != null ? _b : "Relay request failed");
-  error.code = (_c = body == null ? void 0 : body.error) == null ? void 0 : _c.code;
-  if (((_d = body == null ? void 0 : body.error) == null ? void 0 : _d.details) && typeof body.error.details === "object") {
-    Object.assign(error, body.error.details);
-  }
-  return error;
-}
-
-// src/syncClient.ts
-function mountPathForRoom(input) {
-  return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.teamSlug, input.mountName].map(stripSlashes).join("/");
-}
-async function createConflictCopyPath(vault, path, deviceName, now = /* @__PURE__ */ new Date()) {
-  const slash = path.lastIndexOf("/");
-  const directory = slash >= 0 ? path.slice(0, slash + 1) : "";
-  const filename = slash >= 0 ? path.slice(slash + 1) : path;
-  const dot = filename.lastIndexOf(".");
-  const basename3 = dot > 0 ? filename.slice(0, dot) : filename;
-  const extension = dot > 0 ? filename.slice(dot) : "";
-  const timestamp = formatConflictTimestamp(now);
-  const base = `${directory}${basename3} (conflict ${deviceName} ${timestamp})`;
-  let candidate = `${base}${extension}`;
-  let suffix = 2;
-  while (await vault.exists(candidate)) {
-    candidate = `${base} ${suffix}${extension}`;
-    suffix += 1;
-  }
-  return candidate;
-}
-function isConflictCopyPath(path) {
-  return /\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?\.[^/]+$/.test(path);
-}
-var VaultSyncEngine = class _VaultSyncEngine {
-  constructor(vault, api, now = () => /* @__PURE__ */ new Date()) {
-    this.vault = vault;
-    this.api = api;
-    this.now = now;
-  }
-  static async sha256(content) {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  }
-  async applyRemoteChange(room, remote, deviceName) {
-    const path = mountedPath(room, remote.relativePath);
-    const existingState = room.files[remote.relativePath];
-    if ((existingState == null ? void 0 : existingState.dirty) && await this.vault.exists(path)) {
-      const local = await this.vault.read(path);
-      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
-    }
-    await this.vault.write(path, remote.content);
-    room.files[remote.relativePath] = {
-      serverVersion: remote.version,
-      serverSha256: remote.sha256,
-      localSha256: await _VaultSyncEngine.sha256(remote.content),
-      dirty: false
-    };
-  }
-  async applyRemoteDelete(room, remote, deviceName) {
-    const path = mountedPath(room, remote.relativePath);
-    const existingState = room.files[remote.relativePath];
-    if ((existingState == null ? void 0 : existingState.dirty) && await this.vault.exists(path)) {
-      const local = await this.vault.read(path);
-      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
-    }
-    if (await this.vault.exists(path)) {
-      await this.vault.delete(path);
-    }
-    room.files[remote.relativePath] = {
-      serverVersion: remote.version,
-      serverSha256: null,
-      localSha256: null,
-      dirty: false
-    };
-  }
-  async pushLocalChange(room, relativePath, deviceName) {
-    var _a;
-    if (isConflictCopyPath(relativePath)) {
-      return;
-    }
-    const path = mountedPath(room, relativePath);
-    const content = await this.vault.read(path);
-    const current = room.files[relativePath];
-    const localSha = await _VaultSyncEngine.sha256(content);
-    if ((current == null ? void 0 : current.serverSha256) === localSha) {
-      room.files[relativePath] = { ...current, localSha256: localSha, dirty: false };
-      return;
-    }
-    const baseVersion = (_a = current == null ? void 0 : current.serverVersion) != null ? _a : 0;
-    try {
-      const result = await this.api.writeFile(room.roomId, relativePath, baseVersion, content);
-      room.files[relativePath] = {
-        serverVersion: result.version,
-        serverSha256: result.sha256,
-        localSha256: localSha,
-        dirty: false
-      };
-    } catch (error) {
-      if (isVersionConflict(error)) {
-        await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), content);
-        await this.vault.write(path, error.serverContent);
-        room.files[relativePath] = {
-          serverVersion: error.serverVersion,
-          serverSha256: error.serverSha256,
-          localSha256: await _VaultSyncEngine.sha256(error.serverContent),
-          dirty: false
-        };
-        return;
-      }
-      throw error;
-    }
-  }
-};
-function mountedPath(room, relativePath) {
-  return `${stripSlashes(room.mountPath)}/${stripSlashes(relativePath)}`;
-}
-function stripSlashes(value) {
-  return value.replace(/^\/+|\/+$/g, "");
-}
-function formatConflictTimestamp(date) {
-  const iso = date.toISOString();
-  return `${iso.slice(0, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}`;
-}
-function isVersionConflict(error) {
-  return typeof error === "object" && error !== null && error.code === "VERSION_CONFLICT";
-}
-
-// src/fileWatcher.ts
-function isWatchableChange(event, room) {
-  const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
-  if (!event.path.startsWith(prefix)) {
-    return null;
-  }
-  const relativePath = event.path.slice(prefix.length);
-  if (!relativePath || relativePath.startsWith(".obsidian/") || relativePath.startsWith(".git/") || relativePath.startsWith("node_modules/") || relativePath.endsWith(".tmp") || relativePath.endsWith(".DS_Store") || isConflictCopyPath(relativePath)) {
-    return null;
-  }
-  return relativePath;
-}
-function registerMountedRoomWatcher(vault, room, cb) {
-  vault.onChange((event) => {
-    const relativePath = isWatchableChange(event, room);
-    if (relativePath) {
-      cb(event, relativePath);
-    }
-  });
-}
-
-// src/settings.ts
-var DEFAULT_SERVER_SETTINGS = {
-  bindMode: "local",
-  allowRemoteBootstrap: false,
-  maxFileBytes: 1048576,
-  autoStart: false
-};
-var DEFAULT_SETTINGS = {
-  servers: [],
-  mountRoot: "Vault Rooms",
-  debounceMs: 750,
-  mountedRooms: {},
-  roomMountPaths: {},
-  server: DEFAULT_SERVER_SETTINGS
-};
-function activeServer(settings) {
-  var _a;
-  return (_a = settings.servers.find((server) => server.id === settings.activeServerId)) != null ? _a : settings.servers[0];
-}
-
-// src/serverManager.ts
-var import_node_fs2 = require("node:fs");
-var import_node_path2 = require("node:path");
-
-// ../relay-server/src/app.ts
-var import_fastify = __toESM(require_fastify(), 1);
-var import_websocket = __toESM(require_websocket2(), 1);
-
 // ../../packages/protocol/src/errors.ts
 var AppError = class extends Error {
   constructor(code, message, statusCode = 400, details) {
@@ -47928,6 +47636,303 @@ function hashToken(token) {
 var PRODUCT_NAME = "vault-rooms";
 var PRODUCT_VERSION = "0.1.0";
 
+// src/apiClient.ts
+var RelayApiClient = class {
+  constructor(baseUrl, token, onUnauthorized) {
+    this.baseUrl = baseUrl;
+    this.token = token;
+    this.onUnauthorized = onUnauthorized;
+  }
+  async testConnection() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3e3);
+    try {
+      const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
+      const body = await response.json();
+      if (body.name !== "vault-rooms") {
+        throw new Error("Something answered, but it is not a Vault Rooms server.");
+      }
+      return { ok: true, version: body.version };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async bootstrap(teamName, ownerDisplayName, ownerDeviceName) {
+    return this.request("/api/teams/bootstrap", {
+      method: "POST",
+      body: { teamName, ownerDisplayName, ownerDeviceName }
+    });
+  }
+  async createInvite(teamId, role = "member") {
+    return this.request(`/api/teams/${teamId}/invites`, {
+      method: "POST",
+      body: { role, expiresInMinutes: 60, maxUses: 1 }
+    });
+  }
+  async listMembers(teamId) {
+    return this.request(`/api/teams/${teamId}/members`);
+  }
+  async revokeMember(teamId, userId, reason) {
+    return this.request(`/api/teams/${teamId}/members/${userId}/revoke`, {
+      method: "POST",
+      body: { reason: reason != null ? reason : "Revoked from Vault Rooms plugin" }
+    });
+  }
+  async join(inviteToken, displayName, deviceName) {
+    return this.request("/api/join", {
+      method: "POST",
+      body: { inviteToken, displayName, deviceName }
+    });
+  }
+  async listRooms(teamId) {
+    return this.request(`/api/teams/${teamId}/rooms`);
+  }
+  async createRoom(teamId, input) {
+    return this.request(`/api/teams/${teamId}/rooms`, {
+      method: "POST",
+      body: input
+    });
+  }
+  async updateRoom(roomId, input) {
+    return this.request(`/api/rooms/${roomId}`, {
+      method: "PATCH",
+      body: input
+    });
+  }
+  async grantAcl(roomId, input) {
+    return this.request(`/api/rooms/${roomId}/acl`, {
+      method: "POST",
+      body: input
+    });
+  }
+  async listRoomAcl(roomId) {
+    return this.request(`/api/rooms/${roomId}/acl`);
+  }
+  async removeAcl(roomId, aclId) {
+    return this.request(`/api/rooms/${roomId}/acl/${aclId}`, { method: "DELETE" });
+  }
+  async deleteRoom(roomId) {
+    return this.request(`/api/rooms/${roomId}`, { method: "DELETE" });
+  }
+  async deleteTeam(teamId) {
+    return this.request(`/api/teams/${teamId}`, { method: "DELETE" });
+  }
+  async listFiles(roomId) {
+    return this.request(`/api/rooms/${roomId}/files`);
+  }
+  async readFile(roomId, relativePath) {
+    return this.request(`/api/rooms/${roomId}/files/content?path=${encodeURIComponent(relativePath)}`);
+  }
+  async writeFile(roomId, relativePath, baseVersion, content) {
+    return this.request(`/api/rooms/${roomId}/files/content`, {
+      method: "PUT",
+      body: { relativePath, baseVersion, content }
+    });
+  }
+  async deleteFile(roomId, relativePath, baseVersion) {
+    await this.request(`/api/rooms/${roomId}/files/delete`, {
+      method: "POST",
+      body: { relativePath, baseVersion }
+    });
+  }
+  async request(path, options = {}) {
+    var _a, _b;
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: (_a = options.method) != null ? _a : "GET",
+      headers: {
+        ...this.token ? { authorization: `Bearer ${this.token}` } : {},
+        ...options.body ? { "content-type": "application/json" } : {}
+      },
+      body: options.body ? JSON.stringify(options.body) : void 0
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      const error = toRelayError(body);
+      if (error.code === "UNAUTHORIZED") {
+        (_b = this.onUnauthorized) == null ? void 0 : _b.call(this);
+      }
+      throw error;
+    }
+    return body;
+  }
+};
+function toRelayError(body) {
+  var _a, _b, _c, _d;
+  const error = new Error((_b = (_a = body == null ? void 0 : body.error) == null ? void 0 : _a.message) != null ? _b : "Relay request failed");
+  error.code = (_c = body == null ? void 0 : body.error) == null ? void 0 : _c.code;
+  if (((_d = body == null ? void 0 : body.error) == null ? void 0 : _d.details) && typeof body.error.details === "object") {
+    Object.assign(error, body.error.details);
+  }
+  return error;
+}
+
+// src/syncClient.ts
+function mountPathForRoom(input) {
+  return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.teamSlug, input.mountName].map(stripSlashes).join("/");
+}
+async function createConflictCopyPath(vault, path, deviceName, now = /* @__PURE__ */ new Date()) {
+  const slash = path.lastIndexOf("/");
+  const directory = slash >= 0 ? path.slice(0, slash + 1) : "";
+  const filename = slash >= 0 ? path.slice(slash + 1) : path;
+  const dot = filename.lastIndexOf(".");
+  const basename3 = dot > 0 ? filename.slice(0, dot) : filename;
+  const extension = dot > 0 ? filename.slice(dot) : "";
+  const timestamp = formatConflictTimestamp(now);
+  const base = `${directory}${basename3} (conflict ${deviceName} ${timestamp})`;
+  let candidate = `${base}${extension}`;
+  let suffix = 2;
+  while (await vault.exists(candidate)) {
+    candidate = `${base} ${suffix}${extension}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+function isConflictCopyPath(path) {
+  return /\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?\.[^/]+$/.test(path);
+}
+var VaultSyncEngine = class _VaultSyncEngine {
+  constructor(vault, api, now = () => /* @__PURE__ */ new Date()) {
+    this.vault = vault;
+    this.api = api;
+    this.now = now;
+  }
+  static async sha256(content) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  async applyRemoteChange(room, remote, deviceName) {
+    const path = mountedPath(room, remote.relativePath);
+    const existingState = room.files[remote.relativePath];
+    if ((existingState == null ? void 0 : existingState.dirty) && await this.vault.exists(path)) {
+      const local = await this.vault.read(path);
+      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
+    }
+    await this.vault.write(path, remote.content);
+    room.files[remote.relativePath] = {
+      serverVersion: remote.version,
+      serverSha256: remote.sha256,
+      localSha256: await _VaultSyncEngine.sha256(remote.content),
+      dirty: false
+    };
+  }
+  async applyRemoteDelete(room, remote, deviceName) {
+    const path = mountedPath(room, remote.relativePath);
+    const existingState = room.files[remote.relativePath];
+    if ((existingState == null ? void 0 : existingState.dirty) && await this.vault.exists(path)) {
+      const local = await this.vault.read(path);
+      await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), local);
+    }
+    if (await this.vault.exists(path)) {
+      await this.vault.delete(path);
+    }
+    room.files[remote.relativePath] = {
+      serverVersion: remote.version,
+      serverSha256: null,
+      localSha256: null,
+      dirty: false
+    };
+  }
+  async pushLocalChange(room, relativePath, deviceName) {
+    var _a;
+    if (isConflictCopyPath(relativePath)) {
+      return;
+    }
+    const path = mountedPath(room, relativePath);
+    const content = await this.vault.read(path);
+    const current = room.files[relativePath];
+    const localSha = await _VaultSyncEngine.sha256(content);
+    if ((current == null ? void 0 : current.serverSha256) === localSha) {
+      room.files[relativePath] = { ...current, localSha256: localSha, dirty: false };
+      return;
+    }
+    const baseVersion = (_a = current == null ? void 0 : current.serverVersion) != null ? _a : 0;
+    try {
+      const result = await this.api.writeFile(room.roomId, relativePath, baseVersion, content);
+      room.files[relativePath] = {
+        serverVersion: result.version,
+        serverSha256: result.sha256,
+        localSha256: localSha,
+        dirty: false
+      };
+    } catch (error) {
+      if (isVersionConflict(error)) {
+        await this.vault.write(await createConflictCopyPath(this.vault, path, deviceName, this.now()), content);
+        await this.vault.write(path, error.serverContent);
+        room.files[relativePath] = {
+          serverVersion: error.serverVersion,
+          serverSha256: error.serverSha256,
+          localSha256: await _VaultSyncEngine.sha256(error.serverContent),
+          dirty: false
+        };
+        return;
+      }
+      throw error;
+    }
+  }
+};
+function mountedPath(room, relativePath) {
+  return `${stripSlashes(room.mountPath)}/${stripSlashes(relativePath)}`;
+}
+function stripSlashes(value) {
+  return value.replace(/^\/+|\/+$/g, "");
+}
+function formatConflictTimestamp(date) {
+  const iso = date.toISOString();
+  return `${iso.slice(0, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}`;
+}
+function isVersionConflict(error) {
+  return typeof error === "object" && error !== null && error.code === "VERSION_CONFLICT";
+}
+
+// src/fileWatcher.ts
+function isWatchableChange(event, room) {
+  const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
+  if (!event.path.startsWith(prefix)) {
+    return null;
+  }
+  const relativePath = event.path.slice(prefix.length);
+  if (!relativePath || relativePath.startsWith(".obsidian/") || relativePath.startsWith(".git/") || relativePath.startsWith("node_modules/") || relativePath.endsWith(".tmp") || relativePath.endsWith(".DS_Store") || isConflictCopyPath(relativePath)) {
+    return null;
+  }
+  return relativePath;
+}
+function registerMountedRoomWatcher(vault, room, cb) {
+  vault.onChange((event) => {
+    const relativePath = isWatchableChange(event, room);
+    if (relativePath) {
+      cb(event, relativePath);
+    }
+  });
+}
+
+// src/settings.ts
+var DEFAULT_SERVER_SETTINGS = {
+  bindMode: "local",
+  allowRemoteBootstrap: false,
+  maxFileBytes: 5 * 1024 * 1024,
+  autoStart: false
+};
+var DEFAULT_SETTINGS = {
+  servers: [],
+  mountRoot: "Vault Rooms",
+  debounceMs: 750,
+  mountedRooms: {},
+  roomMountPaths: {},
+  server: DEFAULT_SERVER_SETTINGS
+};
+function activeServer(settings) {
+  var _a;
+  return (_a = settings.servers.find((server) => server.id === settings.activeServerId)) != null ? _a : settings.servers[0];
+}
+
+// src/serverManager.ts
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = require("node:path");
+
+// ../relay-server/src/app.ts
+var import_fastify = __toESM(require_fastify(), 1);
+var import_websocket = __toESM(require_websocket2(), 1);
+
 // ../relay-server/src/db/migrations.ts
 function runMigrations(db) {
   db.exec(`
@@ -49758,7 +49763,8 @@ function toRoomResponse(room) {
     name: room.name,
     type: room.type,
     sourcePath: room.source_path,
-    mountName: room.mount_name
+    mountName: room.mount_name,
+    ownerUserId: room.owner_user_id
   };
 }
 function isSafeMountName(value) {
@@ -50132,11 +50138,11 @@ function requireRoom3(repo, roomId) {
 // ../relay-server/src/app.ts
 async function createApp(options = {}) {
   var _a, _b, _c, _d;
-  const app = (0, import_fastify.default)({ logger: false, bodyLimit: 5 * 1024 * 1024 });
-  const db = await openRelayDb((_a = options.dbPath) != null ? _a : "data/relay.sqlite", options.sqlJsLocator);
+  const maxFileBytes = (_a = options.maxFileBytes) != null ? _a : 5 * 1024 * 1024;
+  const app = (0, import_fastify.default)({ logger: false, bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) });
+  const db = await openRelayDb((_b = options.dbPath) != null ? _b : "data/relay.sqlite", options.sqlJsLocator);
   const repo = new RelayRepository(db);
   const connectionRegistry = new ConnectionRegistry();
-  const maxFileBytes = (_b = options.maxFileBytes) != null ? _b : 1024 * 1024;
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("access-control-allow-origin", "*");
     reply.header("access-control-allow-methods", "GET,POST,PUT,DELETE,OPTIONS");
@@ -50212,7 +50218,7 @@ async function resolveRuntimeConfig(env = process.env) {
     host,
     port,
     publicUrl: (_b = env.PUBLIC_URL) != null ? _b : detectPublicUrl(host, port),
-    maxFileBytes: Number.parseInt((_c = env.MAX_FILE_BYTES) != null ? _c : "1048576", 10),
+    maxFileBytes: Number.parseInt((_c = env.MAX_FILE_BYTES) != null ? _c : "5242880", 10),
     allowRemoteBootstrap: env.ALLOW_REMOTE_BOOTSTRAP === "true"
   };
 }
@@ -50376,7 +50382,7 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Max synced file size").setDesc("Files larger than this (in bytes) are rejected. Default 1048576 (1 MB).").addText(
+    new import_obsidian.Setting(containerEl).setName("Max synced file size").setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).").addText(
       (text) => text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
         const parsed = Number.parseInt(value, 10);
         if (Number.isFinite(parsed) && parsed > 0) {
@@ -50419,7 +50425,10 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
     }
     for (const server of this.plugin.settings.servers) {
       const active = server.id === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.id);
-      const setting = new import_obsidian.Setting(containerEl).setName(`${server.teamName} - ${server.userDisplayName}${active ? " - active" : ""}`).setDesc(`${server.baseUrl} (${server.status})`);
+      const isRevoked = server.status === "revoked";
+      const setting = new import_obsidian.Setting(containerEl).setName(`${server.teamName} - ${server.userDisplayName}${active ? " - active" : ""}`).setDesc(
+        isRevoked ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join the team again.` : `${server.baseUrl} (${server.status})`
+      );
       setting.addButton(
         (button) => button.setButtonText("Use").setDisabled(active).onClick(async () => {
           try {
@@ -50456,6 +50465,15 @@ var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
           })
         );
       }
+      setting.addButton(
+        (button) => button.setButtonText("Forget").setWarning().onClick(async () => {
+          if (!window.confirm(`Remove "${server.teamName}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
+            return;
+          }
+          await this.plugin.forgetServer(server.id);
+          this.display();
+        })
+      );
     }
   }
 };
@@ -50811,7 +50829,7 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     new import_obsidian6.Setting(parent).setName("Type").addDropdown(
       (dropdown) => dropdown.addOption("folder", "Folder").addOption("file", "File").setValue(this.type).onChange((value) => this.type = value)
     );
-    new import_obsidian6.Setting(parent).setName("Source path").addText((text) => text.setValue(this.sourcePath).onChange((value) => this.sourcePath = value.trim())).addButton(
+    new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder (or file) in the owner's vault that this room shares - this is the content that actually gets synced to every member.").addText((text) => text.setValue(this.sourcePath).onChange((value) => this.sourcePath = value.trim())).addButton(
       (button) => button.setButtonText(this.type === "folder" ? "Choose folder" : "Choose file").onClick(() => {
         new VaultPathSuggestModal(this.app, this.type, (path) => {
           this.sourcePath = path;
@@ -50826,7 +50844,13 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
       })
     );
     new import_obsidian6.Setting(parent).setName("Mount name").addText((text) => text.setValue(this.mountName).onChange((value) => this.mountName = value.trim()));
-    new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(this.plugin.isRoomMounted(this.room.id) ? "Used after next unmount/mount." : "Used when this room is mounted.").addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
+    new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
+      (this.isOwnRoom() ? "Where this device keeps the room's files. You created this room, so by default it's the source path itself - your existing files stay right where they are, nothing is duplicated." : "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default.") + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
+    ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
+  }
+  isOwnRoom() {
+    var _a;
+    return this.room.ownerUserId === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.userId);
   }
   renderCapabilities(parent) {
     parent.createEl("h3", { text: "Plugin capabilities" });
@@ -51302,7 +51326,8 @@ var ObsidianVaultAdapter = class {
     return this.app.vault.getAbstractFileByPath(path) !== null;
   }
   async list(prefix) {
-    return this.app.vault.getFiles().map((file) => file.path).filter((path) => path.startsWith(prefix));
+    const normalizedPrefix = prefix.replace(/\/+$/, "");
+    return this.app.vault.getFiles().map((file) => file.path).filter((path) => path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`));
   }
   onChange(cb) {
     const vault = this.app.vault;
@@ -51839,6 +51864,37 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     this.renderOpenRoomsViews();
     new import_obsidian9.Notice(`Deleted team ${server.teamName}`);
   }
+  /**
+   * Purely local cleanup - removes a saved team/server entry without calling the server at all.
+   * This is the recovery path for a team whose saved device token no longer works there (see
+   * `markServerRevoked`): `deleteTeam` can't help in that case since it also needs a valid,
+   * working token to authenticate the delete request. Use this to drop the stale entry, then set
+   * up or join that team again to get a fresh, working identity.
+   */
+  async forgetServer(serverId) {
+    var _a, _b;
+    const server = this.settings.servers.find((candidate) => candidate.id === serverId);
+    if (!server) {
+      return;
+    }
+    const isActive = ((_a = this.getActiveServer()) == null ? void 0 : _a.id) === server.id;
+    this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
+    if (this.settings.activeServerId === server.id) {
+      this.settings.activeServerId = void 0;
+    }
+    if (isActive) {
+      (_b = this.syncSocket) == null ? void 0 : _b.disconnect();
+      this.syncSocket = null;
+      this.visibleRooms = [];
+      this.teamMembers = [];
+    }
+    await this.saveSettings();
+    if (isActive) {
+      this.connectSyncSocket();
+    }
+    this.renderOpenRoomsViews();
+    new import_obsidian9.Notice(`Removed ${server.teamName} from this device.`);
+  }
   async activateServer(serverId) {
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
     if (!server) {
@@ -51898,6 +51954,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     state.mountPath = mountPath;
     const api = this.apiFor(server);
     const files = await api.listFiles(room.id);
+    const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
     for (const file of files.files) {
       const tracked = state.files[file.relativePath];
       if (file.deleted) {
@@ -51911,6 +51968,18 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       }
       const content = await api.readFile(room.id, file.relativePath);
       await this.syncEngine.applyRemoteChange(state, content, server.deviceName);
+    }
+    const localPaths = await this.vaultAdapter.list(mountPath);
+    for (const localPath of localPaths) {
+      const relativePath = localPath.slice(mountPath.length + 1);
+      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligibleTextPath(relativePath)) {
+        continue;
+      }
+      try {
+        await this.syncEngine.pushLocalChange(state, relativePath, server.deviceName);
+      } catch (error) {
+        console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
+      }
     }
     this.watchMountedRoom(room.id);
     (_b = this.syncSocket) == null ? void 0 : _b.subscribe(room.id);
@@ -51933,6 +52002,12 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     var _a;
     return (_a = this.settings.mountedRooms[roomId]) == null ? void 0 : _a.mountPath;
   }
+  /**
+   * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
+   * folder) - there's nothing to "download," their files already live there, so a separate copy
+   * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
+   * folder under the configured mount root, since they have no pre-existing copy of the room.
+   */
   roomMountPathFor(room) {
     var _a;
     const configured = (_a = this.settings.roomMountPaths[room.id]) == null ? void 0 : _a.trim();
@@ -51940,12 +52015,13 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       return configured;
     }
     const server = this.requireActiveServer();
+    const isOwner = room.ownerUserId === server.userId;
     return mountPathForRoom({
-      owner: false,
+      owner: isOwner,
       mountRoot: this.settings.mountRoot,
       teamSlug: server.teamSlug,
       mountName: room.mountName,
-      sourcePath: room.mountName
+      sourcePath: room.sourcePath
     });
   }
   openSetupTeamModal() {
@@ -52046,7 +52122,24 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     await this.app.workspace.getLeaf(true).setViewState({ type: VAULT_ROOMS_VIEW_TYPE, active: true });
   }
   apiFor(server) {
-    return new RelayApiClient(server.baseUrl, server.deviceToken);
+    return new RelayApiClient(server.baseUrl, server.deviceToken, () => this.markServerRevoked(server));
+  }
+  /**
+   * A 401 from a server means the saved device token no longer resolves to anything there - most
+   * commonly because that server's data was reset/recreated since the token was issued (fresh
+   * install, wiped data dir, or switching between embedded/standalone with different data files).
+   * Reflect that in the UI (Settings → Vault Rooms → Teams already shows `status`) instead of
+   * leaving it as a one-off error toast with no lasting trace, so it's clear this team needs to be
+   * removed and set up/joined again rather than retried.
+   */
+  markServerRevoked(server) {
+    if (server.status === "revoked") {
+      return;
+    }
+    server.status = "revoked";
+    void this.saveSettings();
+    this.renderOpenRoomsViews();
+    new import_obsidian9.Notice(`"${server.teamName}" - saved login is no longer valid on this server. Remove it and set up/join the team again from Settings \u2192 Vault Rooms \u2192 Teams.`);
   }
   requireActiveServer() {
     const server = this.getActiveServer();

@@ -29,7 +29,13 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       .setName("Status")
       .setDesc(
         status.running
-          ? `Running — this device: ${status.localUrl}${status.lanUrl ? `, LAN: ${status.lanUrl}` : ""}`
+          ? `Running — this device: ${status.localUrl}${
+              status.lanUrl
+                ? `, LAN: ${status.lanUrl}`
+                : status.lanDetectionFailed
+                  ? " — could NOT auto-detect a LAN IP; invite links will point at 127.0.0.1 and won't work for teammates until you set a Public URL override below, then restart the server."
+                  : ""
+            }`
           : status.error
             ? `Stopped — last error: ${status.error}`
             : "Stopped"
@@ -70,6 +76,25 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Public URL override")
+      .setDesc(
+        "Only needed in \"Local network\" mode if auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers). Set this to this device's real LAN address, e.g. http://192.168.1.42:8787 - leave blank to auto-detect."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("auto-detect")
+          .setValue(this.plugin.settings.server.publicUrlOverride ?? "")
+          .onChange(async (value) => {
+            const trimmed = value.trim();
+            this.plugin.settings.server.publicUrlOverride = trimmed || undefined;
+            await this.plugin.saveSettings();
+            if (this.plugin.getServerStatus().running) {
+              new Notice("Restart the server for this change to take effect.");
+            }
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Port")
       .setDesc("Leave blank to auto-pick a free port starting at 8787.")
       .addText((text) =>
@@ -99,7 +124,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Max synced file size")
-      .setDesc("Files larger than this (in bytes) are rejected. Default 1048576 (1 MB).")
+      .setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);
@@ -158,9 +183,14 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
 
     for (const server of this.plugin.settings.servers) {
       const active = server.id === this.plugin.getActiveServer()?.id;
+      const isRevoked = server.status === "revoked";
       const setting = new Setting(containerEl)
         .setName(`${server.teamName} - ${server.userDisplayName}${active ? " - active" : ""}`)
-        .setDesc(`${server.baseUrl} (${server.status})`);
+        .setDesc(
+          isRevoked
+            ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join the team again.`
+            : `${server.baseUrl} (${server.status})`
+        );
       setting.addButton((button) =>
         button.setButtonText("Use").setDisabled(active).onClick(async () => {
           try {
@@ -202,6 +232,18 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             })
         );
       }
+      setting.addButton((button) =>
+        button
+          .setButtonText("Forget")
+          .setWarning()
+          .onClick(async () => {
+            if (!window.confirm(`Remove "${server.teamName}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
+              return;
+            }
+            await this.plugin.forgetServer(server.id);
+            this.display();
+          })
+      );
     }
   }
 }

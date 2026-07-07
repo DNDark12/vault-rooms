@@ -6,6 +6,7 @@ export type RoomSummary = {
   type: "file" | "folder";
   sourcePath: string;
   mountName: string;
+  ownerUserId: string;
   permissions: string[];
   capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string; installed: boolean | null }>;
 };
@@ -32,7 +33,16 @@ export type AclRuleSummary = {
 export class RelayApiClient implements RelayFileApi {
   constructor(
     private readonly baseUrl: string,
-    private readonly token?: string
+    private readonly token?: string,
+    /**
+     * Called whenever a request fails with UNAUTHORIZED - i.e. the token this client was built
+     * with no longer resolves to an active device on this server. That happens whenever the
+     * server's data was reset/recreated after the token was issued (e.g. testing, reinstalling,
+     * or switching between embedded/standalone modes with different data files) - the token
+     * itself isn't malformed, the server simply has no record of it. Lets the caller (the plugin)
+     * flag the saved team as needing to be re-set-up/re-joined instead of just failing silently.
+     */
+    private readonly onUnauthorized?: () => void
   ) {}
 
   async testConnection(): Promise<{ ok: true; version: string }> {
@@ -162,13 +172,17 @@ export class RelayApiClient implements RelayFileApi {
     });
     const body = await response.json();
     if (!response.ok) {
-      throw toRelayError(body);
+      const error = toRelayError(body);
+      if (error.code === "UNAUTHORIZED") {
+        this.onUnauthorized?.();
+      }
+      throw error;
     }
     return body;
   }
 }
 
-function toRelayError(body: any): Error {
+function toRelayError(body: any): Error & { code?: string } {
   const error = new Error(body?.error?.message ?? "Relay request failed") as Error & Record<string, unknown>;
   error.code = body?.error?.code;
   if (body?.error?.details && typeof body.error.details === "object") {

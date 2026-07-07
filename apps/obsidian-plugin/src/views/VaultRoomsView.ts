@@ -75,6 +75,11 @@ export class VaultRoomsView extends ItemView {
           await navigator.clipboard.writeText(status.lanUrl ?? "");
           new Notice("LAN URL copied.");
         });
+      } else if (status.lanDetectionFailed) {
+        card.createEl("div", {
+          cls: "vault-rooms-error",
+          text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
+        });
       } else {
         card.createEl("div", {
           cls: "vault-rooms-room-meta",

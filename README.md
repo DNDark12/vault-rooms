@@ -76,6 +76,17 @@ This is not character-level realtime (no shared cursor, no live keystrokes) - th
 
 Room capabilities are metadata. A room can recommend Kanban or Tasks, and the plugin checks whether those plugins are enabled locally. Vault Rooms does not grant permission to run another user's plugin runtime.
 
+## Source path vs. local mount path
+
+When creating a room, **source path** is the folder (or file) in the *owner's* vault that the room shares - this is the one and only real copy that other members' edits ultimately reconcile against.
+
+**Local mount path** is where a given *device* keeps its working copy of that room, and it means something different depending on who you are:
+
+- **On the room owner's own device**, mounting defaults to the source path itself - there is no separate copy. The owner's existing files stay exactly where they are; mounting just starts watching and syncing them in place. The first time the owner mounts a room, any pre-existing files under the source path that the relay hasn't seen yet are pushed up automatically, so teammates who join afterward see real content immediately instead of an empty room.
+- **On every other member's device**, mounting downloads the room into a fresh folder - by default `<Mount root>/<team-slug>/<mount name>` (Mount root is set in Settings → Vault Rooms → Sync) - since they have no pre-existing copy to reuse.
+
+You can override the computed default for any room/device via the "Local mount path" field in that room's Settings modal, e.g. to point a member's copy somewhere other than the default mount-root location.
+
 ## Quick start (development)
 
 ```bash
@@ -205,6 +216,7 @@ Before submitting to the Obsidian Community directory:
 - Writes are denied: inspect ACL grants for the user/device/agent and path pattern.
 - Conflicts are expected when two actors edit the same file version.
 - A teammate's edits aren't showing up: confirm both devices show the room as mounted (not just visible) - only mounted rooms hold a live sync subscription.
+- "Invalid or expired credentials" on one team/server but not another: that team's saved device token no longer matches anything in that server's data (most often because the server's data was reset/recreated after the token was issued - e.g. a fresh reinstall, a wiped `server-data` folder, or switching between embedded and standalone mode with different data files). The plugin marks the team `revoked` in Settings → Vault Rooms → Teams when this happens; use **Forget** there to remove the stale entry (this only forgets it locally, it does not touch the server), then set up or join that team again to get a working identity. This is unrelated to which *room* you have open - a device token is per-team, not per-room.
 
 ## Roadmap
 

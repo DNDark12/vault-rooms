@@ -35,10 +35,11 @@ export class ObsidianVaultAdapter implements VaultAdapter {
   }
 
   async list(prefix: string): Promise<string[]> {
+    const normalizedPrefix = prefix.replace(/\/+$/, "");
     return this.app.vault
       .getFiles()
       .map((file) => file.path)
-      .filter((path) => path.startsWith(prefix));
+      .filter((path) => path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`));
   }
 
   onChange(cb: (event: VaultChangeEvent) => void): void {

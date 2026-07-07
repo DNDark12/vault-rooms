@@ -26,6 +26,13 @@ export type EmbeddedServerSettings = {
   maxFileBytes: number;
   /** Start the embedded relay server automatically when Obsidian loads this vault. */
   autoStart: boolean;
+  /**
+   * Manual override for the URL embedded in invite links (e.g. "http://192.168.1.42:8787").
+   * Only needed in "Local network" mode when LAN IP auto-detection picks the wrong network
+   * interface or fails outright (multiple NICs, VPNs, some Wi-Fi adapters, etc.) - leave blank to
+   * use the auto-detected LAN IP.
+   */
+  publicUrlOverride?: string;
 };
 
 export type VaultRoomsSettings = {
@@ -41,7 +48,7 @@ export type VaultRoomsSettings = {
 export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
   bindMode: "local",
   allowRemoteBootstrap: false,
-  maxFileBytes: 1048576,
+  maxFileBytes: 5 * 1024 * 1024,
   autoStart: false
 };
 

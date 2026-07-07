@@ -36,6 +36,11 @@
   padding: 12px 0;
 }
 
+.vault-rooms-error {
+  color: var(--text-error);
+  padding: 4px 0;
+}
+
 .vault-rooms-room {
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
