@@ -152,4 +152,44 @@ describe("rooms and ACL", () => {
     expect(bAfterDeny.statusCode).toBe(200);
     expect(bAfterDeny.json().rooms).toEqual([]);
   });
+
+  it("rejects a sourcePath that tries to traverse outside the vault, on both create and update", async () => {
+    const { app, owner } = await bootstrapOwnerAndMember();
+
+    const traversalCreate = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Evil", type: "folder", sourcePath: "../../etc", mountName: "Evil", capabilities: [] }
+    });
+    expect(traversalCreate.statusCode).toBe(422);
+    expect(traversalCreate.json().error.code).toBe("INVALID_PATH");
+
+    const absoluteCreate = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Evil2", type: "folder", sourcePath: "/etc/passwd", mountName: "Evil2", capabilities: [] }
+    });
+    expect(absoluteCreate.statusCode).toBe(422);
+    expect(absoluteCreate.json().error.code).toBe("INVALID_PATH");
+
+    const legit = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Fine", type: "folder", sourcePath: "Projects/Demo", mountName: "Fine", capabilities: [] }
+    });
+    expect(legit.statusCode).toBe(200);
+    const room = legit.json().room;
+
+    const traversalUpdate = await app.inject({
+      method: "PATCH",
+      url: `/api/rooms/${room.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Fine", type: "folder", sourcePath: "../outside", mountName: "Fine", capabilities: [] }
+    });
+    expect(traversalUpdate.statusCode).toBe(422);
+    expect(traversalUpdate.json().error.code).toBe("INVALID_PATH");
+  });
 });

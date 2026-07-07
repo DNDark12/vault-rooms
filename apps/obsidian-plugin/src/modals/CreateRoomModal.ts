@@ -23,7 +23,7 @@ export class CreateRoomModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Create Room" });
+    contentEl.createEl("h2", { text: "Create room" });
     new Setting(contentEl).setName("Name").addText((text) =>
       text.setValue(this.name).onChange((value) => {
         this.name = value.trim();

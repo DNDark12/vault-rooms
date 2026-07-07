@@ -9,7 +9,6 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Vault Rooms" });
 
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
@@ -17,7 +16,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
   }
 
   private renderServerSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "Relay server" });
+    new Setting(containerEl).setName("Relay server").setHeading();
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text: "This device hosts the relay server directly — no separate process or terminal needed. Set up or join from the Vault Rooms panel and it starts automatically if it isn't already running."
@@ -129,7 +128,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
   }
 
   private renderSyncSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "Sync" });
+    new Setting(containerEl).setName("Sync").setHeading();
 
     new Setting(containerEl)
       .setName("Mount root")
@@ -156,7 +155,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
   }
 
   private renderServersSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "Servers" });
+    new Setting(containerEl).setName("Servers").setHeading();
 
     if (this.plugin.settings.servers.length === 0) {
       containerEl.createEl("p", { cls: "setting-item-description", text: "No servers connected yet." });

@@ -25,8 +25,11 @@ export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomStat
   return relativePath;
 }
 
-export function registerMountedRoomWatcher(vault: VaultAdapter, room: MountedRoomState, cb: (event: VaultChangeEvent, relativePath: string) => void): void {
-  vault.onChange((event) => {
+/** Returns an unsubscribe function - callers must invoke it when the room is unmounted, or the
+ *  underlying vault listener (and everything it closes over) stays registered for the rest of
+ *  the session even though it'll never match this room's mountPath again. */
+export function registerMountedRoomWatcher(vault: VaultAdapter, room: MountedRoomState, cb: (event: VaultChangeEvent, relativePath: string) => void): () => void {
+  return vault.onChange((event) => {
     const relativePath = isWatchableChange(event, room);
     if (relativePath) {
       cb(event, relativePath);

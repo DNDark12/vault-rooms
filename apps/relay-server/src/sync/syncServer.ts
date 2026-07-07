@@ -29,7 +29,20 @@ export function registerSyncRoutes(
     }, 30_000);
 
     socket.on("message", (raw) => {
-      void handleMessage(repo, registry, connection, options, raw.toString());
+      // handleMessage is async and this listener can't await it, so any rejection it produces
+      // (a thrown error inside a message-type branch that isn't already caught locally) would
+      // otherwise become an unhandled promise rejection - which, running inside the Obsidian
+      // plugin's own process, risks taking down more than just this one connection. Every
+      // message-type branch below also has its own try/catch for a clean client-facing
+      // rejection; this is the last-resort backstop for anything that slips past those.
+      handleMessage(repo, registry, connection, options, raw.toString()).catch((error) => {
+        console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
+        try {
+          connection.socket.close();
+        } catch {
+          // Socket may already be closed/closing; nothing more to do.
+        }
+      });
     });
     socket.on("close", () => {
       clearInterval(ping);
@@ -69,28 +82,35 @@ async function handleMessage(
   }
 
   if (message.type === "hello") {
-    const principal = repo.authenticateDeviceToken(message.token);
-    if (!isActivePrincipal(principal)) {
+    try {
+      const principal = repo.authenticateDeviceToken(message.token);
+      if (!isActivePrincipal(principal)) {
+        sendJson(connection.socket, { type: "hello_error", requestId: message.requestId, code: "UNAUTHORIZED" });
+        connection.socket.close();
+        return;
+      }
+      connection.principal = principal;
+      repo.audit({
+        teamId: null,
+        actorType: "device",
+        actorId: principal.deviceId,
+        action: "sync.connected",
+        resourceType: "device",
+        resourceId: principal.deviceId,
+        metadata: { client: message.client }
+      });
+      sendJson(connection.socket, {
+        type: "hello_ok",
+        requestId: message.requestId,
+        userId: principal.userId,
+        deviceId: principal.deviceId
+      });
+    } catch {
+      // A malformed/missing token, or any other unexpected failure - treat it the same as an
+      // invalid one rather than letting it become an unhandled rejection.
       sendJson(connection.socket, { type: "hello_error", requestId: message.requestId, code: "UNAUTHORIZED" });
       connection.socket.close();
-      return;
     }
-    connection.principal = principal;
-    repo.audit({
-      teamId: null,
-      actorType: "device",
-      actorId: principal.deviceId,
-      action: "sync.connected",
-      resourceType: "device",
-      resourceId: principal.deviceId,
-      metadata: { client: message.client }
-    });
-    sendJson(connection.socket, {
-      type: "hello_ok",
-      requestId: message.requestId,
-      userId: principal.userId,
-      deviceId: principal.deviceId
-    });
     return;
   }
 
@@ -101,48 +121,50 @@ async function handleMessage(
   }
 
   if (message.type === "subscribe_room") {
-    // A previously-mounted room can legitimately no longer exist by the time a client
-    // (re)subscribes - e.g. the owner/admin deleted it while this device was offline. Treat
-    // that as a normal "room_deleted" notice, not a crash: requireRoom() throws, and letting
-    // that escape this handler would become an unhandled rejection (handleMessage runs
-    // fire-and-forget from the "message" socket listener).
-    const room = repo.getRoom(message.roomId);
-    if (!room) {
-      sendJson(connection.socket, { type: "room_deleted", roomId: message.roomId });
-      return;
-    }
     try {
-      assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:subscribe" });
-    } catch {
-      repo.audit({
-        teamId: null,
-        actorType: "device",
-        actorId: connection.principal.deviceId,
-        action: "sync.denied",
-        resourceType: "room",
-        resourceId: room.id,
-        metadata: { permission: "sync:subscribe" }
-      });
+      // A previously-mounted room can legitimately no longer exist by the time a client
+      // (re)subscribes - e.g. the owner/admin deleted it while this device was offline. Treat
+      // that as a normal "room_deleted" notice, not a crash.
+      const room = repo.getRoom(message.roomId);
+      if (!room) {
+        sendJson(connection.socket, { type: "room_deleted", roomId: message.roomId });
+        return;
+      }
+      try {
+        assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:subscribe" });
+      } catch {
+        repo.audit({
+          teamId: null,
+          actorType: "device",
+          actorId: connection.principal.deviceId,
+          action: "sync.denied",
+          resourceType: "room",
+          resourceId: room.id,
+          metadata: { permission: "sync:subscribe" }
+        });
+        sendJson(connection.socket, {
+          type: "file_change_rejected",
+          requestId: message.requestId,
+          code: "PERMISSION_DENIED",
+          message: "You do not have permission to subscribe to this room."
+        });
+        return;
+      }
+      connection.subscriptions.add(room.id);
       sendJson(connection.socket, {
-        type: "file_change_rejected",
+        type: "room_snapshot",
         requestId: message.requestId,
-        code: "PERMISSION_DENIED",
-        message: "You do not have permission to subscribe to this room."
+        roomId: room.id,
+        files: repo.listFiles(room.id).map((file) => ({
+          relativePath: file.relative_path,
+          version: file.version,
+          sha256: file.sha256,
+          deleted: Boolean(file.deleted_at)
+        }))
       });
-      return;
+    } catch (error) {
+      sendRejection(connection.socket, message.requestId, error);
     }
-    connection.subscriptions.add(room.id);
-    sendJson(connection.socket, {
-      type: "room_snapshot",
-      requestId: message.requestId,
-      roomId: room.id,
-      files: repo.listFiles(room.id).map((file) => ({
-        relativePath: file.relative_path,
-        version: file.version,
-        sha256: file.sha256,
-        deleted: Boolean(file.deleted_at)
-      }))
-    });
     return;
   }
 

@@ -9,14 +9,27 @@ const ELIGIBLE_EXTENSIONS = new Set([".md", ".txt", ".canvas", ".json", ".csv", 
 // writeBinary handling on the client, which is the only place that cares about this distinction.
 const ELIGIBLE_BINARY_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"]);
 
+// Generous but finite: prevents a malformed/hostile path from reaching fs/Obsidian's own path
+// APIs and throwing an uncaught ENAMETOOLONG (or platform equivalent) deep inside a write/mount
+// codepath. Most real filesystems cap a single segment around 255 bytes; 1024 total keeps room
+// for a deeply nested folder structure without letting a path grow unbounded.
+const MAX_PATH_LENGTH = 1024;
+const MAX_SEGMENT_LENGTH = 255;
+
 export function normalizeRelativePath(input: string): string {
   if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
     throw new AppError("INVALID_PATH", "Path must be a safe relative path.", 422);
+  }
+  if (input.length > MAX_PATH_LENGTH) {
+    throw new AppError("INVALID_PATH", `Path must be ${MAX_PATH_LENGTH} characters or fewer.`, 422);
   }
   const normalized = input.replaceAll("\\", "/").replace(/\/+/g, "/");
   const segments = normalized.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith("."))) {
     throw new AppError("INVALID_PATH", "Path must not contain empty, hidden, current, or parent segments.", 422);
+  }
+  if (segments.some((segment) => segment.length > MAX_SEGMENT_LENGTH)) {
+    throw new AppError("INVALID_PATH", `Each path segment must be ${MAX_SEGMENT_LENGTH} characters or fewer.`, 422);
   }
   return segments.join("/");
 }

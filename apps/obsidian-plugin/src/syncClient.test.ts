@@ -44,8 +44,8 @@ class FakeVaultAdapter implements VaultAdapter {
     return [...this.files.keys()].filter((path) => path.startsWith(prefix));
   }
 
-  onChange(): void {
-    return undefined;
+  onChange(): () => void {
+    return () => undefined;
   }
 }
 

@@ -1,8 +1,11 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createApp } from "vault-rooms-relay/app";
 import { detectLanIp, resolveRuntimeConfig, type EnvLike } from "vault-rooms-relay/config";
 import type { EmbeddedServerSettings } from "./settings.js";
+// Bundled directly into main.js by esbuild's "binary" loader - see esbuild.config.mjs. This
+// avoids depending on a separately-shipped sql-wasm.wasm file, which the community-plugin
+// installer would never actually deliver (it only downloads main.js/manifest.json/styles.css).
+import sqlWasmBinary from "sql.js/dist/sql-wasm.wasm";
 
 type FastifyLikeApp = Awaited<ReturnType<typeof createApp>>;
 
@@ -20,8 +23,6 @@ export class EmbeddedRelayServer {
   private status: EmbeddedServerStatus = { running: false };
 
   constructor(
-    /** Absolute filesystem path to the installed plugin folder (holds sql-wasm.wasm). */
-    private readonly pluginDir: string,
     /** Absolute filesystem path where the SQLite file and content blobs are stored. */
     private readonly dataDir: string
   ) {}
@@ -48,13 +49,12 @@ export class EmbeddedRelayServer {
         ALLOW_REMOTE_BOOTSTRAP: settings.allowRemoteBootstrap ? "true" : "false"
       };
       const config = await resolveRuntimeConfig(env);
-      const wasmBytes = readFileSync(join(this.pluginDir, "sql-wasm.wasm"));
       const app = await createApp({
         dbPath: join(this.dataDir, "relay.sqlite"),
         publicUrl: config.publicUrl,
         allowRemoteBootstrap: config.allowRemoteBootstrap,
         maxFileBytes: config.maxFileBytes,
-        sqlJsLocator: { wasmBinary: toArrayBuffer(wasmBytes) }
+        sqlJsLocator: { wasmBinary: toArrayBuffer(sqlWasmBinary) }
       });
       await app.listen({ host: config.host, port: config.port });
       this.app = app;
@@ -89,6 +89,6 @@ export class EmbeddedRelayServer {
   }
 }
 
-function toArrayBuffer(buffer: Buffer): ArrayBuffer {
+function toArrayBuffer(buffer: Uint8Array): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }

@@ -11,7 +11,10 @@ export interface VaultAdapter {
   delete(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   list(prefix: string): Promise<string[]>;
-  onChange(cb: (event: VaultChangeEvent) => void): void;
+  /** Returns an unsubscribe function - callers are responsible for calling it once they no longer
+   *  need this particular registration (e.g. a room was unmounted), otherwise the listener stays
+   *  registered for the plugin's whole lifetime. */
+  onChange(cb: (event: VaultChangeEvent) => void): () => void;
 }
 
 export type RelayFileApi = {
@@ -203,6 +206,10 @@ export class VaultSyncEngine {
       if (await this.vault.exists(conflictPath)) {
         await this.vault.delete(conflictPath);
       }
+      return;
+    }
+    if (!(await this.vault.exists(conflictPath))) {
+      // Someone (or a previous click) already removed the conflict copy - nothing left to keep.
       return;
     }
     const path = mountedPath(room, relativePath);

@@ -147,6 +147,31 @@ describe("MCP gateway", () => {
     const afterRevoke = await callTool(app, agent.agentToken, "list_rooms", {});
     expect(afterRevoke.statusCode).toBe(401);
   });
+
+  it("requires file:create (not just file:write) for an agent to create a brand-new file via write_file", async () => {
+    const { app, owner, room } = await setupMcpFlow();
+    const writeOnlyAgent = (
+      await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { displayName: "Write-only agent" }
+      })
+    ).json();
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "agent", subjectId: writeOnlyAgent.agent.id, effect: "allow", permissions: ["room:read", "file:read", "file:write", "tool:write_file"], pathPattern: "**/*" }
+    });
+
+    const create = await callTool(app, writeOnlyAgent.agentToken, "write_file", { roomId: room.id, relativePath: "New.md", baseVersion: 0, content: "# New\n" });
+    expect(create.statusCode).toBe(403);
+    expect(create.json().error.code).toBe("PERMISSION_DENIED");
+
+    const update = await callTool(app, writeOnlyAgent.agentToken, "write_file", { roomId: room.id, relativePath: "Tasks.md", baseVersion: 1, content: "# Tasks\nedited\n" });
+    expect(update.statusCode).toBe(200);
+  });
 });
 
 function callTool(app: Awaited<ReturnType<typeof createApp>>, token: string, tool: string, input: unknown) {

@@ -37,7 +37,10 @@ export default class VaultRoomsPlugin extends Plugin {
   teamMembersByTeam: Record<string, TeamMemberSummary[]> = {};
   private vaultAdapter!: ObsidianVaultAdapter;
   private syncEngine!: VaultSyncEngine;
-  private watchedRoomStates = new WeakSet<MountedRoomState>();
+  /** Unsubscribe function per mounted room's vault-change watcher, so unmounting actually removes
+   *  its listeners instead of leaving them registered (and silently no-op'ing) for the rest of
+   *  the session - see watchMountedRoom()/unmountRoom(). */
+  private roomWatchers = new Map<string, () => void>();
   private embeddedServer: EmbeddedRelayServer | null = null;
   private syncSocket: RoomSyncSocket | null = null;
   private syncState: SyncConnectionState = "offline";
@@ -52,12 +55,12 @@ export default class VaultRoomsPlugin extends Plugin {
 
     this.addCommand({
       id: "start-server",
-      name: "Start Server",
+      name: "Start server",
       callback: () => this.startEmbeddedServer()
     });
     this.addCommand({
       id: "stop-server",
-      name: "Stop Server",
+      name: "Stop server",
       callback: () => this.stopEmbeddedServer()
     });
 
@@ -69,42 +72,42 @@ export default class VaultRoomsPlugin extends Plugin {
 
     this.addCommand({
       id: "open-rooms-panel",
-      name: "Open Rooms Panel",
+      name: "Open rooms panel",
       callback: () => this.openRoomsPanel()
     });
     this.addCommand({
       id: "setup-server",
-      name: "Set Up Server",
+      name: "Set up server",
       callback: () => this.openSetupServerModal()
     });
     this.addCommand({
       id: "create-room",
-      name: "Create Room",
+      name: "Create room",
       callback: () => this.openCreateRoomModal()
     });
     this.addCommand({
       id: "join-team",
-      name: "Join Team",
+      name: "Join team",
       callback: () => this.openJoinTeamModal()
     });
     this.addCommand({
       id: "rejoin-team",
-      name: "Rejoin Team",
+      name: "Rejoin team",
       callback: () => new JoinTeamModal(this, "rejoin", this.getActiveServer()?.baseUrl ?? "").open()
     });
     this.addCommand({
       id: "refresh-rooms",
-      name: "Refresh Rooms",
+      name: "Refresh rooms",
       callback: () => this.refreshRooms()
     });
     this.addCommand({
       id: "mount-room",
-      name: "Mount Room",
+      name: "Mount room",
       callback: () => this.mountFirstVisibleRoom()
     });
     this.addCommand({
       id: "unmount-room",
-      name: "Unmount Room",
+      name: "Unmount room",
       callback: async () => {
         const room = this.visibleRooms[0];
         if (room) {
@@ -157,6 +160,14 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    // registerEvent()-based vault listeners are torn down automatically by Obsidian, but the
+    // per-room debounce timers in roomWatchers are plain window.setTimeout() calls - left running,
+    // they'd fire after unload and try to push through an already-disconnected socket/stopped
+    // server. Tear every mounted room's watcher down explicitly, same as unmountRoom() does.
+    for (const unsubscribe of this.roomWatchers.values()) {
+      unsubscribe();
+    }
+    this.roomWatchers.clear();
     this.syncSocket?.disconnect();
     await this.embeddedServer?.stop();
   }
@@ -215,7 +226,7 @@ export default class VaultRoomsPlugin extends Plugin {
       }
       const pluginDir = join(adapter.getBasePath(), this.manifest.dir ?? `.obsidian/plugins/${this.manifest.id}`);
       const dataDir = join(pluginDir, "server-data");
-      this.embeddedServer = new EmbeddedRelayServer(pluginDir, dataDir);
+      this.embeddedServer = new EmbeddedRelayServer(dataDir);
     }
     return this.embeddedServer;
   }
@@ -603,6 +614,8 @@ export default class VaultRoomsPlugin extends Plugin {
 
   async unmountRoom(roomId: string): Promise<void> {
     const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+    this.roomWatchers.get(roomId)?.();
+    this.roomWatchers.delete(roomId);
     delete this.settings.mountedRooms[roomId];
     await this.saveSettings();
     this.renderOpenRoomsViews();
@@ -714,10 +727,9 @@ export default class VaultRoomsPlugin extends Plugin {
     if (!roomState || !server) {
       return;
     }
-    if (this.watchedRoomStates.has(roomState)) {
+    if (this.roomWatchers.has(roomId)) {
       return;
     }
-    this.watchedRoomStates.add(roomState);
     // Per-path debounce timers and push chains, scoped to this one room-watch registration.
     // Without coalescing, a fast-autosaving file (a drawing plugin can resave on every stroke)
     // fires one independent setTimeout per event; all of them eventually push, and overlapping
@@ -728,7 +740,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // network round trips and the self-inflicted conflicts.
     const pendingTimers = new Map<string, number>();
     const pushChains = new Map<string, Promise<void>>();
-    registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
+    const unsubscribe = registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
       if (this.settings.mountedRooms[roomId] !== roomState) {
         return;
       }
@@ -759,6 +771,13 @@ export default class VaultRoomsPlugin extends Plugin {
         pushChains.set(relativePath, next);
       }, this.settings.debounceMs);
       pendingTimers.set(relativePath, timer);
+    });
+    this.roomWatchers.set(roomId, () => {
+      unsubscribe();
+      for (const timer of pendingTimers.values()) {
+        window.clearTimeout(timer);
+      }
+      pendingTimers.clear();
     });
   }
 

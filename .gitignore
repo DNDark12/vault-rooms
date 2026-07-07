@@ -31,8 +31,8 @@ apps/relay-server/test/health.test.js.map
 apps/relay-server/test/health.test.d.ts
 apps/relay-server/test/health.test.d.ts.map
 
-# Obsidian plugin build output. The root-level manifest.json/main.js/styles.css/sql-wasm.wasm
-# (kept in sync via `pnpm build:plugin`) are the committed, installable copies - see
-# "Installing the Obsidian plugin manually" and "Release checklist" in README.md.
+# Obsidian plugin build output. The root-level manifest.json/main.js/styles.css (kept in sync via
+# `pnpm build:plugin`) are the committed, installable copies - see "Installing the Obsidian plugin
+# manually" and "Release checklist" in README.md. sql-wasm.wasm is embedded into main.js at build
+# time (esbuild.config.mjs), not shipped as a separate file.
 apps/obsidian-plugin/main.js
-apps/obsidian-plugin/sql-wasm.wasm

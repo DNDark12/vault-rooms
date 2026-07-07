@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
+import { AppError, normalizeRelativePath, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
 import { evaluatePolicy, expandPreset } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageRoom } from "../db/repositories/relayRepository.js";
@@ -262,6 +262,15 @@ function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder";
   }
   if (body.type !== "file" && body.type !== "folder") {
     throw new AppError("VALIDATION_ERROR", "type must be file or folder.", 422);
+  }
+  // sourcePath names a folder/file in the OWNER's own vault, but it's still attacker-controllable
+  // input over the wire (a buggy or modified client could send anything) and nothing downstream
+  // re-checks it - normalize it the same way any other room-relative path is normalized, so a
+  // ".." or absolute path can never be stored, broadcast, or handed back to a client to mount.
+  try {
+    body.sourcePath = normalizeRelativePath(body.sourcePath);
+  } catch {
+    throw new AppError("INVALID_PATH", "sourcePath must be a safe relative path with no '..' or hidden segments.", 422);
   }
   if (!isSafeMountName(body.mountName)) {
     throw new AppError("INVALID_PATH", "mountName must be a safe single path segment.", 422);

@@ -90,7 +90,7 @@ export class VaultRoomsView extends ItemView {
 
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     if (status.running) {
-      this.addPanelButton(actions, "Stop Server", () => this.plugin.stopEmbeddedServer());
+      this.addPanelButton(actions, "Stop server", () => this.plugin.stopEmbeddedServer());
     } else {
       this.addPanelButton(
         actions,
@@ -117,8 +117,8 @@ export class VaultRoomsView extends ItemView {
 
     const serverRunning = this.plugin.getServerStatus().running;
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Set Up Server", () => this.plugin.openSetupServerModal(), true);
-    this.addPanelButton(actions, "Join Server", () => this.plugin.openJoinTeamModal());
+    this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
+    this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
 
     if (this.plugin.settings.servers.length === 0) {
       section.createDiv({
@@ -267,7 +267,7 @@ export class VaultRoomsView extends ItemView {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
     section.createEl("h3", { text: "Rooms" });
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Create Room", () => this.plugin.openCreateRoomModal());
+    this.addPanelButton(actions, "Create room", () => this.plugin.openCreateRoomModal());
     this.addPanelButton(actions, "Refresh", async () => {
       await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
     });

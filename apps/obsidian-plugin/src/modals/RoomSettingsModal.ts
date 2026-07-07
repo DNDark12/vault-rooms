@@ -83,7 +83,7 @@ export class RoomSettingsModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("vault-rooms-settings-modal");
-    contentEl.createEl("h2", { text: `Room Settings: ${this.room.name}` });
+    contentEl.createEl("h2", { text: `Room settings: ${this.room.name}` });
 
     this.renderRoomFields(contentEl);
     this.renderCapabilities(contentEl);

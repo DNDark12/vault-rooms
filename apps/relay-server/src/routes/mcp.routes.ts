@@ -89,10 +89,19 @@ function handleTool(repo: RelayRepository, agent: AgentPrincipal, tool: McpToolN
       const room = requireRoom(repo, String(input.roomId));
       const relativePath = normalizeRelativePath(String(input.relativePath));
       assertToolPermissions(repo, agent, room, tool, relativePath);
+      const baseVersion = Number(input.baseVersion ?? 0);
+      // A grant of file:write alone must not let an agent create brand-new files - that needs
+      // file:create, exactly like the REST PUT route. assertToolPermissions() above only covers
+      // the static tool:write_file gate; this branch mirrors file.routes.ts's create-vs-update
+      // permission split.
+      const filePermission = baseVersion === 0 ? "file:create" : "file:write";
+      if (!canAgent(repo, agent, room, filePermission, relativePath)) {
+        throw new AppError("PERMISSION_DENIED", `Agent does not have ${filePermission} permission.`, 403);
+      }
       return repo.writeFile({
         roomId: room.id,
         relativePath,
-        baseVersion: Number(input.baseVersion ?? 0),
+        baseVersion,
         content: String(input.content ?? ""),
         actorUserId: agent.userId
       });

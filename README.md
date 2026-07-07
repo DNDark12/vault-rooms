@@ -12,7 +12,17 @@ Teams are the identity and invite boundary. Rooms are the shared folder/file bou
 
 ## What it is not
 
-This is not cloud sync, NAT traversal, mobile sync, character-level co-editing, or a sandbox for arbitrary Obsidian community plugins. v0.1 syncs text files only, up to the configured size limit.
+This is not cloud sync, NAT traversal, mobile sync, character-level co-editing, or a sandbox for arbitrary Obsidian community plugins. v0.1 syncs Markdown/text and a limited set of common file types (see "Known limitations" below for the exact list), up to the configured size limit.
+
+## Network use
+
+Vault Rooms makes network connections, but only ever between devices on your own local network (LAN) that are running this same plugin - there is no cloud service, third-party server, telemetry, analytics, or update-check call of any kind:
+
+- The device hosting a room (the "server") listens on your local network - by default port `8787`, or the next free port up to `8797` - so that teammates' Obsidian clients can reach it over plain HTTP and WebSocket.
+- Every other device's plugin only ever makes outbound HTTP/WebSocket requests to that one host, to authenticate, sync files, fetch room/team/friend metadata, and receive live updates.
+- If you also use the MCP gateway (`POST /mcp`), that endpoint is served by the same LAN host and is reachable by anything holding a valid agent token; no data is sent anywhere outside your LAN because of it.
+
+v0.1 has no TLS (see "Security model" below) - tokens and file contents travel in plaintext over your LAN, so only use this on a network you trust.
 
 ## Architecture
 
@@ -130,7 +140,7 @@ Default port is `8787`. If a port is unset and the default is busy, the server t
 ## Installing the Obsidian plugin manually
 
 1. Run `pnpm build:plugin`.
-2. Copy root `manifest.json`, `main.js`, `styles.css`, and `sql-wasm.wasm` into `<vault>/.obsidian/plugins/vault-rooms/`. All four files are required - `sql-wasm.wasm` is the embedded relay's SQLite engine and is loaded from disk at runtime.
+2. Copy root `manifest.json`, `main.js`, and `styles.css` into `<vault>/.obsidian/plugins/vault-rooms/`. All three files are required - the embedded relay's SQLite engine (`sql.js`'s WASM binary) is bundled directly into `main.js`, so no extra file is needed.
 3. Enable community plugins in Obsidian and enable "Vault Rooms".
 4. Use commands prefixed with `Vault Rooms:`, or open the ribbon icon.
 
@@ -194,13 +204,16 @@ Tool access uses the same ACL table as human/device access. Raw unrestricted vau
 
 ## Release checklist
 
-Before submitting to the Obsidian Community directory:
+One-time repository setup (already done for this repo, but required again for a fork): on GitHub, go to **Settings → Actions → General → Workflow permissions** and select **Read and write permissions**, so `.github/workflows/release.yml` is allowed to create releases.
 
-1. Confirm root `manifest.json`, `main.js`, `styles.css`, `sql-wasm.wasm`, `README.md`, and `LICENSE` exist.
-2. Run `pnpm typecheck`, `pnpm test`, and `pnpm build:plugin`.
-3. Commit root `manifest.json`.
-4. Create a GitHub release whose tag matches `manifest.json` `version`.
-5. Upload `main.js`, `manifest.json`, `styles.css`, and `sql-wasm.wasm` as release assets.
+To cut a release:
+
+1. Confirm root `manifest.json`, `main.js`, `styles.css`, `README.md`, and `LICENSE` exist, and that `manifest.json`'s `version` has been bumped.
+2. Run `pnpm typecheck`, `pnpm test`, and `pnpm build:plugin` locally, and commit the resulting root `manifest.json`/`main.js`/`styles.css`.
+3. Push a tag that matches `manifest.json`'s `version` exactly (no `v` prefix), e.g. `git tag -a 0.1.0 -m "0.1.0" && git push origin 0.1.0`.
+4. GitHub Actions (`.github/workflows/release.yml`) builds the plugin fresh, verifies the tag matches `manifest.json`, and creates a **draft** GitHub release with `main.js`, `manifest.json`, and `styles.css` attached. `sql-wasm.wasm` is not a separate release asset - it's bundled directly into `main.js` at build time, so the plugin works from just those three files.
+5. Open the draft release on GitHub, add release notes, and publish it.
+6. First release only: submit the plugin to the community directory (see [Submit your plugin](https://docs.obsidian.md/Plugins/Releasing/Submit+your+plugin)) by opening a pull request against `obsidianmd/obsidian-releases` adding an entry to `community-plugins.json`.
 
 ## Known limitations
 
@@ -236,3 +249,7 @@ v0.3: TLS, end-to-end encryption, web admin, audit viewer, rollback. TLS is wort
 v0.4: richer Kanban plugin format support, deeper Tasks metadata, Dataview read-only tools.
 
 Not yet on the roadmap but worth adding given the embedded-server model: **standalone-hosting guidance/tooling** (a documented, maybe scripted, path to run `vault-rooms-relay` unattended on a NAS or always-on machine) for teams that outgrow "one teammate's laptop is the server."
+
+## License
+
+MIT - see [LICENSE](./LICENSE).
