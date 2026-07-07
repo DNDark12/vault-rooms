@@ -47508,14 +47508,17 @@ var VaultRoomsView = class extends import_obsidian9.ItemView {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
     section.createEl("h3", { text: "Active connection" });
     const server = this.plugin.getActiveServer();
+    const hasOwnServer = this.plugin.hasOwnServer();
     if (!server) {
       section.createDiv({
         cls: "vault-rooms-empty",
-        text: this.plugin.settings.servers.length > 0 ? 'No server selected - pick one under "Other servers" below, or set up/join a new one.' : "Not connected to any server yet."
+        text: this.plugin.settings.servers.length > 0 ? 'No server selected - pick one under "Other servers" below, or join/set up a new one.' : "Not connected to any server yet."
       });
       const actions2 = section.createDiv({ cls: "vault-rooms-actions" });
-      this.addPanelButton(actions2, "Set up server", () => this.plugin.openSetupServerModal(), true);
-      this.addPanelButton(actions2, "Join server", () => this.plugin.openJoinTeamModal());
+      if (!hasOwnServer) {
+        this.addPanelButton(actions2, "Set up server", () => this.plugin.openSetupServerModal(), true);
+      }
+      this.addPanelButton(actions2, "Join server", () => this.plugin.openJoinTeamModal(), hasOwnServer);
       return;
     }
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
@@ -47525,8 +47528,10 @@ var VaultRoomsView = class extends import_obsidian9.ItemView {
     const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting\u2026" : "Live sync: offline";
     const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
     badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    if (!hasOwnServer) {
+      return;
+    }
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Set up another server", () => this.plugin.openSetupServerModal());
     this.addPanelButton(actions, "Join another server", () => this.plugin.openJoinTeamModal());
   }
   /**
@@ -47983,6 +47988,17 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
   }
   getActiveServer() {
     return activeServer(this.settings);
+  }
+  /**
+   * Whether this device has already bootstrapped its own hosted server. Bootstrap is a one-time
+   * action per device install (the embedded server is a singleton - one process, one database, one
+   * owner identity - so there is no such thing as "another" server to set up on top of it), and the
+   * created owner identity is permanent: the underlying database keeps its owner forever, even
+   * across Stop/Start, so re-running setup against it always fails ("Bootstrap has already been
+   * completed"). The panel uses this to stop offering "Set up server" once it would only ever fail.
+   */
+  hasOwnServer() {
+    return this.settings.servers.some((server) => server.isServerOwner);
   }
   async testConnection(baseUrl) {
     await new RelayApiClient(baseUrl).testConnection();

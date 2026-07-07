@@ -140,14 +140,22 @@ export class VaultRoomsView extends ItemView {
     section.createEl("h3", { text: "Active connection" });
 
     const server = this.plugin.getActiveServer();
+    const hasOwnServer = this.plugin.hasOwnServer();
     if (!server) {
       section.createDiv({
         cls: "vault-rooms-empty",
-        text: this.plugin.settings.servers.length > 0 ? "No server selected - pick one under \"Other servers\" below, or set up/join a new one." : "Not connected to any server yet."
+        text: this.plugin.settings.servers.length > 0 ? "No server selected - pick one under \"Other servers\" below, or join/set up a new one." : "Not connected to any server yet."
       });
       const actions = section.createDiv({ cls: "vault-rooms-actions" });
-      this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
-      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal());
+      // "Set up server" only ever makes sense once, ever, per device - see hasOwnServer()'s doc
+      // comment. Hide it afterwards instead of leaving it there to fail with a confusing "already
+      // bootstrapped" error; "Join" has no such limit; you can join as many other people's servers
+      // as you like.
+      if (!hasOwnServer) {
+        this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
+      }
+      // Join becomes the primary (CTA) action once Set up is no longer offered.
+      this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal(), hasOwnServer);
       return;
     }
 
@@ -159,11 +167,14 @@ export class VaultRoomsView extends ItemView {
     const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
     badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
 
-    // Connecting to another server/team lives here (not tucked inside "Other servers" below, which
-    // is just a list of what's already saved) since it's an action you can take regardless of
-    // whether anything else has been saved yet.
+    // Only "Join another server" belongs here: a person can legitimately be a client of many
+    // servers (each teammate's own), but can only ever own one hosted server on this device (see
+    // hasOwnServer()) - there is no such thing as "another" server to set up on top of that one, so
+    // once this device already hosts a server, that action simply stops being offered anywhere.
+    if (!hasOwnServer) {
+      return;
+    }
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Set up another server", () => this.plugin.openSetupServerModal());
     this.addPanelButton(actions, "Join another server", () => this.plugin.openJoinTeamModal());
   }
 

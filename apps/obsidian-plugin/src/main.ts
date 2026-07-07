@@ -237,6 +237,18 @@ export default class VaultRoomsPlugin extends Plugin {
     return activeServer(this.settings);
   }
 
+  /**
+   * Whether this device has already bootstrapped its own hosted server. Bootstrap is a one-time
+   * action per device install (the embedded server is a singleton - one process, one database, one
+   * owner identity - so there is no such thing as "another" server to set up on top of it), and the
+   * created owner identity is permanent: the underlying database keeps its owner forever, even
+   * across Stop/Start, so re-running setup against it always fails ("Bootstrap has already been
+   * completed"). The panel uses this to stop offering "Set up server" once it would only ever fail.
+   */
+  hasOwnServer(): boolean {
+    return this.settings.servers.some((server) => server.isServerOwner);
+  }
+
   async testConnection(baseUrl: string): Promise<void> {
     await new RelayApiClient(baseUrl).testConnection();
     new Notice(`Connected to Vault Rooms`);
