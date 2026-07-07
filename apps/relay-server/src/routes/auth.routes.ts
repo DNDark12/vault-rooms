@@ -7,7 +7,12 @@ export function registerAuthRoutes(app: FastifyInstance, repo: RelayRepository):
   app.post("/api/join", async (request) => {
     const body = request.body as Partial<{ inviteToken: string; displayName: string; deviceName: string }>;
     if (!body.inviteToken || !body.displayName || !body.deviceName) {
-      throw new AppError("VALIDATION_ERROR", "inviteToken, displayName, and deviceName are required.", 422);
+      const missing = [
+        !body.inviteToken && "inviteToken",
+        !body.displayName && "displayName",
+        !body.deviceName && "deviceName"
+      ].filter((field): field is string => Boolean(field));
+      throw new AppError("VALIDATION_ERROR", `Missing required field(s): ${missing.join(", ")}.`, 422);
     }
     try {
       return repo.joinInvite({

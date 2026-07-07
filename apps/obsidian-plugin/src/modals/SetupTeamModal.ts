@@ -18,7 +18,11 @@ export class SetupTeamModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Set Up Vault Rooms" });
+    contentEl.createEl("h2", { text: "Set Up Server" });
+    contentEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Creates your account and device identity on this relay server. Do this once per server - after that, use \"Create team\" and \"Invite\" from the Vault Rooms panel."
+    });
     new Setting(contentEl).setName("Server URL").addText((text) => text.setValue(this.serverUrl).onChange((value) => (this.serverUrl = value.trim())));
     new Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => (this.displayName = value.trim())));
     new Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName).onChange((value) => (this.deviceName = value.trim())));

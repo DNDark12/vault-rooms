@@ -49040,7 +49040,12 @@ function registerAuthRoutes(app, repo) {
   app.post("/api/join", async (request) => {
     const body = request.body;
     if (!body.inviteToken || !body.displayName || !body.deviceName) {
-      throw new AppError("VALIDATION_ERROR", "inviteToken, displayName, and deviceName are required.", 422);
+      const missing = [
+        !body.inviteToken && "inviteToken",
+        !body.displayName && "displayName",
+        !body.deviceName && "deviceName"
+      ].filter((field) => Boolean(field));
+      throw new AppError("VALIDATION_ERROR", `Missing required field(s): ${missing.join(", ")}.`, 422);
     }
     try {
       return repo.joinInvite({
@@ -50854,9 +50859,13 @@ var CreateRoomModal = class extends import_obsidian3.Modal {
     super(plugin.app);
     this.plugin = plugin;
     __publicField(this, "name", "Projects Demo");
+    /** Not user-facing - inferred from whichever picker button was used, or from what the typed
+     *  path actually resolves to in the vault. Only matters as a hint server-side; see note below. */
     __publicField(this, "type", "folder");
     __publicField(this, "sourcePath", "Projects/Demo");
     __publicField(this, "mountName", "Projects Demo");
+    /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
+    __publicField(this, "mountNameTouched", false);
     __publicField(this, "capabilities", [
       { pluginId: "obsidian-tasks-plugin", displayName: "Tasks", mode: "recommended" },
       { pluginId: "obsidian-kanban", displayName: "Kanban", mode: "recommended" }
@@ -50866,26 +50875,39 @@ var CreateRoomModal = class extends import_obsidian3.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: "Create Room" });
-    new import_obsidian3.Setting(contentEl).setName("Name").addText((text) => text.setValue(this.name).onChange((value) => this.name = value.trim()));
-    new import_obsidian3.Setting(contentEl).setName("Type").addDropdown(
-      (dropdown) => dropdown.addOption("folder", "Folder").addOption("file", "File").setValue(this.type).onChange((value) => this.type = value)
-    );
-    new import_obsidian3.Setting(contentEl).setName("Source path").addText((text) => text.setValue(this.sourcePath).onChange((value) => this.sourcePath = value.trim())).addButton(
-      (button) => button.setButtonText(this.type === "folder" ? "Choose folder" : "Choose file").onClick(() => {
-        new VaultPathSuggestModal(this.app, this.type, (path) => {
-          this.sourcePath = path;
-          if (!this.name || this.name === "Projects Demo") {
-            this.name = basename(path);
-          }
-          if (!this.mountName || this.mountName === "Projects Demo") {
-            this.mountName = basename(path);
-          }
-          this.onOpen();
-        }).open();
+    new import_obsidian3.Setting(contentEl).setName("Name").addText(
+      (text) => text.setValue(this.name).onChange((value) => {
+        this.name = value.trim();
+        if (!this.mountNameTouched) {
+          this.mountName = sanitizeMountName(this.name);
+        }
       })
     );
-    new import_obsidian3.Setting(contentEl).setName("Mount name").addText((text) => text.setValue(this.mountName).onChange((value) => this.mountName = value.trim()));
+    new import_obsidian3.Setting(contentEl).setName("Source path").setDesc("The folder (or single file) in your vault to share. Pick one with the buttons below, or type a path directly.").addText(
+      (text) => text.setValue(this.sourcePath).onChange((value) => {
+        this.sourcePath = value.trim();
+        this.type = inferPathType(this.app, this.sourcePath, this.type);
+      })
+    ).addButton(
+      (button) => button.setButtonText("Choose folder").onClick(() => {
+        new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path, "folder")).open();
+      })
+    ).addButton(
+      (button) => button.setButtonText("Choose file").onClick(() => {
+        new VaultPathSuggestModal(this.app, "file", (path) => this.applyChosenPath(path, "file")).open();
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
+      (text) => text.setValue(this.mountName).onChange((value) => {
+        this.mountName = value.trim();
+        this.mountNameTouched = true;
+      })
+    );
     contentEl.createEl("h3", { text: "Plugin capabilities" });
+    contentEl.createEl("p", {
+      cls: "vault-rooms-setting-hint",
+      text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
+    });
     const options = pluginOptions(this.app, this.capabilities);
     for (const capability of this.capabilities) {
       new import_obsidian3.Setting(contentEl).setName("Plugin").addDropdown((dropdown) => {
@@ -50939,10 +50961,35 @@ var CreateRoomModal = class extends import_obsidian3.Modal {
       })
     );
   }
+  applyChosenPath(path, type) {
+    this.sourcePath = path;
+    this.type = type;
+    if (!this.name || this.name === "Projects Demo") {
+      this.name = basename(path);
+    }
+    if (!this.mountNameTouched) {
+      this.mountName = sanitizeMountName(this.name);
+    }
+    this.onOpen();
+  }
 };
 function basename(path) {
   var _a;
   return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
+}
+function inferPathType(app, path, previous) {
+  if (!path) {
+    return previous;
+  }
+  const file = app.vault.getAbstractFileByPath(path);
+  if (!file) {
+    return previous;
+  }
+  return file instanceof import_obsidian3.TFolder ? "folder" : "file";
+}
+function sanitizeMountName(name) {
+  const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
+  return cleaned || "Room";
 }
 
 // src/modals/InviteMemberModal.ts
@@ -50986,17 +51033,53 @@ var JoinTeamModal = class extends import_obsidian5.Modal {
     __publicField(this, "inviteToken", "");
     __publicField(this, "displayName", "");
     __publicField(this, "deviceName", "");
+    /** True when we already have a real server+token (opened via an invite link) - in that case
+     *  there's nothing to parse or re-enter, so the form only needs to ask for a display name. */
+    __publicField(this, "hasKnownInvite");
+    __publicField(this, "showManualForm");
     this.serverUrl = serverUrl;
     this.inviteToken = inviteToken;
+    this.hasKnownInvite = Boolean(serverUrl && inviteToken);
+    this.showManualForm = !this.hasKnownInvite;
   }
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: this.mode === "join" ? "Join Vault Rooms" : "Rejoin Vault Rooms" });
+    if (this.hasKnownInvite && !this.showManualForm) {
+      this.renderKnownInviteForm(contentEl);
+      return;
+    }
+    this.renderManualForm(contentEl);
+  }
+  /** The common case: opened by clicking an invite link, so server+token are already known - the
+   *  only thing genuinely missing is the person's name. */
+  renderKnownInviteForm(contentEl) {
+    contentEl.createEl("p", { text: `Joining ${this.serverUrl} via invite link. Add your display name to finish.` });
+    new import_obsidian5.Setting(contentEl).setName("Display name").setDesc("This is what teammates will see you as.").addText((text) => {
+      text.setValue(this.displayName).onChange((value) => this.displayName = value.trim());
+      window.setTimeout(() => text.inputEl.focus(), 0);
+    });
+    new import_obsidian5.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
+        await this.submit();
+      })
+    );
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setButtonText("Use a different invite link").onClick(() => {
+        this.showManualForm = true;
+        this.onOpen();
+      })
+    );
+  }
+  /** Fallback for opening this modal without a link already in hand (command palette, or "use a
+   *  different invite link") - lets someone paste a full invite link/text or fill fields by hand. */
+  renderManualForm(contentEl) {
     if (this.inviteToken) {
       contentEl.createEl("p", { text: "Invite link details filled in below. Add your display name to finish joining." });
     }
-    new import_obsidian5.Setting(contentEl).setName("Invite link").addText(
+    new import_obsidian5.Setting(contentEl).setName("Invite link").setDesc("Paste a full obsidian://vault-rooms invite link or the raw text a teammate sent you.").addText(
       (text) => text.setPlaceholder("obsidian://vault-rooms/join?server=...&token=...").setValue(this.inviteInput).onChange((value) => this.inviteInput = value.trim())
     ).addButton(
       (button) => button.setButtonText("Parse").onClick(() => {
@@ -51016,15 +51099,18 @@ var JoinTeamModal = class extends import_obsidian5.Modal {
     );
     new import_obsidian5.Setting(contentEl).addButton(
       (button) => button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
-        try {
-          this.applyInviteInput(false);
-          await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop");
-          this.close();
-        } catch (error) {
-          new import_obsidian5.Notice(error instanceof Error ? error.message : "Join failed");
-        }
+        this.applyInviteInput(false);
+        await this.submit();
       })
     );
+  }
+  async submit() {
+    try {
+      await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop");
+      this.close();
+    } catch (error) {
+      new import_obsidian5.Notice(error instanceof Error ? error.message : "Join failed");
+    }
   }
   applyInviteInput(render) {
     if (!this.inviteInput) {
@@ -51100,6 +51186,8 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     __publicField(this, "sourcePath");
     __publicField(this, "mountName");
     __publicField(this, "localMountPath");
+    /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
+    __publicField(this, "mountNameTouched", false);
     __publicField(this, "capabilities");
     __publicField(this, "aclRules", []);
     __publicField(this, "subjectType", "team");
@@ -51146,25 +51234,34 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
   }
   renderRoomFields(parent) {
     parent.createEl("h3", { text: "Room" });
-    new import_obsidian6.Setting(parent).setName("Name").addText((text) => text.setValue(this.name).onChange((value) => this.name = value.trim()));
-    new import_obsidian6.Setting(parent).setName("Type").addDropdown(
-      (dropdown) => dropdown.addOption("folder", "Folder").addOption("file", "File").setValue(this.type).onChange((value) => this.type = value)
-    );
-    new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder (or file) in the owner's vault that this room shares - this is the content that actually gets synced to every member.").addText((text) => text.setValue(this.sourcePath).onChange((value) => this.sourcePath = value.trim())).addButton(
-      (button) => button.setButtonText(this.type === "folder" ? "Choose folder" : "Choose file").onClick(() => {
-        new VaultPathSuggestModal(this.app, this.type, (path) => {
-          this.sourcePath = path;
-          if (!this.name) {
-            this.name = basename2(path);
-          }
-          if (!this.mountName) {
-            this.mountName = basename2(path);
-          }
-          this.render();
-        }).open();
+    new import_obsidian6.Setting(parent).setName("Name").addText(
+      (text) => text.setValue(this.name).onChange((value) => {
+        this.name = value.trim();
+        if (!this.mountNameTouched) {
+          this.mountName = sanitizeMountName2(this.name);
+        }
       })
     );
-    new import_obsidian6.Setting(parent).setName("Mount name").addText((text) => text.setValue(this.mountName).onChange((value) => this.mountName = value.trim()));
+    new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder (or file) in the owner's vault that this room shares - this is the content that actually gets synced to every member.").addText(
+      (text) => text.setValue(this.sourcePath).onChange((value) => {
+        this.sourcePath = value.trim();
+        this.type = inferPathType2(this.app, this.sourcePath, this.type);
+      })
+    ).addButton(
+      (button) => button.setButtonText("Choose folder").onClick(() => {
+        new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path, "folder")).open();
+      })
+    ).addButton(
+      (button) => button.setButtonText("Choose file").onClick(() => {
+        new VaultPathSuggestModal(this.app, "file", (path) => this.applyChosenPath(path, "file")).open();
+      })
+    );
+    new import_obsidian6.Setting(parent).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
+      (text) => text.setValue(this.mountName).onChange((value) => {
+        this.mountName = value.trim();
+        this.mountNameTouched = true;
+      })
+    );
     new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
       (this.isOwnRoom() ? "Where this device keeps the room's files. You created this room, so by default it's the source path itself - your existing files stay right where they are, nothing is duplicated." : "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default.") + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
     ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
@@ -51173,8 +51270,23 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     var _a;
     return this.room.ownerUserId === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.userId);
   }
+  applyChosenPath(path, type) {
+    this.sourcePath = path;
+    this.type = type;
+    if (!this.name) {
+      this.name = basename2(path);
+    }
+    if (!this.mountNameTouched) {
+      this.mountName = sanitizeMountName2(this.name || basename2(path));
+    }
+    this.render();
+  }
   renderCapabilities(parent) {
     parent.createEl("h3", { text: "Plugin capabilities" });
+    parent.createEl("p", {
+      cls: "vault-rooms-setting-hint",
+      text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
+    });
     const options = pluginOptions(this.app, this.capabilities);
     for (const capability of this.capabilities) {
       new import_obsidian6.Setting(parent).setName("Plugin").addDropdown((dropdown) => {
@@ -51405,6 +51517,20 @@ function basename2(path) {
   var _a;
   return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
 }
+function inferPathType2(app, path, previous) {
+  if (!path) {
+    return previous;
+  }
+  const file = app.vault.getAbstractFileByPath(path);
+  if (!file) {
+    return previous;
+  }
+  return file instanceof import_obsidian6.TFolder ? "folder" : "file";
+}
+function sanitizeMountName2(name) {
+  const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
+  return cleaned || "Room";
+}
 
 // src/modals/SetupTeamModal.ts
 var import_obsidian7 = require("obsidian");
@@ -51421,7 +51547,11 @@ var SetupTeamModal = class extends import_obsidian7.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Set Up Vault Rooms" });
+    contentEl.createEl("h2", { text: "Set Up Server" });
+    contentEl.createEl("p", {
+      cls: "setting-item-description",
+      text: 'Creates your account and device identity on this relay server. Do this once per server - after that, use "Create team" and "Invite" from the Vault Rooms panel.'
+    });
     new import_obsidian7.Setting(contentEl).setName("Server URL").addText((text) => text.setValue(this.serverUrl).onChange((value) => this.serverUrl = value.trim()));
     new import_obsidian7.Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => this.displayName = value.trim()));
     new import_obsidian7.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName).onChange((value) => this.deviceName = value.trim()));
