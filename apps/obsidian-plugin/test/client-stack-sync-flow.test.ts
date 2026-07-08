@@ -251,6 +251,173 @@ async function setupRoomWithTwoMembers(app: Awaited<ReturnType<typeof createApp>
   return { owner, member, room };
 }
 
+/** Sets up a room owned by A with a team T (member B) granted access via a TEAM-subject ACL rule
+ *  (subjectType:"team"), following the exact RoomSettingsModal.grantAccess -> apiClient.grantAcl
+ *  request shape - unlike setupRoomWithTwoMembers, which grants a USER-subject rule directly to B. */
+async function setupRoomWithTeamGrant(app: Awaited<ReturnType<typeof createApp>>) {
+  const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "ekyo" })).json();
+  const teamId = owner.team.id;
+  const invite = (
+    await app.inject({
+      method: "POST",
+      url: `/api/teams/${teamId}/invites`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+    })
+  ).json();
+  const member = (
+    await app.inject({
+      method: "POST",
+      url: "/api/join",
+      payload: { inviteToken: invite.inviteToken, displayName: "B", deviceName: "B laptop" }
+    })
+  ).json();
+  const room = (
+    await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Team Room", type: "folder", sourcePath: "Team/Room", mountName: "Team Room", capabilities: [] }
+    })
+  ).json().room;
+
+  // Exactly RoomSettingsModal.grantAccess({ subjectType: "team", ... }) -> apiClient.grantAcl ->
+  // POST /api/rooms/:roomId/acl.
+  const grantResponse = await app.inject({
+    method: "POST",
+    url: `/api/rooms/${room.id}/acl`,
+    headers: { authorization: `Bearer ${owner.deviceToken}` },
+    payload: { subjectType: "team", subjectId: teamId, effect: "allow", preset: "editor", pathPattern: "**/*" }
+  });
+
+  return { owner, member, room, teamId, grantResponse };
+}
+
+describe("TEAM-subject ACL grant: full end-to-end sync between two members of the granted team", () => {
+  it("persists the team grant, and lets a team member read/write/delete synced files via team membership alone", async () => {
+    const { app, baseUrl } = await startRelay();
+    const { owner, member, room, teamId, grantResponse } = await setupRoomWithTeamGrant(app);
+
+    // The grant call itself must succeed and be persisted (GET reflects it back).
+    expect(grantResponse.statusCode).toBe(200);
+    const aclAfterGrant = (
+      await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/acl`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      })
+    ).json().aclRules;
+    expect(aclAfterGrant).toContainEqual(
+      expect.objectContaining({ subjectType: "team", subjectId: teamId, effect: "allow", pathPattern: "**/*" })
+    );
+
+    const a = buildClient({ baseUrl, deviceToken: owner.deviceToken, deviceName: "A laptop", roomId: room.id, mountPath: mountPathForRoom({ owner: true, mountRoot: "Vault Rooms", mountName: room.mountName, sourcePath: room.sourcePath }) });
+    const b = buildClient({ baseUrl, deviceToken: member.deviceToken, deviceName: "B laptop", roomId: room.id, mountPath: mountPathForRoom({ owner: false, mountRoot: "Vault Rooms", mountName: room.mountName, sourcePath: room.sourcePath }) });
+
+    // B connecting and subscribing at all proves the broadcast/subscribe canReceive gate resolves
+    // file:read/sync:subscribe for B purely through team membership (repo.listUserTeams(B) includes
+    // T), since B has no USER-subject ACL rule on this room.
+    await connectAndSubscribe(a);
+    await connectAndSubscribe(b);
+
+    // A creates a file -> B (team member, no direct user ACL) must receive it.
+    const aPath = `${a.room.mountPath}/Board.md`;
+    await a.vault.write(aPath, "# Board\nhello team\n");
+    a.vault.fire({ type: "create", path: aPath });
+    await waitFor(async () => (await b.vault.exists(`${b.room.mountPath}/Board.md`)) && (await b.vault.read(`${b.room.mountPath}/Board.md`)) === "# Board\nhello team\n", "B (team member) to receive A's new file");
+
+    // B edits the file -> must be accepted (sync:push + file:write via team ACL) and A must receive it.
+    const bPath = `${b.room.mountPath}/Board.md`;
+    await b.vault.write(bPath, "# Board\nedited by B\n");
+    b.vault.fire({ type: "modify", path: bPath });
+    await waitFor(async () => (await a.vault.exists(`${a.room.mountPath}/Board.md`)) && (await a.vault.read(`${a.room.mountPath}/Board.md`)) === "# Board\nedited by B\n", "A to receive B's team-ACL edit");
+
+    // B deletes the file -> A's copy must be removed.
+    await b.vault.delete(bPath);
+    b.vault.fire({ type: "delete", path: bPath });
+    await waitFor(async () => !(await a.vault.exists(`${a.room.mountPath}/Board.md`)), "A to see B's team-ACL delete applied");
+    expect(a.room.files["Board.md"]).toMatchObject({ serverSha256: null });
+  });
+
+  it("saves room settings (name/sourcePath/mountName/conflictPolicy/capabilities) and round-trips ACL grant/list/remove, on a room with a team grant present", async () => {
+    const { app, baseUrl } = await startRelay();
+    const { owner, room } = await setupRoomWithTeamGrant(app);
+    void baseUrl;
+
+    // Exactly RoomSettingsModal's "Save room settings" button -> plugin.updateRoomSettings ->
+    // apiClient.updateRoom -> PATCH /api/rooms/:roomId (the plugin's apiClient.updateRoom() issues
+    // a PATCH, not a PUT - see apps/obsidian-plugin/src/apiClient.ts).
+    const updatePayload = {
+      name: "Team Room Renamed",
+      type: "folder" as const,
+      sourcePath: "Team/Room",
+      mountName: "Team Room V2",
+      conflictPolicy: "owner_wins" as const,
+      capabilities: [{ pluginId: "com.example.plugin", displayName: "Example Plugin", mode: "optional" }]
+    };
+    const updateResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/rooms/${room.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: updatePayload
+    });
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json().room).toMatchObject({
+      name: "Team Room Renamed",
+      sourcePath: "Team/Room",
+      mountName: "Team Room V2",
+      conflictPolicy: "owner_wins"
+    });
+
+    // Persists: a later GET /api/rooms reflects the saved settings.
+    const listResponse = await app.inject({
+      method: "GET",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json().rooms).toContainEqual(
+      expect.objectContaining({ id: room.id, name: "Team Room Renamed", mountName: "Team Room V2", conflictPolicy: "owner_wins" })
+    );
+
+    // grantAcl -> listRoomAcl shows it -> removeAcl -> gone, exactly as RoomSettingsModal's ACL
+    // rule list/remove controls call plugin.grantRoomAccess/listRoomAcl/removeAcl.
+    const secondGrant = (
+      await app.inject({
+        method: "POST",
+        url: `/api/rooms/${room.id}/acl`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { subjectType: "user", subjectId: owner.user.id, effect: "allow", preset: "reader", pathPattern: "Notes/**/*" }
+      })
+    ).json().aclRule;
+
+    const aclAfterSecondGrant = (
+      await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/acl`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      })
+    ).json().aclRules;
+    expect(aclAfterSecondGrant.map((rule: { id: string }) => rule.id)).toContain(secondGrant.id);
+
+    const removeResponse = await app.inject({
+      method: "DELETE",
+      url: `/api/rooms/${room.id}/acl/${secondGrant.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(removeResponse.statusCode).toBe(200);
+
+    const aclAfterRemove = (
+      await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/acl`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      })
+    ).json().aclRules;
+    expect(aclAfterRemove.map((rule: { id: string }) => rule.id)).not.toContain(secondGrant.id);
+  });
+});
+
 describe("real client stack against a real listening relay (no Obsidian)", () => {
   it("propagates A's new file to B through push -> REST -> broadcast -> RoomSyncSocket -> vault write", async () => {
     const { app, baseUrl } = await startRelay();
