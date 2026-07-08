@@ -21,8 +21,6 @@ export type CreateAppOptions = {
   maxConnections?: number;
   allowRemoteBootstrap?: boolean;
   rateLimit?: {
-    globalMax?: number;
-    globalWindowMs?: number;
     bootstrapMax?: number;
     bootstrapWindowMs?: number;
   };
@@ -32,7 +30,6 @@ export type CreateAppOptions = {
 export async function createApp(options: CreateAppOptions = {}) {
   const maxFileBytes = options.maxFileBytes ?? 5 * 1024 * 1024;
   const maxConnections = options.maxConnections ?? 100;
-  const globalRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.globalMax ?? 120, options.rateLimit?.globalWindowMs ?? 60_000);
   const bootstrapRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.bootstrapMax ?? 5, options.rateLimit?.bootstrapWindowMs ?? 60_000);
   // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
   // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
@@ -61,14 +58,17 @@ export async function createApp(options: CreateAppOptions = {}) {
     done();
   });
 
+  // Only POST /api/bootstrap gets a dedicated request-rate limiter: it is the sole unauthenticated
+  // route that can provision a server owner, so it's a takeover surface worth capping tightly.
+  // There is intentionally no general per-IP request limiter beyond this: authenticated file/sync
+  // traffic (REST reads/writes plus the /sync WebSocket) legitimately scales with vault size - a
+  // single "mount an existing room" reconciliation can fire well over a hundred requests in a
+  // burst - and is already bounded by the WS connection cap (maxConnections) and the body-size
+  // limit above, not by request volume. The other unauthenticated routes (/api/join,
+  // /api/invites/accept) require a valid, single-use invite token and are low-volume by nature.
   app.addHook("onRequest", (request, reply, done) => {
     if (request.method === "POST" && request.url === "/api/bootstrap" && !bootstrapRateLimiter.consume(request.ip)) {
       void reply.status(429).send({ error: { code: "RATE_LIMITED", message: "Too many bootstrap attempts. Try again later." } });
-      return;
-    }
-
-    if (!globalRateLimiter.consume(request.ip)) {
-      void reply.status(429).send({ error: { code: "RATE_LIMITED", message: "Too many requests. Try again later." } });
       return;
     }
 

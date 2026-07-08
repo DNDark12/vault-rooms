@@ -117,6 +117,54 @@ describe("rate limiting and connection caps", () => {
     expect(third.readyState).toBe(WebSocket.OPEN);
     expect(registry.size()).toBe(3);
   });
+
+  // Regression coverage for the reconciliation-burst bug: mounting/reconciling an existing room
+  // pushes every server file read, local file push, and dirty-file retry over plain REST from a
+  // single client IP. That easily exceeded the old per-IP global request budget (120/60s) in well
+  // under 60s, even though every single request is fully authenticated and legitimate. There is no
+  // longer a general per-IP request limiter (see app.ts), so a large authenticated burst must
+  // never come back 429.
+  it("does not 429 a legitimate authenticated sync burst that would have exceeded the old global per-IP request budget", async () => {
+    const { app, owner } = await bootstrapApp();
+
+    const requestCount = 150; // well past the old default globalMax of 120
+    const results = [];
+    for (let i = 0; i < requestCount; i += 1) {
+      results.push(
+        await app.inject({
+          method: "GET",
+          url: "/api/me",
+          remoteAddress: "127.0.0.1",
+          headers: { authorization: `Bearer ${owner.deviceToken}` }
+        })
+      );
+    }
+
+    const rateLimited = results.filter((response) => response.statusCode === 429);
+    expect(rateLimited).toHaveLength(0);
+    expect(results.every((response) => response.statusCode === 200)).toBe(true);
+  });
+
+  it("does not throttle the WebSocket /sync upgrade via a global per-request limiter", async () => {
+    const { app } = await bootstrapApp();
+    const registry = (app as unknown as { testConnectionRegistry: ConnectionRegistry }).testConnectionRegistry;
+
+    // Issue a burst of ordinary HTTP traffic first, then open several WS connections - if the
+    // upgrade request were counted against a global per-IP limiter, later connections would be
+    // rejected with a 429 during the HTTP upgrade handshake.
+    for (let i = 0; i < 130; i += 1) {
+      await app.inject({ method: "GET", url: "/health", remoteAddress: "127.0.0.1" });
+    }
+
+    const first = await connect(app);
+    const second = await connect(app);
+    const third = await connect(app);
+
+    expect(first.readyState).toBe(WebSocket.OPEN);
+    expect(second.readyState).toBe(WebSocket.OPEN);
+    expect(third.readyState).toBe(WebSocket.OPEN);
+    expect(registry.size()).toBe(3);
+  });
 });
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
