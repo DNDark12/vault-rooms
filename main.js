@@ -43722,7 +43722,12 @@ var RelayApiClient = class {
       },
       body: options.body ? JSON.stringify(options.body) : void 0
     });
-    const body = await response.json();
+    let body;
+    try {
+      body = await response.json();
+    } catch (e) {
+      throw toRelayError(void 0, "Unexpected non-JSON response from relay");
+    }
     if (!response.ok) {
       const error = toRelayError(body);
       if (error.code === "UNAUTHORIZED") {
@@ -43733,9 +43738,9 @@ var RelayApiClient = class {
     return body;
   }
 };
-function toRelayError(body) {
+function toRelayError(body, fallbackMessage = "Relay request failed") {
   var _a, _b, _c, _d;
-  const error = new Error((_b = (_a = body == null ? void 0 : body.error) == null ? void 0 : _a.message) != null ? _b : "Relay request failed");
+  const error = new Error((_b = (_a = body == null ? void 0 : body.error) == null ? void 0 : _a.message) != null ? _b : fallbackMessage);
   error.code = (_c = body == null ? void 0 : body.error) == null ? void 0 : _c.code;
   if (((_d = body == null ? void 0 : body.error) == null ? void 0 : _d.details) && typeof body.error.details === "object") {
     Object.assign(error, body.error.details);
@@ -43746,6 +43751,21 @@ function toRelayError(body) {
 // src/syncClient.ts
 function mountPathForRoom(input) {
   return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.mountName].map(stripSlashes).join("/");
+}
+function resolveRoomMountPath(input) {
+  var _a;
+  if (!input.owner) {
+    const configured = (_a = input.configuredOverride) == null ? void 0 : _a.trim();
+    if (configured) {
+      return configured;
+    }
+  }
+  return mountPathForRoom({
+    owner: input.owner,
+    mountRoot: input.mountRoot,
+    mountName: input.mountName,
+    sourcePath: input.sourcePath
+  });
 }
 async function createConflictCopyPath(vault, path, deviceName, now = /* @__PURE__ */ new Date()) {
   const slash = path.lastIndexOf("/");
@@ -43836,7 +43856,6 @@ var VaultSyncEngine = class _VaultSyncEngine {
     };
   }
   async pushLocalChange(room, relativePath, deviceName) {
-    var _a;
     if (isConflictCopyPath(relativePath)) {
       return;
     }
@@ -43851,7 +43870,7 @@ var VaultSyncEngine = class _VaultSyncEngine {
       room.files[relativePath] = { ...current, localSha256: localSha, dirty: false, localDeleted: false };
       return;
     }
-    const baseVersion = (_a = current == null ? void 0 : current.serverVersion) != null ? _a : 0;
+    const baseVersion = (current == null ? void 0 : current.serverSha256) != null ? current.serverVersion : 0;
     try {
       const result = await this.api.writeFile(room.roomId, relativePath, baseVersion, content);
       room.files[relativePath] = {
@@ -45298,9 +45317,18 @@ function registerFileRoutes(app, repo, options) {
   app.get("/api/rooms/:roomId/files", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const room = requireRoom(repo, request.params.roomId);
-    assertRoomPermission({ repo, principal, room, permission: "file:read" });
+    const listAclRules = repo.listAclRulesForRoom(room.id);
     return {
-      files: repo.listFiles(room.id).map((file) => ({
+      files: repo.listFiles(room.id).filter(
+        (file) => hasRoomPermission({
+          repo,
+          principal,
+          room,
+          permission: "file:read",
+          relativePath: file.relative_path,
+          aclRules: listAclRules
+        })
+      ).map((file) => ({
         relativePath: file.relative_path,
         kind: file.kind,
         version: file.version,
@@ -46976,7 +47004,10 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     this.plugin = plugin;
     this.room = room;
     __publicField(this, "name");
-    __publicField(this, "type");
+    /** Rooms are always folder rooms now - see CreateRoomModal.ts's matching note. Kept as a literal
+     *  "folder" purely because updateRoomSettings' input type still carries a type field the server
+     *  stores for back-compat with rooms created before this change. */
+    __publicField(this, "type", "folder");
     __publicField(this, "sourcePath");
     __publicField(this, "mountName");
     __publicField(this, "localMountPath");
@@ -46992,7 +47023,6 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     __publicField(this, "pathPattern", "**/*");
     __publicField(this, "customPermissions", /* @__PURE__ */ new Set(["room:read", "file:read", "sync:subscribe"]));
     this.name = room.name;
-    this.type = room.type;
     this.sourcePath = room.sourcePath;
     this.mountName = room.mountName;
     this.conflictPolicy = room.conflictPolicy;
@@ -47038,29 +47068,31 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
         }
       })
     );
-    new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder (or file) in the owner's vault that this room shares - this is the content that actually gets synced to every member.").addText(
-      (text) => text.setValue(this.sourcePath).onChange((value) => {
-        this.sourcePath = value.trim();
-        this.type = inferPathType(this.app, this.sourcePath, this.type);
-      })
-    ).addButton(
-      (button) => button.setButtonText("Choose folder").onClick(() => {
-        new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path, "folder")).open();
-      })
-    ).addButton(
-      (button) => button.setButtonText("Choose file").onClick(() => {
-        new VaultPathSuggestModal(this.app, "file", (path) => this.applyChosenPath(path, "file")).open();
-      })
-    );
+    const isOwner = this.isOwnRoom();
+    if (isOwner) {
+      new import_obsidian6.Setting(parent).setName("Room folder").setDesc("The folder in your vault that this room shares - this is the content that actually gets synced to every member.").addText(
+        (text) => text.setValue(this.sourcePath).onChange((value) => {
+          this.sourcePath = value.trim();
+        })
+      ).addButton(
+        (button) => button.setButtonText("Choose folder").onClick(() => {
+          new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
+        })
+      );
+    } else {
+      new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder in the owner's vault that this room shares - this is the content that actually gets synced to every member. Only the owner can change this.").addText((text) => text.setValue(this.sourcePath).setDisabled(true));
+    }
     new import_obsidian6.Setting(parent).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
       (text) => text.setValue(this.mountName).onChange((value) => {
         this.mountName = value.trim();
         this.mountNameTouched = true;
       })
     );
-    new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
-      (this.isOwnRoom() ? "Where this device keeps the room's files. You created this room, so by default it's the source path itself - your existing files stay right where they are, nothing is duplicated." : "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default.") + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
-    ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
+    if (!isOwner) {
+      new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
+        "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default." + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
+      ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
+    }
     new import_obsidian6.Setting(parent).setName("When edits conflict").setDesc(
       "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
     ).addDropdown(
@@ -47073,9 +47105,8 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
     var _a;
     return this.room.ownerUserId === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.userId);
   }
-  applyChosenPath(path, type) {
+  applyChosenPath(path) {
     this.sourcePath = path;
-    this.type = type;
     if (!this.name) {
       this.name = basename2(path);
     }
@@ -47318,16 +47349,6 @@ var RoomSettingsModal = class extends import_obsidian6.Modal {
 function basename2(path) {
   var _a;
   return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
-}
-function inferPathType(app, path, previous) {
-  if (!path) {
-    return previous;
-  }
-  const file = app.vault.getAbstractFileByPath(path);
-  if (!file) {
-    return previous;
-  }
-  return file instanceof import_obsidian6.TFolder ? "folder" : "file";
 }
 function sanitizeMountName2(name) {
   const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
@@ -48606,7 +48627,9 @@ ${invite.joinUrl}`, invite.joinUrl).open();
   async updateRoomSettings(roomId, input, localMountPath) {
     const server = this.requireActiveServer();
     await this.apiFor(server).updateRoom(roomId, input);
-    if (localMountPath.trim()) {
+    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+    const isOwner = (room == null ? void 0 : room.ownerUserId) === server.userId;
+    if (!isOwner && localMountPath.trim()) {
       this.settings.roomMountPaths[roomId] = localMountPath.trim();
     } else {
       delete this.settings.roomMountPaths[roomId];
@@ -48827,6 +48850,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     (_a = this.roomWatchers.get(roomId)) == null ? void 0 : _a();
     this.roomWatchers.delete(roomId);
     delete this.settings.mountedRooms[roomId];
+    delete this.settings.roomMountPaths[roomId];
     await this.saveSettings();
     this.renderOpenRoomsViews();
     new import_obsidian10.Notice(`Forgot ${(_b = room == null ? void 0 : room.name) != null ? _b : "room"} on this device`);
@@ -48896,15 +48920,11 @@ ${invite.joinUrl}`, invite.joinUrl).open();
    * folder under the configured mount root, since they have no pre-existing copy of the room.
    */
   roomMountPathFor(room) {
-    var _a;
-    const configured = (_a = this.settings.roomMountPaths[room.id]) == null ? void 0 : _a.trim();
-    if (configured) {
-      return configured;
-    }
     const server = this.requireActiveServer();
     const isOwner = room.ownerUserId === server.userId;
-    return mountPathForRoom({
+    return resolveRoomMountPath({
       owner: isOwner,
+      configuredOverride: this.settings.roomMountPaths[room.id],
       mountRoot: this.settings.mountRoot,
       mountName: room.mountName,
       sourcePath: room.sourcePath
@@ -49048,6 +49068,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
         delete this.settings.mountedRooms[roomId];
+        delete this.settings.roomMountPaths[roomId];
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new import_obsidian10.Notice(`Your access to ${(_a2 = room == null ? void 0 : room.name) != null ? _a2 : "a room"} was revoked.`);
