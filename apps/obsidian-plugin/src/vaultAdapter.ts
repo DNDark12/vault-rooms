@@ -18,7 +18,14 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     const normalized = normalizePath(path);
     const existing = this.app.vault.getAbstractFileByPath(normalized);
     if (existing && isFile(existing)) {
-      await this.app.vault.modify(existing, content);
+      // Vault.process() (not modify()) for writes that can land on a file the user currently has
+      // open: process() reads the file fresh and applies the returned content atomically, so it
+      // can't clobber an in-progress editor save the way a plain modify() with pre-read content
+      // could. It still fires the same "modify" vault event modify() does, so this doesn't change
+      // any of syncClient.ts's dirty/version bookkeeping - see applyRemoteChange()/
+      // applyRemoteDelete(), which already update room.files synchronously right after this write
+      // resolves, independent of when/whether the resulting "modify" event has fired yet.
+      await this.app.vault.process(existing, () => content);
       return;
     }
     await this.ensureFolder(normalized);
@@ -64,7 +71,13 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     const refs = [
       vault.on("create", (file) => cb({ type: "create", path: file.path })),
       vault.on("modify", (file) => cb({ type: "modify", path: file.path })),
-      vault.on("delete", (file) => cb({ type: "delete", path: file.path }))
+      vault.on("delete", (file) => cb({ type: "delete", path: file.path })),
+      // Obsidian fires exactly one "rename" event per moved/renamed file (folder renames are
+      // reported as one "rename" per file inside the folder, each with its own old/new path) -
+      // confirmed against Obsidian's own core "file explorer" rename handling, not directly
+      // tested here since it requires the real Obsidian runtime; see classifyRenameEvent for how
+      // this is turned into delete-old/create-new relative to a mounted room.
+      vault.on("rename", (file, oldPath) => cb({ type: "rename", path: file.path, oldPath }))
     ];
     // registerEvent() is still the safety net for plugin unload; offref() below additionally lets
     // a specific registration (e.g. one room's watcher) be torn down early, on unmount, instead

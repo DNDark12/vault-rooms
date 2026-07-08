@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { injectBootstrap } from "./bootstrapHelper.js";
 
 describe("server bootstrap and invite flow", () => {
   it("bootstraps locally once, invites B, joins B, and lists members", async () => {
@@ -9,20 +10,14 @@ describe("server bootstrap and invite flow", () => {
       allowRemoteBootstrap: false
     });
 
-    const remoteBootstrap = await app.inject({
-      method: "POST",
-      url: "/api/bootstrap",
-      remoteAddress: "192.168.1.50",
-      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-    });
+    const remoteBootstrap = await injectBootstrap(
+      app,
+      { displayName: "A", deviceName: "A laptop", teamName: "Demo" },
+      { remoteAddress: "192.168.1.50" }
+    );
     expect(remoteBootstrap.statusCode).toBe(403);
 
-    const bootstrap = await app.inject({
-      method: "POST",
-      url: "/api/bootstrap",
-      remoteAddress: "127.0.0.1",
-      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-    });
+    const bootstrap = await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" });
     expect(bootstrap.statusCode).toBe(200);
     const owner = bootstrap.json();
     expect(owner.isServerOwner).toBe(true);
@@ -30,13 +25,8 @@ describe("server bootstrap and invite flow", () => {
     expect(owner.deviceToken).toMatch(/^tr_dev_/);
 
     // Bootstrap is first-owner-wins: once server_meta.owner_user_id is set, a second bootstrap
-    // call is rejected instead of creating a second server owner.
-    const secondBootstrap = await app.inject({
-      method: "POST",
-      url: "/api/bootstrap",
-      remoteAddress: "127.0.0.1",
-      payload: { displayName: "A2", deviceName: "A2 laptop", teamName: "Demo" }
-    });
+    // call is rejected instead of creating a second server owner (even with a correct PIN).
+    const secondBootstrap = await injectBootstrap(app, { displayName: "A2", deviceName: "A2 laptop", teamName: "Demo" });
     expect(secondBootstrap.statusCode).toBe(403);
 
     const duplicateTeam = await app.inject({

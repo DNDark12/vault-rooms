@@ -11,7 +11,6 @@ export type IdPrefix =
   | "fil"
   | "ver"
   | "aud"
-  | "agt"
   | "req";
 
 export function createId(prefix: IdPrefix): string {

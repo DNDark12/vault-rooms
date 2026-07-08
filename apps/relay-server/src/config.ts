@@ -22,7 +22,8 @@ export type ServerRuntimeConfig = {
 
 export async function choosePort(
   env: EnvLike = process.env,
-  isPortAvailable: (port: number) => Promise<boolean> = defaultIsPortAvailable
+  isPortAvailable: (port: number) => Promise<boolean> = defaultIsPortAvailable,
+  preferredPort?: number
 ): Promise<number> {
   if (env.PORT) {
     const port = parsePort(env.PORT);
@@ -32,7 +33,14 @@ export async function choosePort(
     return port;
   }
 
+  if (preferredPort !== undefined && (await isPortAvailable(preferredPort))) {
+    return preferredPort;
+  }
+
   for (let port = DEFAULT_PORT; port <= MAX_FALLBACK_PORT; port += 1) {
+    if (port === preferredPort) {
+      continue;
+    }
     if (await isPortAvailable(port)) {
       return port;
     }
@@ -41,9 +49,9 @@ export async function choosePort(
   throw new Error(`No free port found between ${DEFAULT_PORT} and ${MAX_FALLBACK_PORT}`);
 }
 
-export async function resolveRuntimeConfig(env: EnvLike = process.env): Promise<ServerRuntimeConfig> {
+export async function resolveRuntimeConfig(env: EnvLike = process.env, preferredPort?: number): Promise<ServerRuntimeConfig> {
   const host = env.HOST ?? "127.0.0.1";
-  const port = await choosePort(env);
+  const port = await choosePort(env, defaultIsPortAvailable, preferredPort);
   return {
     host,
     port,

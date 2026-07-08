@@ -17,6 +17,15 @@ export type UserRow = {
   updated_at: string;
 };
 
+export type DeviceRow = {
+  id: string;
+  user_id: string;
+  display_name: string;
+  revoked_at: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+};
+
 export type DevicePrincipalRow = {
   device_id: string;
   device_display_name: string;

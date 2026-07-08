@@ -15,6 +15,7 @@ import {
 import type {
   AclRuleRow,
   DevicePrincipalRow,
+  DeviceRow,
   FileRow,
   FileVersionWithContentRow,
   InviteRow,
@@ -146,6 +147,19 @@ export class RelayRepository {
       )
       .get(hashToken(token)) as DevicePrincipalRow | undefined;
     return row ? mapPrincipal(row) : null;
+  }
+
+  // Registers an additional device for an existing user. There is no REST route for this yet
+  // (self-service multi-device enrollment is a separate slice) - this exists so integration tests
+  // can construct a "one user, two devices" fixture without duplicating this insert inline.
+  addDevice(input: { userId: string; deviceName: string }): { deviceId: string; deviceToken: string } {
+    const now = new Date().toISOString();
+    const deviceId = createId("dev");
+    const deviceToken = createToken("dev");
+    this.db
+      .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
+      .run(deviceId, input.userId, input.deviceName, hashToken(deviceToken), now);
+    return { deviceId, deviceToken };
   }
 
   listUserTeams(userId: string): UserTeam[] {
@@ -327,6 +341,24 @@ export class RelayRepository {
       }
     });
     revoke();
+  }
+
+  getDevice(deviceId: string): DeviceRow | null {
+    return (this.db.prepare("select * from devices where id = ?").get(deviceId) as DeviceRow | undefined) ?? null;
+  }
+
+  revokeDevice(input: { deviceId: string; actorUserId: string }): void {
+    const now = new Date().toISOString();
+    this.db.prepare("update devices set revoked_at = ? where id = ? and revoked_at is null").run(now, input.deviceId);
+    this.audit({
+      teamId: null,
+      actorType: "user",
+      actorId: input.actorUserId,
+      action: "device.revoked",
+      resourceType: "device",
+      resourceId: input.deviceId,
+      metadata: {}
+    });
   }
 
   createTeam(input: { name: string; ownerUserId: string }): TeamRow {
@@ -733,6 +765,19 @@ export class RelayRepository {
 
   listTeams(): TeamRow[] {
     return this.db.prepare("select * from teams order by created_at asc").all() as TeamRow[];
+  }
+
+  /**
+   * Minimal team directory (id/name/slug only, no ownerUserId or membership) for every team on the
+   * server - safe to expose to any active principal, e.g. for the room ACL "grant to a team"
+   * picker. Deliberately narrower than listTeams(), which exposes ownerUserId.
+   */
+  listTeamsDirectory(): Array<{ id: string; name: string; slug: string }> {
+    return this.db.prepare("select id, name, slug from teams order by created_at asc").all() as Array<{
+      id: string;
+      name: string;
+      slug: string;
+    }>;
   }
 
   getUser(userId: string): UserRow | null {

@@ -26,6 +26,14 @@ export type TeamSummary = {
   ownerUserId: string;
 };
 
+/** Minimal directory entry for any team on the server - no ownerUserId or membership - used only
+ *  to populate pickers (e.g. the room ACL "grant to a team" picker), never team-management UI. */
+export type TeamDirectoryEntry = {
+  id: string;
+  slug: string;
+  name: string;
+};
+
 export type MyTeamSummary = {
   id: string;
   name: string;
@@ -81,7 +89,7 @@ export class RelayApiClient implements RelayFileApi {
     }
   }
 
-  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string }) {
+  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; pin: string }) {
     return this.request("/api/bootstrap", {
       method: "POST",
       body: input
@@ -114,6 +122,12 @@ export class RelayApiClient implements RelayFileApi {
 
   async listTeams(): Promise<{ teams: TeamSummary[] }> {
     return this.request("/api/teams");
+  }
+
+  /** Every team on the server (id/name/slug only) - for pickers, e.g. the room ACL "Team" dropdown.
+   *  Do not use for team-management UI, which needs ownerUserId/role from listTeams()/me(). */
+  async listTeamDirectory(): Promise<{ teams: TeamDirectoryEntry[] }> {
+    return this.request("/api/team-directory");
   }
 
   async createTeam(name: string): Promise<{ team: TeamSummary }> {
@@ -228,8 +242,8 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async deleteFile(roomId: string, relativePath: string, baseVersion: number): Promise<void> {
-    await this.request(`/api/rooms/${roomId}/files/delete`, {
+  async deleteFile(roomId: string, relativePath: string, baseVersion: number): Promise<{ ok: true; relativePath: string; version: number }> {
+    return this.request(`/api/rooms/${roomId}/files/delete`, {
       method: "POST",
       body: { relativePath, baseVersion }
     });

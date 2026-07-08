@@ -16,6 +16,8 @@ export type ServerConnection = {
 export type EmbeddedServerSettings = {
   /** Leave undefined to auto-pick a free port starting at 8787. */
   port?: number;
+  /** Runtime-managed remembered auto port. Leave undefined for first auto-pick. */
+  pinnedPort?: number;
   allowRemoteBootstrap: boolean;
   maxFileBytes: number;
   /** Start the embedded relay server automatically when Obsidian loads this vault. */

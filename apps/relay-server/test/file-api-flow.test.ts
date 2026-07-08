@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { injectBootstrap } from "./bootstrapHelper.js";
 
 async function setupFileFlow() {
   const app = await createApp({
@@ -7,14 +8,7 @@ async function setupFileFlow() {
     publicUrl: "http://127.0.0.1:8787",
     maxFileBytes: 32
   });
-  const owner = (
-    await app.inject({
-      method: "POST",
-      url: "/api/bootstrap",
-      remoteAddress: "127.0.0.1",
-      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-    })
-  ).json();
+  const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
   const invite = (
     await app.inject({
       method: "POST",

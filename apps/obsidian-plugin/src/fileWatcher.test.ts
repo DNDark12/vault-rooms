@@ -1,0 +1,145 @@
+import { describe, expect, it } from "vitest";
+import { classifyRenameEvent, isWatchableChange, registerMountedRoomWatcher } from "./fileWatcher.js";
+import type { MountedRoomState, VaultAdapter, VaultChangeEvent } from "./syncClient.js";
+
+function createRoom(): MountedRoomState {
+  return { roomId: "room_1", mountPath: "Vault Rooms/demo/Projects Demo", files: {} };
+}
+
+class FakeVaultAdapter implements VaultAdapter {
+  private handlers: Array<(event: VaultChangeEvent) => void> = [];
+
+  async read(): Promise<string> {
+    return "";
+  }
+  async write(): Promise<void> {}
+  async readBinary(): Promise<ArrayBuffer> {
+    return new ArrayBuffer(0);
+  }
+  async writeBinary(): Promise<void> {}
+  async delete(): Promise<void> {}
+  async exists(): Promise<boolean> {
+    return false;
+  }
+  async list(): Promise<string[]> {
+    return [];
+  }
+  onChange(cb: (event: VaultChangeEvent) => void): () => void {
+    this.handlers.push(cb);
+    return () => {
+      this.handlers = this.handlers.filter((handler) => handler !== cb);
+    };
+  }
+  emit(event: VaultChangeEvent): void {
+    for (const handler of this.handlers) {
+      handler(event);
+    }
+  }
+}
+
+describe("classifyRenameEvent", () => {
+  const room = createRoom();
+
+  it("classifies a rename where both old and new paths stay inside the mounted room", () => {
+    expect(
+      classifyRenameEvent("Vault Rooms/demo/Projects Demo/Old.md", "Vault Rooms/demo/Projects Demo/New.md", room)
+    ).toEqual({ kind: "rename", oldRelativePath: "Old.md", relativePath: "New.md" });
+  });
+
+  it("classifies a move OUT of the room as a delete of the old relative path", () => {
+    expect(
+      classifyRenameEvent("Vault Rooms/demo/Projects Demo/Old.md", "Elsewhere/Old.md", room)
+    ).toEqual({ kind: "delete", relativePath: "Old.md" });
+  });
+
+  it("classifies a move INTO the room as a create of the new relative path", () => {
+    expect(
+      classifyRenameEvent("Elsewhere/New.md", "Vault Rooms/demo/Projects Demo/New.md", room)
+    ).toEqual({ kind: "create", relativePath: "New.md" });
+  });
+
+  it("ignores a rename entirely outside the room", () => {
+    expect(classifyRenameEvent("Elsewhere/A.md", "Elsewhere/B.md", room)).toEqual({ kind: "ignore" });
+  });
+
+  it("excludes conflict-copy paths on either side", () => {
+    const conflictPath = "Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md";
+    expect(classifyRenameEvent(conflictPath, "Vault Rooms/demo/Projects Demo/Board.md", room)).toEqual({
+      kind: "create",
+      relativePath: "Board.md"
+    });
+    expect(classifyRenameEvent("Vault Rooms/demo/Projects Demo/Board.md", conflictPath, room)).toEqual({
+      kind: "delete",
+      relativePath: "Board.md"
+    });
+  });
+
+  it("ignores an ineligible file type renamed within the room", () => {
+    expect(
+      classifyRenameEvent("Vault Rooms/demo/Projects Demo/Old.exe", "Vault Rooms/demo/Projects Demo/New.exe", room)
+    ).toEqual({ kind: "ignore" });
+  });
+});
+
+describe("registerMountedRoomWatcher with rename events", () => {
+  it("dispatches a rename inside the room as a delete of the old path plus a create of the new path", () => {
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const received: Array<{ type: string; relativePath: string }> = [];
+    registerMountedRoomWatcher(vault, room, (event, relativePath) => {
+      received.push({ type: event.type, relativePath });
+    });
+
+    vault.emit({ type: "rename", path: "Vault Rooms/demo/Projects Demo/New.md", oldPath: "Vault Rooms/demo/Projects Demo/Old.md" });
+
+    expect(received).toEqual([
+      { type: "delete", relativePath: "Old.md" },
+      { type: "create", relativePath: "New.md" }
+    ]);
+  });
+
+  it("dispatches a move out of the room as a plain delete", () => {
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const received: Array<{ type: string; relativePath: string }> = [];
+    registerMountedRoomWatcher(vault, room, (event, relativePath) => {
+      received.push({ type: event.type, relativePath });
+    });
+
+    vault.emit({ type: "rename", path: "Elsewhere/Old.md", oldPath: "Vault Rooms/demo/Projects Demo/Old.md" });
+
+    expect(received).toEqual([{ type: "delete", relativePath: "Old.md" }]);
+  });
+
+  it("dispatches a move into the room as a plain create", () => {
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const received: Array<{ type: string; relativePath: string }> = [];
+    registerMountedRoomWatcher(vault, room, (event, relativePath) => {
+      received.push({ type: event.type, relativePath });
+    });
+
+    vault.emit({ type: "rename", path: "Vault Rooms/demo/Projects Demo/New.md", oldPath: "Elsewhere/New.md" });
+
+    expect(received).toEqual([{ type: "create", relativePath: "New.md" }]);
+  });
+
+  it("still dispatches plain create/modify/delete events as before", () => {
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const received: Array<{ type: string; relativePath: string }> = [];
+    registerMountedRoomWatcher(vault, room, (event, relativePath) => {
+      received.push({ type: event.type, relativePath });
+    });
+
+    vault.emit({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" });
+    expect(received).toEqual([{ type: "modify", relativePath: "Board.md" }]);
+  });
+});
+
+describe("isWatchableChange (unchanged behavior)", () => {
+  it("still matches plain create/modify/delete events", () => {
+    const room = createRoom();
+    expect(isWatchableChange({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" }, room)).toBe("Board.md");
+  });
+});

@@ -227,8 +227,10 @@ export class RoomSyncSocket {
     let changed = false;
     for (const file of files) {
       const local = room.files[file.relativePath];
-      if (local?.dirty) {
-        // A local edit is pending push; let the normal push/conflict path reconcile this file.
+      if (local?.dirty || local?.localDeleted) {
+        // A local edit or delete is pending push; let the normal push/conflict path reconcile
+        // this file instead of auto-applying the remote state over it (which would otherwise
+        // silently resurrect a file the user just deleted, or clobber an unpushed edit).
         continue;
       }
       if (file.deleted) {

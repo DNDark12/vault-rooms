@@ -13,7 +13,7 @@ export class InviteMemberModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Invite member" });
+    this.setTitle("Invite member");
     contentEl.createEl("p", {
       text: "Send this link to a teammate on the same LAN. Clicking it opens Obsidian and pre-fills the join form (Vault Rooms plugin must already be installed on their side)."
     });

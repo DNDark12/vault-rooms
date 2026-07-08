@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { injectBootstrap } from "./bootstrapHelper.js";
 
 async function bootstrapOwnerAndMember() {
   const app = await createApp({
@@ -7,14 +8,7 @@ async function bootstrapOwnerAndMember() {
     publicUrl: "http://127.0.0.1:8787",
     allowRemoteBootstrap: false
   });
-  const owner = (
-    await app.inject({
-      method: "POST",
-      url: "/api/bootstrap",
-      remoteAddress: "127.0.0.1",
-      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-    })
-  ).json();
+  const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
   const invite = (
     await app.inject({
       method: "POST",

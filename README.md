@@ -8,7 +8,7 @@ Create a room, invite members, grant fine-grained file permissions, and collabor
 
 Vault Rooms is LAN-first, deny-by-default, and designed to avoid exposing raw vault access.
 
-Teams are the identity and invite boundary. Rooms are the shared folder/file boundary. A whole team can be added to a room by granting access to the `member` and `admin` roles; individual members can also be granted or denied access per path pattern.
+Identity is per-server: each device you join gets one device token for that server (its friends list, teams, and rooms). Teams are named permission groups you can grant to a room as a whole; rooms are the shared folder/file boundary and are owned independently of any team. A room's access list (ACL) grants or denies access to a **user** or a whole **team** per path pattern; team roles (`admin`/`member`) only govern who can manage the team, not room access.
 
 ## What it is not
 
@@ -34,18 +34,24 @@ The repo is a pnpm TypeScript monorepo:
 
 There are two ways to run the relay, and both speak the exact same protocol:
 
-1. **Embedded (recommended for most teams).** The Obsidian plugin imports `vault-rooms-relay` directly and runs it in-process. Install the plugin, click **Start Server** in the Vault Rooms panel (or Settings → Vault Rooms), and it's listening - no terminal, no separate install, no `.env` file. Config lives in the plugin's Settings tab and is stored the same way as any other Obsidian plugin setting.
+1. **Embedded (recommended for most teams).** The Obsidian plugin imports `vault-rooms-relay` directly and runs it in-process. Install the plugin, click **Start server** in the Vault Rooms panel (or Settings → Vault Rooms), and it's listening - no terminal, no separate install, no `.env` file. Config lives in the plugin's Settings tab and is stored the same way as any other Obsidian plugin setting.
 2. **Standalone (`pnpm dev:server`).** The original CLI process, configured via `.env`/environment variables. Useful for development, for running the relay on a dedicated always-on machine instead of someone's laptop, or for team sizes where a personal-laptop-as-server model doesn't fit (see "Team size and scaling" below).
 
 Whoever's device is running the relay (embedded or standalone) is "the server." Everyone else's Obsidian plugin is a client that only ever makes outbound HTTP/WebSocket calls to that one server - they never bind a port or run their own relay for the same team (see "Do other members need to run their own server?" below).
 
 ## Security model
 
-Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes and only SHA-256 token hashes are stored in SQLite.
+Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes, are generated with a CSPRNG (`crypto.randomBytes`), and only SHA-256 token hashes are stored in SQLite. Per-path `file:read` is enforced on every channel that carries file content - the REST download endpoint, live WebSocket broadcasts, **and** the initial room snapshot a device gets on subscribe/reconnect - so a member whose access list only grants some paths never receives the content (or even the filenames/hashes) of the paths they can't read.
+
+Access can be withdrawn at three granularities: remove a single ACL rule from a room, remove a user from a team, or revoke a user server-wide. A single lost/compromised device can also be revoked on its own (server owner → `POST /api/friends/:userId/devices/:deviceId/revoke`) without kicking that user's other devices - the revoked device's token stops working on its next request and its live WebSocket session is closed immediately.
 
 This project does not sandbox arbitrary Obsidian community plugins. If a local plugin can read a synced Markdown file in B's vault, Vault Rooms cannot prevent that local plugin from reading it.
 
-v0.1 has no TLS: use only on trusted networks. Tokens and content travel in plaintext over LAN. The embedded server always binds every network interface (`0.0.0.0`) so teammates can reach it - there is no "this device only" mode, since a server nobody else can reach isn't useful, and the invite flow (plus localhost-only bootstrap by default) already gates what an unauthenticated request can do. The standalone CLI still binds via `HOST`/`PORT` if you need a different setup.
+v0.1 has no TLS: use only on trusted networks. Tokens and content travel in plaintext over LAN. The embedded server always binds every network interface (`0.0.0.0`) so teammates can reach it - there is no "this device only" mode, since a server nobody else can reach isn't useful.
+
+The only unauthenticated endpoint is the one-time **bootstrap** that creates the very first owner. It is protected on two independent axes so a malicious web page can't provision itself as owner via a DNS-rebinding request to your loopback/LAN address: (1) a random **bootstrap PIN** is generated per server process and required in the bootstrap request - the embedded plugin reads it in-process (transparent to you) and the standalone CLI prints it to the console; (2) the request's `Host` header must match the server's own address, which a rebinding attacker's domain never will. Once the owner exists, bootstrap is closed entirely. The standalone CLI still binds via `HOST`/`PORT` if you need a different setup.
+
+CORS is intentionally permissive (`*`): the client talks to the relay from Obsidian's Electron process (not a browser page origin) and auth is Bearer-token, not cookie-based, so wildcard CORS carries little risk once bootstrap is PIN+Host gated. This will be revisited if the client ever moves to a real browser origin.
 
 **`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The server auto-detects its real LAN IP (a private address like `192.168.x.x` or `10.x.x.x` - specific to your own network, never shown here) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates. If auto-detection fails (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server.
 
@@ -92,12 +98,12 @@ Room capabilities are metadata. A room can recommend Kanban or Tasks, and the pl
 
 ## Source path vs. local mount path
 
-When creating a room, **source path** is the folder (or file) in the *owner's* vault that the room shares - this is the one and only real copy that other members' edits ultimately reconcile against.
+When creating a room, **source path** is the folder in the *owner's* vault that the room shares - this is the one and only real copy that other members' edits ultimately reconcile against. (Rooms are always folder-scoped; the earlier single-file room option was removed because the sync engine is folder/prefix based.)
 
 **Local mount path** is where a given *device* keeps its working copy of that room, and it means something different depending on who you are:
 
 - **On the room owner's own device**, mounting defaults to the source path itself - there is no separate copy. The owner's existing files stay exactly where they are; mounting just starts watching and syncing them in place. The first time the owner mounts a room, any pre-existing files under the source path that the relay hasn't seen yet are pushed up automatically, so teammates who join afterward see real content immediately instead of an empty room.
-- **On every other member's device**, mounting downloads the room into a fresh folder - by default `<Mount root>/<team-slug>/<mount name>` (Mount root is set in Settings → Vault Rooms → Sync) - since they have no pre-existing copy to reuse.
+- **On every other member's device**, mounting downloads the room into a fresh folder - by default `<Mount root>/<mount name>` (Mount root is set in Settings → Vault Rooms → Sync) - since they have no pre-existing copy to reuse.
 
 You can override the computed default for any room/device via the "Local mount path" field in that room's Settings modal, e.g. to point a member's copy somewhere other than the default mount-root location.
 
@@ -105,7 +111,9 @@ You can override the computed default for any room/device via the "Local mount p
 
 Default port is `8787`. If a port is unset and the default is busy, the server tries `8788` through `8797`. If a port is explicitly set, only that port is attempted and a busy port exits with a clear error.
 
-- **Embedded (in Obsidian):** configure Host/port/LAN access in Settings → Vault Rooms → Relay server, then use the Start/Stop button. Nothing is read from `.env` in this mode.
+Because invite links and saved logins embed a concrete port, the embedded server **pins** the port it successfully binds (stored separately from any explicit user-set port, so an explicit choice is never overridden). Subsequent starts reuse that pinned port first; only if it is genuinely unavailable does it fall back to scanning again, and when that happens you get a persistent notice that previously issued invite links may need regenerating. A busy port that turns out to be a leftover instance of Vault Rooms itself (detected via a `/health` name probe) is called out distinctly from one held by an unrelated app.
+
+- **Embedded (in Obsidian):** configure the relay in Settings → Vault Rooms → Relay server (Public URL override, Port, Allow remote bootstrap, Max synced file size, Start automatically), then use the Start/Stop button. There is no Host setting - the embedded server always binds every LAN interface (`0.0.0.0`). Nothing is read from `.env` in this mode.
 - **Standalone (`pnpm dev:server`):** configured via environment variables - see `.env.example`. Useful for development or for hosting the relay on a dedicated always-on machine rather than a personal laptop.
 
 ## Installing the Obsidian plugin manually
@@ -117,7 +125,7 @@ Default port is `8787`. If a port is unset and the default is busy, the server t
 
 ## Invite links
 
-Creating an invite (Team Members → Invite Member/Admin) generates a link like:
+Creating an invite (Vault Rooms panel → **Teams** section → a team card → **Invite link**) generates a link like:
 
 ```
 obsidian://vault-rooms?mode=join&server=http%3A%2F%2F<host-LAN-IP>%3A8787&token=tr_inv_...
@@ -135,18 +143,20 @@ The link only works if:
 
 ## Do other members need to run their own server?
 
-No. One device hosts the relay (start it, then "Set Up Team"); everyone else just installs the plugin and uses "Join Team" (or clicks an invite link) pointed at the host's URL. Joining members never start a server of their own for that team, so the auto-port-selection (8787-8797) and any port-conflict handling only matters on the hosting device - it is irrelevant to everyone who only joins.
+No. One device hosts the relay (start it, then **Set up server**); everyone else just installs the plugin and uses **Join server** (or clicks an invite link) pointed at the host's URL. Joining members never start a server of their own, so the auto-port-selection (8787-8797) and any port-conflict handling only matters on the hosting device - it is irrelevant to everyone who only joins.
 
-If a member also wants to host their *own* separate team (e.g. they run a different project), that's independent: they'd click Start Server on their own machine, which picks whatever port is free there.
+If a member also wants to host their *own* separate server (e.g. for a different project), that's independent: they'd click **Start server** on their own machine, which picks whatever port is free there.
 
 ## Deleting rooms/teams and removing access
 
 All of the following are enforced server-side (the UI just calls the same protected endpoints), so a client can't bypass them by editing local settings:
 
 - **Remove a member's access to one room** (owner/admin): open the room's Settings modal → Room access, and click **Remove** next to the access rule. This deletes a single ACL grant/deny rule; it does not touch team membership.
-- **Revoke a member from the whole team** (owner/admin): Vault Rooms panel → Team Members → **Revoke**. This is the existing member-level revocation described above.
-- **Delete a room** (owner/admin): open the room's Settings modal → Danger zone → **Delete room**. This permanently deletes the room and all of its files/version history on the server. Any device currently subscribed to that room (i.e. has it mounted) is notified immediately over its live WebSocket connection and forgets its local mount tracking for that room; a device that was offline picks this up the next time it reconnects or tries to use that room. Deleting a room does **not** delete files that were already downloaded to a member's vault - only their sync tracking for that room is removed, consistent with how unmounting a room already works.
-- **Delete a team** (owner only): Settings → Vault Rooms → Teams → **Delete team**, next to teams where your device is the owner. This permanently deletes the team, every room and file in it, all members, invites, and device tokens. Every connected member's WebSocket session is closed immediately with a "team deleted" notice.
+- **Remove a member from a team** (server owner or team creator): Vault Rooms panel → **Teams** section → the team card → the member row → **Remove**. This removes only that team membership; the user's account and device tokens are untouched, and they keep access to any room granted to them directly or via another team.
+- **Revoke a user from the whole server** (server owner only): Vault Rooms panel → **Friends** section → **Revoke**. This revokes the user account and *all* of their device tokens, closing their active WebSocket sessions and blocking future fetch/push. This is the server-wide revocation described above.
+- **Revoke a single device** (server owner only): `POST /api/friends/:userId/devices/:deviceId/revoke`. Kills one lost/compromised device without touching the user's other devices - the token fails on its next request and its live WebSocket is closed at once.
+- **Delete a room** (room owner or server owner): open the room's Settings modal → Danger zone → **Delete room**. This permanently deletes the room and all of its files/version history on the server. A device that currently has it mounted forgets its local mount tracking for that room the next time it reconciles (reconnect or manual unmount). Deleting a room does **not** delete files that were already downloaded to a member's vault - only their sync tracking for that room is removed, consistent with how unmounting a room already works.
+- **Delete a team** (server owner or team creator): Vault Rooms panel → **Teams** section → the team card → **Delete team**. This deletes the team's memberships, invites, and ACL grants. It does **not** delete rooms or files - rooms are independently owned and outlive the team, so any room that was shared with the team stays intact for whoever still has direct access. Members lose access that came *only* from this team's grants.
 
 ## Team size and scaling
 
@@ -196,8 +206,9 @@ To cut a release:
 - Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw` (legacy Excalidraw format - newer `.excalidraw.md` files are already covered by Markdown), plus common images (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.svg`) and `.pdf`. Other binary formats (audio, video, Office docs, etc.) aren't synced yet - edits to those files won't reach teammates. Images/PDFs are base64-encoded for transport, so they count against the max file size at roughly 1.33x their real size on disk.
 - No guaranteed deletion of already-synced collaborator copies (this applies to member revocation and room/team deletion alike - see "Deleting rooms/teams and removing access").
 - No character-level co-editing (edits sync as whole-file pushes, debounced - see "Sync latency" above).
-- Rename is delete plus create.
-- Plugin settings store the device token in Obsidian plugin data JSON; this is acceptable for v0.1 but not hardened.
+- Renames and moves within a room sync, but as a delete of the old path plus a create at the new path - there is no dedicated move operation, so renaming a large file re-uploads its contents.
+- Plugin settings store the device token in Obsidian plugin data JSON; this is acceptable for v0.1 but not hardened. A leaked device can be revoked individually (see "Deleting rooms/teams and removing access").
+- No rate-limit tuning UI: the relay applies a fixed in-process per-IP request limit and a WebSocket connection cap to protect the host (the server runs inside Obsidian's process); the defaults suit a few-dozen-person team.
 - Single-host star topology: whoever hosts the relay (embedded or standalone) must stay running for the team to sync; see "Team size and scaling."
 - If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one. mDNS/QR discovery to avoid this is on the v0.2 roadmap.
 
@@ -210,7 +221,7 @@ To cut a release:
 - Writes are denied: inspect ACL grants for the user/team and path pattern.
 - Conflicts are expected when two actors edit the same file version.
 - A teammate's edits aren't showing up: confirm both devices show the room as mounted (not just visible) - only mounted rooms hold a live sync subscription.
-- "Invalid or expired credentials" on one team/server but not another: that team's saved device token no longer matches anything in that server's data (most often because the server's data was reset/recreated after the token was issued - e.g. a fresh reinstall, a wiped `server-data` folder, or switching between embedded and standalone mode with different data files). The plugin marks the team `revoked` in Settings → Vault Rooms → Teams when this happens; use **Forget** there to remove the stale entry (this only forgets it locally, it does not touch the server), then set up or join that team again to get a working identity. This is unrelated to which *room* you have open - a device token is per-team, not per-room.
+- "Invalid or expired credentials" on one team/server but not another: that team's saved device token no longer matches anything in that server's data (most often because the server's data was reset/recreated after the token was issued - e.g. a fresh reinstall, a wiped `server-data` folder, or switching between embedded and standalone mode with different data files). The plugin marks the server entry `revoked` in Settings → Vault Rooms → **Servers** when this happens; use **Forget** there to remove the stale entry (this only forgets it locally, it does not touch the server), then set up or join that server again to get a working identity. This is unrelated to which *room* you have open - a device token is per-server, not per-room.
 
 ## License
 

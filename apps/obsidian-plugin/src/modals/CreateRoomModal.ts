@@ -1,12 +1,14 @@
-import { App, Modal, Notice, Setting, TFolder } from "obsidian";
+import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
 
 export class CreateRoomModal extends Modal {
   private name = "Projects Demo";
-  /** Not user-facing - inferred from whichever picker button was used, or from what the typed
-   *  path actually resolves to in the vault. Only matters as a hint server-side; see note below. */
-  private type: "file" | "folder" = "folder";
+  /** Rooms are always folder rooms now - single-file rooms are no longer creatable (their sync
+   *  prefix logic never actually worked - see the audited finding). Kept as a literal "folder" for
+   *  now purely because RoomSummary/createRoom's input type still carries a type field the server
+   *  stores for back-compat with rooms created before this change. */
+  private readonly type = "folder" as const;
   private sourcePath = "Projects/Demo";
   private mountName = "Projects Demo";
   /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
@@ -23,7 +25,7 @@ export class CreateRoomModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Create room" });
+    this.setTitle("Create room");
     new Setting(contentEl).setName("Name").addText((text) =>
       text.setValue(this.name).onChange((value) => {
         this.name = value.trim();
@@ -34,21 +36,15 @@ export class CreateRoomModal extends Modal {
     );
     new Setting(contentEl)
       .setName("Source path")
-      .setDesc("The folder (or single file) in your vault to share. Pick one with the buttons below, or type a path directly.")
+      .setDesc("The folder in your vault to share. Pick one with the button below, or type a path directly.")
       .addText((text) =>
         text.setValue(this.sourcePath).onChange((value) => {
           this.sourcePath = value.trim();
-          this.type = inferPathType(this.app, this.sourcePath, this.type);
         })
       )
       .addButton((button) =>
         button.setButtonText("Choose folder").onClick(() => {
-          new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path, "folder")).open();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Choose file").onClick(() => {
-          new VaultPathSuggestModal(this.app, "file", (path) => this.applyChosenPath(path, "file")).open();
+          new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
         })
       );
     new Setting(contentEl)
@@ -74,7 +70,7 @@ export class CreateRoomModal extends Modal {
             this.conflictPolicy = value as "keep_both" | "owner_wins";
           })
       );
-    contentEl.createEl("h3", { text: "Plugin capabilities" });
+    new Setting(contentEl).setName("Plugin capabilities").setHeading();
     contentEl.createEl("p", {
       cls: "vault-rooms-setting-hint",
       text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
@@ -141,9 +137,8 @@ export class CreateRoomModal extends Modal {
     );
   }
 
-  private applyChosenPath(path: string, type: "file" | "folder"): void {
+  private applyChosenPath(path: string): void {
     this.sourcePath = path;
-    this.type = type;
     if (!this.name || this.name === "Projects Demo") {
       this.name = basename(path);
     }
@@ -156,24 +151,6 @@ export class CreateRoomModal extends Modal {
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
-}
-
-/**
- * "Type" isn't actually load-bearing anywhere in sync/mount/policy logic (the server just stores
- * it, and the client's own mount loop treats every room's mountPath as a directory regardless) -
- * it only ever mattered for which file-picker button was used. So there's no user-facing "Type"
- * control: infer it instead, from whatever the typed path currently resolves to in the vault, and
- * fall back to whatever was last known (usually "folder") if the path doesn't exist yet.
- */
-function inferPathType(app: App, path: string, previous: "file" | "folder"): "file" | "folder" {
-  if (!path) {
-    return previous;
-  }
-  const file = app.vault.getAbstractFileByPath(path);
-  if (!file) {
-    return previous;
-  }
-  return file instanceof TFolder ? "folder" : "file";
 }
 
 /** Keeps "Mount name" a single, filesystem-safe path segment (matches the server's isSafeMountName check). */

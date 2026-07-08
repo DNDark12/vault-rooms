@@ -7,6 +7,7 @@ import {
   type FriendSummary,
   type MyTeamSummary,
   type RoomSummary,
+  type TeamDirectoryEntry,
   type TeamMemberSummary,
   type TeamSummary
 } from "./apiClient.js";
@@ -20,6 +21,7 @@ import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
 import { canonicalPathForConflictCopy, isConflictCopyPath, mountPathForRoom, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
+import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
 import { VAULT_ROOMS_VIEW_TYPE, VaultRoomsView } from "./views/VaultRoomsView.js";
@@ -28,8 +30,14 @@ import { withInstalledCapabilities } from "./pluginCapabilities.js";
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
   visibleRooms: RoomSummary[] = [];
-  /** All teams on the active server (any active caller may list these - used for the room ACL "Team" picker). */
+  /** This device's own teams (with ownerUserId) - scoped to the caller's memberships by the server
+   *  (server owner sees all). Used for team-management UI (Invite link/Delete team/members), which
+   *  needs ownerUserId/role - never use this for the room ACL "Team" picker. */
   teams: TeamSummary[] = [];
+  /** Every team on the server, id/name/slug only - used solely for the room ACL "grant access to a
+   *  Team" picker, so a room owner can grant access to a team they aren't a member of without
+   *  exposing ownerUserId or membership for teams outside their own. */
+  teamDirectory: TeamDirectoryEntry[] = [];
   /** This device's own team memberships/roles, keyed by team id - used to decide what this user can manage. */
   myTeamRoles: Record<string, "admin" | "member"> = {};
   friends: FriendSummary[] = [];
@@ -41,6 +49,9 @@ export default class VaultRoomsPlugin extends Plugin {
    *  its listeners instead of leaving them registered (and silently no-op'ing) for the rest of
    *  the session - see watchMountedRoom()/unmountRoom(). */
   private roomWatchers = new Map<string, () => void>();
+  /** One RoomPushCoordinator per currently-watched mounted room - used by connectSyncSocket()'s
+   *  onStateChange to retry any dirty/pending-delete files once the live-sync socket reconnects. */
+  private roomCoordinators = new Map<string, RoomPushCoordinator>();
   private embeddedServer: EmbeddedRelayServer | null = null;
   private syncSocket: RoomSyncSocket | null = null;
   private syncState: SyncConnectionState = "offline";
@@ -116,6 +127,16 @@ export default class VaultRoomsPlugin extends Plugin {
       }
     });
     this.addCommand({
+      id: "forget-room",
+      name: "Forget room (remove local sync tracking)",
+      callback: async () => {
+        const room = this.visibleRooms[0];
+        if (room) {
+          await this.forgetRoom(room.id);
+        }
+      }
+    });
+    this.addCommand({
       id: "disconnect",
       name: "Disconnect",
       callback: async () => {
@@ -153,11 +174,25 @@ export default class VaultRoomsPlugin extends Plugin {
     this.registerObsidianProtocolHandler("vault-rooms/join", (params) => handleJoinLink({ ...params, mode: "join" }));
 
     // Registers watchers (for the active server's mounted rooms only) and connects the WS - see
-    // connectSyncSocket()'s doc comment.
-    this.connectSyncSocket();
+    // connectSyncSocket()'s doc comment. Deferred until the workspace layout is ready: Obsidian
+    // fires a "create" vault event for every file during initial vault indexing at startup, and
+    // connectSyncSocket() is what wires up the per-room vault watchers (via watchMountedRoom()) -
+    // registering them any earlier would treat that entire indexing storm as real local edits to
+    // push. onLayoutReady() fires once, immediately if layout is already ready (e.g. plugin enabled
+    // after startup) - it never blocks or double-registers, so this doesn't affect any of
+    // connectSyncSocket()'s other call sites (setupServer/joinServer/activateServer/etc.), which
+    // already only ever run well after startup in response to user actions.
+    this.app.workspace.onLayoutReady(() => {
+      this.connectSyncSocket();
+    });
   }
 
   async onunload(): Promise<void> {
+    // Obsidian's public Plugin.onunload()/Component.unload() lifecycle does not await this
+    // promise (and register() callbacks are fire-and-forget too), so a fast plugin reload may
+    // start a new autoStart server before this embedded server has fully released its port. The
+    // mitigation for that race is the port-pinning fallback + health-probe detection in
+    // serverManager.ts/config.ts, not this best-effort teardown method itself.
     // registerEvent()-based vault listeners are torn down automatically by Obsidian, but the
     // per-room debounce timers in roomWatchers are plain window.setTimeout() calls - left running,
     // they'd fire after unload and try to push through an already-disconnected socket/stopped
@@ -202,9 +237,26 @@ export default class VaultRoomsPlugin extends Plugin {
 
   async startEmbeddedServer(): Promise<EmbeddedServerStatus> {
     const server = this.getOrCreateEmbeddedServer();
+    const previousPinnedPort = this.settings.server.pinnedPort;
     const status = await server.start(this.settings.server);
     this.renderOpenRoomsViews();
     if (status.running) {
+      if (!this.settings.server.port && status.port !== this.settings.server.pinnedPort) {
+        this.settings.server.pinnedPort = status.port;
+        await this.saveSettings();
+      }
+      if (status.portPinChanged) {
+        const reason =
+          status.portPinFallbackReason === "zombie"
+            ? "The old port still looks like a previous Vault Rooms server instance."
+            : status.portPinFallbackReason === "occupied"
+              ? "The old port is occupied by another app."
+              : "The old port is occupied.";
+        new Notice(
+          `Vault Rooms server moved from port ${previousPinnedPort} to ${status.port}. ${reason} Invite links and saved logins that reference the old port may need regenerating.`,
+          0
+        );
+      }
       new Notice(`Vault Rooms server running at ${status.localUrl}`);
     }
     return status;
@@ -270,7 +322,14 @@ export default class VaultRoomsPlugin extends Plugin {
       throw new Error(status.error ?? "Could not start the relay server.");
     }
     const baseUrl = status.localUrl;
-    const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName });
+    // Same-process read, no network round-trip - see EmbeddedRelayServer.getBootstrapPin(). This
+    // device is always the legitimate bootstrap caller (only the owner ever bootstraps; teammates
+    // join via invite token instead), so supplying the PIN here is transparent to the user.
+    const bootstrapPin = this.getOrCreateEmbeddedServer().getBootstrapPin();
+    if (!bootstrapPin) {
+      throw new Error("Could not read the relay server's bootstrap PIN.");
+    }
+    const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName, pin: bootstrapPin });
     this.upsertServer(baseUrl, response);
     await this.saveSettings();
     this.connectSyncSocket();
@@ -314,16 +373,23 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   /**
-   * Refreshes friends, all teams on the server (needed for the room ACL "Team" picker), this
-   * device's own team memberships/roles, and - for teams this device is actually allowed to list
-   * members of (its own teams, or every team if it is the server owner) - each team's members.
+   * Refreshes this device's own teams (for team-management UI), the full team directory (for the
+   * room ACL "Team" picker), friends, this device's own team memberships/roles, and - for teams
+   * this device is actually allowed to list members of (its own teams, or every team if it is the
+   * server owner) - each team's members.
    */
   async refreshTeams(options: { notify?: boolean } = {}): Promise<void> {
     const server = this.requireActiveServer();
     const api = this.apiFor(server);
-    const [me, teamsResult, friendsResult] = await Promise.all([api.me(), api.listTeams(), api.listFriends()]);
+    const [me, teamsResult, directoryResult, friendsResult] = await Promise.all([
+      api.me(),
+      api.listTeams(),
+      api.listTeamDirectory(),
+      api.listFriends()
+    ]);
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
+    this.teamDirectory = directoryResult.teams;
     this.friends = friendsResult.friends;
 
     const memberVisibleTeamIds = server.isServerOwner ? this.teams.map((team) => team.id) : me.teams.map((team) => team.id);
@@ -527,6 +593,7 @@ export default class VaultRoomsPlugin extends Plugin {
       this.syncSocket = null;
       this.visibleRooms = [];
       this.teams = [];
+      this.teamDirectory = [];
       this.friends = [];
       this.myTeamRoles = {};
       this.teamMembersByTeam = {};
@@ -547,6 +614,7 @@ export default class VaultRoomsPlugin extends Plugin {
     this.settings.activeServerId = serverId;
     this.visibleRooms = [];
     this.teams = [];
+    this.teamDirectory = [];
     this.friends = [];
     this.myTeamRoles = {};
     this.teamMembersByTeam = {};
@@ -592,6 +660,15 @@ export default class VaultRoomsPlugin extends Plugin {
    * instead of being silently overwritten.
    */
   async mountRoom(room: RoomSummary): Promise<void> {
+    // Single-file rooms are no longer supported (see CreateRoomModal.ts) - their sync prefix logic
+    // never actually worked (mountPath was always treated as a directory), so mounting one would
+    // silently sync nothing at all with no indication why. Rooms created before this change can
+    // still exist server-side (the server keeps accepting the stored `type` for back-compat); flag
+    // it clearly instead of proceeding into a no-op mount.
+    if (room.type === "file") {
+      new Notice(`"${room.name}" is a single-file room, which is no longer supported - recreate it as a folder room.`);
+      return;
+    }
     const server = this.requireActiveServer();
     const mountPath = this.roomMountPathFor(room);
     const state = (this.settings.mountedRooms[room.id] = this.settings.mountedRooms[room.id] ?? {
@@ -602,6 +679,14 @@ export default class VaultRoomsPlugin extends Plugin {
     });
     state.mountPath = mountPath;
     state.serverId = server.id;
+    state.unmounted = false;
+    // The watcher (which normally marks an edited file dirty - see pushCoordinator.ts) is off
+    // while a room is unmounted, so an edit made during that window would otherwise be invisible
+    // here: the listing loop below only compares against the server's version and would skip a
+    // file whose server version hasn't changed, silently downloading over the local edit. Re-hash
+    // every already-tracked file first so such edits are treated as dirty-equivalent and get a
+    // conflict copy instead of being clobbered.
+    await this.syncEngine.reconcileLocalEdits(state);
     const api = this.apiFor(server);
     const files = await api.listFiles(room.id);
     const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
@@ -646,18 +731,43 @@ export default class VaultRoomsPlugin extends Plugin {
     new Notice(`Mounted ${room.name}`);
   }
 
+  /**
+   * Non-destructively unmounts a room: stops the local watcher and live-sync subscription for it,
+   * but leaves local files and tracking (settings.mountedRooms[roomId]) in place - see
+   * MountedRoomState.unmounted. This matters most for re-mounting later: without kept tracking,
+   * mountRoom() would see no tracked state for any file and download the server's copy over
+   * whatever is on disk, with no conflict copy, silently discarding any local edits made in the
+   * meantime. Use forgetRoom() for the old fully-destructive "drop everything" behavior.
+   */
   async unmountRoom(roomId: string): Promise<void> {
+    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+    const roomState = this.settings.mountedRooms[roomId];
+    this.roomWatchers.get(roomId)?.();
+    this.roomWatchers.delete(roomId);
+    if (roomState) {
+      roomState.unmounted = true;
+    }
+    await this.saveSettings();
+    this.renderOpenRoomsViews();
+    new Notice(`Unmounted ${room?.name ?? "room"}`);
+  }
+
+  /** Destructively forgets a room's local tracking (the old unmountRoom() behavior) - local files
+   *  on disk are left alone (same as unmountRoom), but this device's sync tracking for the room is
+   *  dropped entirely, so a later mount starts over as if the room were never mounted here. */
+  async forgetRoom(roomId: string): Promise<void> {
     const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
     this.roomWatchers.get(roomId)?.();
     this.roomWatchers.delete(roomId);
     delete this.settings.mountedRooms[roomId];
     await this.saveSettings();
     this.renderOpenRoomsViews();
-    new Notice(`Unmounted ${room?.name ?? "room"}`);
+    new Notice(`Forgot ${room?.name ?? "room"} on this device`);
   }
 
   isRoomMounted(roomId: string): boolean {
-    return Boolean(this.settings.mountedRooms[roomId]);
+    const state = this.settings.mountedRooms[roomId];
+    return Boolean(state) && !state?.unmounted;
   }
 
   mountedPathFor(roomId: string): string | undefined {
@@ -764,7 +874,7 @@ export default class VaultRoomsPlugin extends Plugin {
   private watchMountedRoom(roomId: string): void {
     const roomState = this.settings.mountedRooms[roomId];
     const server = this.getActiveServer();
-    if (!roomState || !server) {
+    if (!roomState || roomState.unmounted || !server) {
       return;
     }
     // A room mounted while a *different* server was active must not be watched now: pushLocalChange
@@ -778,54 +888,43 @@ export default class VaultRoomsPlugin extends Plugin {
     if (this.roomWatchers.has(roomId)) {
       return;
     }
-    // Per-path debounce timers and push chains, scoped to this one room-watch registration.
-    // Without coalescing, a fast-autosaving file (a drawing plugin can resave on every stroke)
-    // fires one independent setTimeout per event; all of them eventually push, and overlapping
-    // in-flight pushes for the same path race on the same baseVersion and spuriously
-    // version-conflict with themselves - the file forks into a conflict copy against no one but
-    // its own earlier push. Debouncing per path (reset the timer on every new event) plus
-    // serializing pushes per path (chain onto any push still in flight) fixes both the redundant
-    // network round trips and the self-inflicted conflicts.
-    const pendingTimers = new Map<string, number>();
-    const pushChains = new Map<string, Promise<void>>();
+    // Debounces rapid edits per path and serializes pushes per path (chains onto any push still in
+    // flight), so a fast-autosaving file doesn't fire overlapping pushes that spuriously
+    // version-conflict with themselves - see RoomPushCoordinator's doc comment. It also marks
+    // files dirty/pending-delete synchronously (before the debounce timer starts) so a mid-debounce
+    // restart doesn't lose track of unsynced local work, and exposes retryPending() for
+    // connectSyncSocket()'s onStateChange to re-drive anything still unsynced once reconnected.
+    const coordinator = new RoomPushCoordinator({
+      room: roomState,
+      syncEngine: this.syncEngine,
+      deviceName: server.deviceName,
+      onPersist: () => {
+        void this.saveSettings();
+      },
+      onError: (relativePath, error) => {
+        // Without this, a rejected push (unsupported file type, size limit, stale permissions,
+        // etc.) vanished silently - the file just never showed up for teammates with no
+        // indication anything went wrong.
+        console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
+        new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
+      },
+      debounceMs: this.settings.debounceMs,
+      isStillMounted: () => this.settings.mountedRooms[roomId] === roomState && !roomState.unmounted
+    });
     const unsubscribe = registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
       if (this.settings.mountedRooms[roomId] !== roomState) {
         return;
       }
-      if (event.type === "delete") {
-        return;
-      }
-      const existingTimer = pendingTimers.get(relativePath);
-      if (existingTimer !== undefined) {
-        window.clearTimeout(existingTimer);
-      }
-      const timer = window.setTimeout(() => {
-        pendingTimers.delete(relativePath);
-        if (this.settings.mountedRooms[roomId] !== roomState) {
-          return;
-        }
-        const previous = pushChains.get(relativePath) ?? Promise.resolve();
-        const next = previous
-          .catch(() => undefined)
-          .then(() => this.syncEngine.pushLocalChange(roomState, relativePath, server.deviceName))
-          .then(() => this.saveSettings())
-          .catch((error) => {
-            // Without this, a rejected push (unsupported file type, size limit, stale
-            // permissions, etc.) vanished silently - the file just never showed up for
-            // teammates with no indication anything went wrong.
-            console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
-            new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
-          });
-        pushChains.set(relativePath, next);
-      }, this.settings.debounceMs);
-      pendingTimers.set(relativePath, timer);
+      // registerMountedRoomWatcher already translates "rename" into a synthetic delete-old +
+      // create-new pair (see classifyRenameEvent), so event.type here is always "create" |
+      // "modify" | "delete".
+      coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
     });
+    this.roomCoordinators.set(roomId, coordinator);
     this.roomWatchers.set(roomId, () => {
       unsubscribe();
-      for (const timer of pendingTimers.values()) {
-        window.clearTimeout(timer);
-      }
-      pendingTimers.clear();
+      coordinator.dispose();
+      this.roomCoordinators.delete(roomId);
     });
   }
 
@@ -865,11 +964,28 @@ export default class VaultRoomsPlugin extends Plugin {
       this.watchMountedRoom(roomId);
     }
     const socket = new RoomSyncSocket(server, {
-      getMountedRoom: (roomId) => this.settings.mountedRooms[roomId],
+      // Unmounted rooms (see unmountRoom()/MountedRoomState.unmounted) keep their tracking so a
+      // later remount can detect local edits made in the meantime, but must not receive live
+      // remote changes/deletes while unmounted - returning undefined here reuses this class's
+      // existing "room not found" no-op handling for every message type instead of needing a
+      // separate unmounted check per message.
+      getMountedRoom: (roomId) => {
+        const state = this.settings.mountedRooms[roomId];
+        return state && !state.unmounted ? state : undefined;
+      },
       getApi: () => this.apiFor(server),
       syncEngine: this.syncEngine,
       onStateChange: (state) => {
         this.syncState = state;
+        // A reconnect is exactly when previously-failed/offline pushes are worth retrying - see
+        // RoomPushCoordinator.retryPending(). This reuses each room's existing debounce/serialize
+        // machinery rather than a second queue, and each coordinator's own isStillMounted guard
+        // covers a room being unmounted while offline.
+        if (state === "connected") {
+          for (const coordinator of this.roomCoordinators.values()) {
+            coordinator.retryPending();
+          }
+        }
         this.renderOpenRoomsViews();
       },
       onApplied: () => {

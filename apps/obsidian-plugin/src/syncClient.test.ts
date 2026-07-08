@@ -77,8 +77,8 @@ class FakeApi implements RelayFileApi {
     return this.nextWrite;
   }
 
-  async deleteFile(): Promise<void> {
-    return undefined;
+  async deleteFile(roomId: string, relativePath: string, baseVersion: number): Promise<{ ok: true; relativePath: string; version: number }> {
+    return { ok: true, relativePath, version: baseVersion + 1 };
   }
 }
 
@@ -225,5 +225,44 @@ describe("plugin sync core", () => {
 
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# server wins\n");
     expect(await vault.exists("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe(false);
+  });
+
+  it("reconcileLocalEdits marks a tracked file dirty when its on-disk content no longer matches what was last synced (e.g. edited while unmounted)", async () => {
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: {
+        "Board.md": { serverVersion: 2, serverSha256: "server-2", localSha256: await VaultSyncEngine.sha256("# synced\n"), dirty: false },
+        "Untouched.md": { serverVersion: 1, serverSha256: "server-1", localSha256: await VaultSyncEngine.sha256("# same\n"), dirty: false }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# edited while unmounted\n");
+    await vault.write("Vault Rooms/demo/Projects Demo/Untouched.md", "# same\n");
+
+    await engine.reconcileLocalEdits(room);
+
+    expect(room.files["Board.md"]?.dirty).toBe(true);
+    expect(room.files["Untouched.md"]?.dirty).toBe(false);
+  });
+
+  it("reconcileLocalEdits leaves already-dirty files and missing local files untouched", async () => {
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: {
+        "AlreadyDirty.md": { serverVersion: 1, serverSha256: "server-1", localSha256: "stale", dirty: true },
+        "Missing.md": { serverVersion: 1, serverSha256: "server-1", localSha256: "stale", dirty: false }
+      }
+    };
+    // Missing.md deliberately never written to the vault - simulates a file that no longer exists locally.
+
+    await engine.reconcileLocalEdits(room);
+
+    expect(room.files["AlreadyDirty.md"]?.dirty).toBe(true);
+    expect(room.files["Missing.md"]?.dirty).toBe(false);
   });
 });

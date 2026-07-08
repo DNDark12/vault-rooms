@@ -9,6 +9,8 @@ import { registerFileRoutes } from "./routes/file.routes.js";
 import { registerFriendRoutes } from "./routes/friend.routes.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
+import { generateBootstrapPin } from "./security/bootstrapPin.js";
+import { FixedWindowRateLimiter } from "./security/rateLimiter.js";
 import { ConnectionRegistry } from "./sync/connectionRegistry.js";
 import { registerSyncRoutes } from "./sync/syncServer.js";
 
@@ -16,12 +18,22 @@ export type CreateAppOptions = {
   dbPath?: string;
   publicUrl?: string;
   maxFileBytes?: number;
+  maxConnections?: number;
   allowRemoteBootstrap?: boolean;
+  rateLimit?: {
+    globalMax?: number;
+    globalWindowMs?: number;
+    bootstrapMax?: number;
+    bootstrapWindowMs?: number;
+  };
   sqlJsLocator?: SqlJsLocator;
 };
 
 export async function createApp(options: CreateAppOptions = {}) {
   const maxFileBytes = options.maxFileBytes ?? 5 * 1024 * 1024;
+  const maxConnections = options.maxConnections ?? 100;
+  const globalRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.globalMax ?? 120, options.rateLimit?.globalWindowMs ?? 60_000);
+  const bootstrapRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.bootstrapMax ?? 5, options.rateLimit?.bootstrapWindowMs ?? 60_000);
   // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
   // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
   // maxFileBytes - otherwise a file just under the configured limit can still be rejected at the
@@ -30,6 +42,12 @@ export async function createApp(options: CreateAppOptions = {}) {
   const db = await openRelayDb(options.dbPath ?? "data/relay.sqlite", options.sqlJsLocator);
   const repo = new RelayRepository(db);
   const connectionRegistry = new ConnectionRegistry();
+  // Bootstrap PIN (see security/bootstrapPin.ts): required by POST /api/bootstrap in addition to
+  // the existing localhost-only check, so a DNS-rebound "local-looking" request from a malicious
+  // web page still can't provision a server owner. Exposed in-process only (decorated below, plus
+  // printed to the console by the standalone CLI in index.ts) - the embedded plugin reads it
+  // directly off this same object instead of ever sending it over the network unprompted.
+  const bootstrapPin = generateBootstrapPin();
 
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("access-control-allow-origin", "*");
@@ -40,6 +58,20 @@ export async function createApp(options: CreateAppOptions = {}) {
       void reply.code(204).send();
       return;
     }
+    done();
+  });
+
+  app.addHook("onRequest", (request, reply, done) => {
+    if (request.method === "POST" && request.url === "/api/bootstrap" && !bootstrapRateLimiter.consume(request.ip)) {
+      void reply.status(429).send({ error: { code: "RATE_LIMITED", message: "Too many bootstrap attempts. Try again later." } });
+      return;
+    }
+
+    if (!globalRateLimiter.consume(request.ip)) {
+      void reply.status(429).send({ error: { code: "RATE_LIMITED", message: "Too many requests. Try again later." } });
+      return;
+    }
+
     done();
   });
 
@@ -63,6 +95,7 @@ export async function createApp(options: CreateAppOptions = {}) {
   registerTeamRoutes(app, repo, {
     publicUrl: options.publicUrl ?? "http://127.0.0.1:8787",
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
+    bootstrapPin,
     connectionRegistry
   });
   registerRoomRoutes(app, repo, { connectionRegistry });
@@ -72,13 +105,25 @@ export async function createApp(options: CreateAppOptions = {}) {
     connectionRegistry
   });
   void app.register(async (syncApp) => {
-    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes });
+    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections });
   });
 
   app.addHook("onClose", (_instance, done) => {
     db.close();
     done();
   });
+
+  // In-process bootstrap PIN access (not test-only): the embedded plugin (serverManager.ts) reads
+  // this directly off the running app instance - same process, no network round-trip - to supply
+  // it transparently when it calls POST /api/bootstrap. Integration tests read it the same way.
+  app.decorate("bootstrapPin", bootstrapPin);
+  // Test-only hook: there is no REST route yet for registering a second device on an existing
+  // account, so integration tests that need a multi-device fixture (e.g. per-device revoke)
+  // reach into the repository through this decorator instead of duplicating repo internals.
+  app.decorate("testRepo", repo);
+  // Test-only hook: integration tests assert WebSocket connection-cap behavior without exposing
+  // registry internals through production routes.
+  app.decorate("testConnectionRegistry", connectionRegistry);
 
   return app;
 }

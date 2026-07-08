@@ -267,11 +267,13 @@
   user-select: none;
 }
 
-.vault-rooms-section-header:hover h3 {
+.vault-rooms-section-header:hover .vault-rooms-section-title {
   color: var(--text-accent);
 }
 
-.vault-rooms-section-header h3 {
+.vault-rooms-section-title {
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-medium);
   margin: 0;
 }
 

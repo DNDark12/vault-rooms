@@ -64,7 +64,7 @@ export class RoomSettingsModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("vault-rooms-settings-modal");
-    contentEl.createEl("h2", { text: `Room settings: ${this.room.name}` });
+    this.setTitle(`Room settings: ${this.room.name}`);
 
     this.renderRoomFields(contentEl);
     this.renderCapabilities(contentEl);
@@ -73,7 +73,7 @@ export class RoomSettingsModal extends Modal {
   }
 
   private renderRoomFields(parent: HTMLElement): void {
-    parent.createEl("h3", { text: "Room" });
+    new Setting(parent).setName("Room").setHeading();
     new Setting(parent).setName("Name").addText((text) =>
       text.setValue(this.name).onChange((value) => {
         this.name = value.trim();
@@ -152,7 +152,7 @@ export class RoomSettingsModal extends Modal {
   }
 
   private renderCapabilities(parent: HTMLElement): void {
-    parent.createEl("h3", { text: "Plugin capabilities" });
+    new Setting(parent).setName("Plugin capabilities").setHeading();
     parent.createEl("p", {
       cls: "vault-rooms-setting-hint",
       text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
@@ -226,7 +226,7 @@ export class RoomSettingsModal extends Modal {
   }
 
   private renderAccess(parent: HTMLElement): void {
-    parent.createEl("h3", { text: "Room access" });
+    new Setting(parent).setName("Room access").setHeading();
     parent.createEl("p", {
       cls: "vault-rooms-setting-hint",
       text: "Grant a whole team or a specific friend access to this room."
@@ -245,11 +245,11 @@ export class RoomSettingsModal extends Modal {
     );
 
     if (this.subjectType === "team") {
-      if (this.plugin.teams.length === 0) {
+      if (this.plugin.teamDirectory.length === 0) {
         new Setting(parent).setDesc("No teams yet - create one from the Vault Rooms panel first.");
       } else {
         new Setting(parent).setName("Team").addDropdown((dropdown) => {
-          for (const team of this.plugin.teams) {
+          for (const team of this.plugin.teamDirectory) {
             dropdown.addOption(team.id, team.name);
           }
           dropdown.setValue(this.subjectId).onChange((value) => (this.subjectId = value));
@@ -362,7 +362,7 @@ export class RoomSettingsModal extends Modal {
     if (!this.room.permissions.includes("room:delete")) {
       return;
     }
-    parent.createEl("h3", { text: "Danger zone" });
+    new Setting(parent).setName("Danger zone").setHeading();
     new Setting(parent)
       .setName("Delete room")
       .setDesc("Permanently deletes this room and all of its files/history on the server for every member. This cannot be undone.")
@@ -411,7 +411,7 @@ export class RoomSettingsModal extends Modal {
 
   private defaultSubjectId(): string {
     if (this.subjectType === "team") {
-      return this.plugin.teams[0]?.id ?? "";
+      return this.plugin.teamDirectory[0]?.id ?? "";
     }
     if (this.subjectType === "user") {
       return this.plugin.friends.find((friend) => !friend.revokedAt)?.id ?? "";
@@ -425,7 +425,7 @@ export class RoomSettingsModal extends Modal {
       return friend ? friend.displayName : rule.subjectId;
     }
     if (rule.subjectType === "team") {
-      const team = this.plugin.teams.find((candidate) => candidate.id === rule.subjectId);
+      const team = this.plugin.teamDirectory.find((candidate) => candidate.id === rule.subjectId);
       return team ? team.name : rule.subjectId;
     }
     return `${rule.subjectType}:${rule.subjectId}`;

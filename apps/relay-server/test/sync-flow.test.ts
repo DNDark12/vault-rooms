@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createApp } from "../src/app.js";
+import { injectBootstrap } from "./bootstrapHelper.js";
 
 const apps: Array<Awaited<ReturnType<typeof createApp>>> = [];
 const sockets: WebSocket[] = [];
@@ -17,14 +18,7 @@ afterEach(async () => {
 async function setupSyncFlow() {
   const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
   apps.push(app);
-  const owner = (
-    await app.inject({
-      method: "POST",
-      url: "/api/bootstrap",
-      remoteAddress: "127.0.0.1",
-      payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-    })
-  ).json();
+  const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
   const invite = (
     await app.inject({
       method: "POST",
@@ -177,20 +171,198 @@ describe("WebSocket sync", () => {
     expect(await nextMessage(b, "remote_file_delete")).toMatchObject({ relativePath: "FromRest.md", version: 2 });
   });
 
+  it("does not broadcast remote_file_change/remote_file_delete for paths outside a subscriber's path-scoped ACL grant", async () => {
+    // Regression test: broadcastToRoom used to only check room-level subscription, not the
+    // per-path file:read grant - so a member limited to "public/**/*" would still receive the
+    // full content of files outside that scope in realtime, even though the REST read path
+    // (file.routes.ts) already enforces file:read per path via assertRoomPermission.
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    apps.push(app);
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const invite = (
+      await app.inject({
+        method: "POST",
+        url: `/api/teams/${owner.team.id}/invites`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+      })
+    ).json();
+    const member = (
+      await app.inject({
+        method: "POST",
+        url: "/api/join",
+        payload: { inviteToken: invite.inviteToken, displayName: "M", deviceName: "M laptop" }
+      })
+    ).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      })
+    ).json().room;
+    // Member M is a reader, but only scoped to "public/**/*" - unlike every other ACL fixture in
+    // this file, which grants "**/*".
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "public/**/*" }
+    });
+    // Room-level sync:subscribe still needs a room-scoped grant since evaluatePolicy's implicit
+    // owner allow doesn't apply to M; grant it broadly so subscribing itself is not the reason
+    // for any failure - only file:read is path-scoped in this test.
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", permissions: ["sync:subscribe"], pathPattern: "**/*" }
+    });
+
+    const editor = await connect(app);
+    editor.sendJson({ type: "hello", requestId: "hello-a", token: owner.deviceToken, client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: "A laptop" } });
+    await nextMessage(editor, "hello_ok");
+    editor.sendJson({ type: "subscribe_room", requestId: "sub-a", roomId: room.id });
+    await nextMessage(editor, "room_snapshot");
+
+    const reader = await connect(app);
+    reader.sendJson({ type: "hello", requestId: "hello-m", token: member.deviceToken, client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: "M laptop" } });
+    await nextMessage(reader, "hello_ok");
+    reader.sendJson({ type: "subscribe_room", requestId: "sub-m", roomId: room.id });
+    await nextMessage(reader, "room_snapshot");
+
+    // A writes outside M's path grant via the WS file_change path - M must not see it.
+    editor.sendJson({ type: "file_change", requestId: "secret-1", roomId: room.id, relativePath: "secret/plan.md", baseVersion: 0, content: "top secret" });
+    expect(await nextMessage(editor, "file_change_ack")).toMatchObject({ requestId: "secret-1" });
+    await expect(nextMessage(reader, "remote_file_change")).rejects.toThrow(/Timed out/);
+
+    // A writes inside M's path grant - M must receive it.
+    editor.sendJson({ type: "file_change", requestId: "public-1", roomId: room.id, relativePath: "public/notes.md", baseVersion: 0, content: "hello public" });
+    expect(await nextMessage(editor, "file_change_ack")).toMatchObject({ requestId: "public-1" });
+    expect(await nextMessage(reader, "remote_file_change")).toMatchObject({ relativePath: "public/notes.md", content: "hello public" });
+
+    // Same gap, but via the REST write path (file.routes.ts), which calls the same
+    // ConnectionRegistry.broadcastToRoom.
+    const restSecret = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "secret/rest.md", baseVersion: 0, content: "rest secret" }
+    });
+    expect(restSecret.statusCode).toBe(200);
+    await expect(nextMessage(reader, "remote_file_change")).rejects.toThrow(/Timed out/);
+
+    const restPublic = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "public/rest.md", baseVersion: 0, content: "rest public" }
+    });
+    expect(restPublic.statusCode).toBe(200);
+    expect(await nextMessage(reader, "remote_file_change")).toMatchObject({ relativePath: "public/rest.md", content: "rest public" });
+  });
+
+  it("filters room_snapshot files on subscribe_room to only paths the subscriber can file:read", async () => {
+    // Regression test: subscribe_room's room_snapshot used to be built from an unfiltered
+    // repo.listFiles(room.id) - so a member with room-wide sync:subscribe but a path-scoped
+    // file:read grant (e.g. "public/**/*") would receive every file's relativePath/version/sha256
+    // for the whole room on subscribe (and on reconnect), leaking the existence and content-hash
+    // of files outside their read scope. This is the same confidentiality boundary the
+    // remote_file_change/remote_file_delete broadcast fix established, leaked via the snapshot path.
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    apps.push(app);
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const invite = (
+      await app.inject({
+        method: "POST",
+        url: `/api/teams/${owner.team.id}/invites`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+      })
+    ).json();
+    const member = (
+      await app.inject({
+        method: "POST",
+        url: "/api/join",
+        payload: { inviteToken: invite.inviteToken, displayName: "M", deviceName: "M laptop" }
+      })
+    ).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      })
+    ).json().room;
+    // Member M is a reader, but only scoped to "public/**/*" - unlike every other ACL fixture in
+    // this file, which grants "**/*".
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "public/**/*" }
+    });
+    // Room-level sync:subscribe is granted broadly so subscribing itself is not the reason for
+    // any filtering - only file:read is path-scoped in this test.
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", permissions: ["sync:subscribe"], pathPattern: "**/*" }
+    });
+
+    // Files are created BEFORE the reader subscribes, so they land in the snapshot rather than a
+    // live broadcast.
+    const publicWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "public/a.md", baseVersion: 0, content: "hello public" }
+    });
+    expect(publicWrite.statusCode).toBe(200);
+    const secretWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "secret/b.md", baseVersion: 0, content: "top secret" }
+    });
+    expect(secretWrite.statusCode).toBe(200);
+
+    const reader = await connect(app);
+    reader.sendJson({ type: "hello", requestId: "hello-m", token: member.deviceToken, client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: "M laptop" } });
+    await nextMessage(reader, "hello_ok");
+    reader.sendJson({ type: "subscribe_room", requestId: "sub-m", roomId: room.id });
+    const readerSnapshot = await nextMessage(reader, "room_snapshot");
+    expect(readerSnapshot.files).toEqual(
+      expect.arrayContaining([expect.objectContaining({ relativePath: "public/a.md" })])
+    );
+    expect(readerSnapshot.files).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ relativePath: "secret/b.md" })])
+    );
+
+    // A full-access reader (the owner) subscribing still gets the whole room.
+    const ownerConn = await connect(app);
+    ownerConn.sendJson({ type: "hello", requestId: "hello-a", token: owner.deviceToken, client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: "A laptop" } });
+    await nextMessage(ownerConn, "hello_ok");
+    ownerConn.sendJson({ type: "subscribe_room", requestId: "sub-a", roomId: room.id });
+    const ownerSnapshot = await nextMessage(ownerConn, "room_snapshot");
+    expect(ownerSnapshot.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ relativePath: "public/a.md" }),
+        expect.objectContaining({ relativePath: "secret/b.md" })
+      ])
+    );
+  });
+
   it("revokes a live subscription (without closing the socket) when the team-membership grant behind it is revoked", async () => {
     // Regression test: access that was only ever granted via a team-subject ACL rule must be
     // re-checked on already-open subscriptions once the underlying team membership is revoked -
     // broadcastToRoom must stop delivering remote_file_change/remote_file_delete to that socket.
     const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
     apps.push(app);
-    const owner = (
-      await app.inject({
-        method: "POST",
-        url: "/api/bootstrap",
-        remoteAddress: "127.0.0.1",
-        payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-      })
-    ).json();
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
     const invite = (
       await app.inject({
         method: "POST",
@@ -264,14 +436,7 @@ describe("WebSocket sync", () => {
     // itself rather than revoking team membership.
     const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
     apps.push(app);
-    const owner = (
-      await app.inject({
-        method: "POST",
-        url: "/api/bootstrap",
-        remoteAddress: "127.0.0.1",
-        payload: { displayName: "A", deviceName: "A laptop", teamName: "Demo" }
-      })
-    ).json();
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
     const invite = (
       await app.inject({
         method: "POST",

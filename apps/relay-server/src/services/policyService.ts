@@ -1,4 +1,4 @@
-import { AppError, type Permission } from "@vault-rooms/protocol";
+import { AppError, type AclRule, type Permission } from "@vault-rooms/protocol";
 import { evaluatePolicy } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import type { RoomRow } from "../db/schema.js";
@@ -10,6 +10,11 @@ export function hasRoomPermission(input: {
   room: RoomRow;
   permission: Permission;
   relativePath?: string;
+  // Optional pre-loaded ACL rules for the room. Callers evaluating this permission for many
+  // recipients in one pass (e.g. ConnectionRegistry.broadcastToRoom) should load the room's ACL
+  // rules once via repo.listAclRulesForRoom and pass them here, instead of re-querying per
+  // recipient.
+  aclRules?: AclRule[];
 }): boolean {
   const resource = input.permission.startsWith("room:")
     ? { type: "room" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id }
@@ -23,7 +28,7 @@ export function hasRoomPermission(input: {
     },
     resource,
     permission: input.permission,
-    aclRules: input.repo.listAclRulesForRoom(input.room.id),
+    aclRules: input.aclRules ?? input.repo.listAclRulesForRoom(input.room.id),
     membershipRevokedAt: input.principal.userRevokedAt,
     deviceRevokedAt: input.principal.deviceRevokedAt
   }).allowed;

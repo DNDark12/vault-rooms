@@ -1,4 +1,4 @@
-import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, Setting, WorkspaceLeaf } from "obsidian";
 import type { TeamSummary } from "../apiClient.js";
 import type VaultRoomsPlugin from "../main.js";
 
@@ -44,7 +44,7 @@ export class VaultRoomsView extends ItemView {
     container.addClass("vault-rooms-view");
 
     const header = container.createDiv({ cls: "vault-rooms-header" });
-    header.createEl("h2", { text: "Vault Rooms" });
+    new Setting(header).setName("Vault Rooms").setHeading();
 
     this.renderHostingSection(container);
     this.renderActiveConnectionSection(container);
@@ -71,7 +71,11 @@ export class VaultRoomsView extends ItemView {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
     const collapsed = this.collapsedSections.has(key);
     const headerEl = section.createDiv({ cls: "vault-rooms-section-header" });
-    headerEl.createEl("h3", { text: title });
+    // Not a Setting().setHeading() here: this heading shares one clickable flex row with the count
+    // badge and chevron below (the whole row toggles collapse), which the Setting heading API's
+    // full `.setting-item` row doesn't fit - see vault-rooms-section-title in styles.css for the
+    // heading-equivalent look this preserves instead.
+    headerEl.createDiv({ cls: "vault-rooms-section-title", text: title });
     if (count !== undefined) {
       headerEl.createSpan({ cls: "vault-rooms-section-count", text: String(count) });
     }
@@ -94,7 +98,7 @@ export class VaultRoomsView extends ItemView {
    *  its own server, and a joining member never sees this section do anything but sit stopped. */
   private renderHostingSection(parent: HTMLElement): void {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "This device's server" });
+    new Setting(section).setName("This device's server").setHeading();
 
     const status = this.plugin.getServerStatus();
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
@@ -137,7 +141,7 @@ export class VaultRoomsView extends ItemView {
    *  this server's mounted rooms are live: see "Other servers" below for what that means. */
   private renderActiveConnectionSection(parent: HTMLElement): void {
     const section = parent.createDiv({ cls: "vault-rooms-section" });
-    section.createEl("h3", { text: "Active connection" });
+    new Setting(section).setName("Active connection").setHeading();
 
     const server = this.plugin.getActiveServer();
     const hasOwnServer = this.plugin.hasOwnServer();

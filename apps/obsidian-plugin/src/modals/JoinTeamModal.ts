@@ -28,7 +28,7 @@ export class JoinTeamModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: this.mode === "join" ? "Join Vault Rooms" : "Rejoin Vault Rooms" });
+    this.setTitle(this.mode === "join" ? "Join Vault Rooms" : "Rejoin Vault Rooms");
 
     if (this.hasKnownInvite && !this.showManualForm) {
       this.renderKnownInviteForm(contentEl);

@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { AppError, isEligiblePath, normalizeRelativePath } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { getActivePrincipal } from "../services/authService.js";
-import { assertRoomPermission } from "../services/policyService.js";
+import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
 
 export type FileRoutesOptions = {
@@ -71,6 +71,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       content: body.content,
       actorUserId: principal.userId
     });
+    const fileChangeAclRules = repo.listAclRulesForRoom(room.id);
     options.connectionRegistry?.broadcastToRoom(
       room.id,
       {
@@ -83,7 +84,11 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
         updatedBy: { userId: principal.userId, displayName: principal.userDisplayName },
         updatedAt: new Date().toISOString()
       },
-      { excludeDeviceId: principal.deviceId }
+      {
+        excludeDeviceId: principal.deviceId,
+        canReceive: (recipient) =>
+          hasRoomPermission({ repo, principal: recipient, room, permission: "file:read", relativePath, aclRules: fileChangeAclRules })
+      }
     );
     return { ok: true, relativePath: result.relativePath, version: result.version, sha256: result.sha256 };
   });
@@ -103,6 +108,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       baseVersion: body.baseVersion,
       actorUserId: principal.userId
     });
+    const fileDeleteAclRules = repo.listAclRulesForRoom(room.id);
     options.connectionRegistry?.broadcastToRoom(
       room.id,
       {
@@ -113,7 +119,11 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
         deletedBy: { userId: principal.userId, displayName: principal.userDisplayName },
         deletedAt: new Date().toISOString()
       },
-      { excludeDeviceId: principal.deviceId }
+      {
+        excludeDeviceId: principal.deviceId,
+        canReceive: (recipient) =>
+          hasRoomPermission({ repo, principal: recipient, room, permission: "file:read", relativePath, aclRules: fileDeleteAclRules })
+      }
     );
     return result;
   });

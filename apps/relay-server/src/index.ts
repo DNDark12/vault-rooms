@@ -25,4 +25,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`LAN:     http://${lanIp}:${config.port}`);
     console.log(`Sync:    ws://${lanIp}:${config.port}/sync`);
   }
+  // Required by POST /api/bootstrap (see security/bootstrapPin.ts and team.routes.ts) - the
+  // operator running this standalone process supplies it back to whichever client performs the
+  // one-time server-owner setup.
+  const bootstrapPin = (app as unknown as { bootstrapPin: string }).bootstrapPin;
+  console.log(`Bootstrap PIN: ${bootstrapPin}`);
 }

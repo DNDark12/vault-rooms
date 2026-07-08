@@ -10,8 +10,16 @@ export type FriendRoutesOptions = {
 
 export function registerFriendRoutes(app: FastifyInstance, repo: RelayRepository, options: FriendRoutesOptions = {}): void {
   app.get("/api/friends", async (request) => {
-    getActivePrincipal(repo, request);
-    return { friends: repo.listFriends() };
+    const principal = getActivePrincipal(repo, request);
+    if (principal.isServerOwner) {
+      return { friends: repo.listFriends() };
+    }
+    const myTeamIds = new Set(repo.listUserTeams(principal.userId).map((team) => team.teamId));
+    const friends = repo.listFriends().map((friend) => ({
+      ...friend,
+      teams: friend.teams.filter((team) => myTeamIds.has(team.id))
+    }));
+    return { friends };
   });
 
   app.post("/api/friends/:userId/revoke", async (request) => {
@@ -28,6 +36,24 @@ export function registerFriendRoutes(app: FastifyInstance, repo: RelayRepository
     }
     repo.revokeUser({ userId, actorUserId: principal.userId });
     options.connectionRegistry?.closeRevokedUser(userId);
+    return { ok: true };
+  });
+
+  app.post("/api/friends/:userId/devices/:deviceId/revoke", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    if (!principal.isServerOwner) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner can revoke devices.", 403);
+    }
+    const { userId, deviceId } = request.params as { userId: string; deviceId: string };
+    if (!repo.getUser(userId)) {
+      throw new AppError("NOT_FOUND", "User not found.", 404);
+    }
+    const device = repo.getDevice(deviceId);
+    if (!device || device.user_id !== userId) {
+      throw new AppError("NOT_FOUND", "Device not found.", 404);
+    }
+    repo.revokeDevice({ deviceId, actorUserId: principal.userId });
+    options.connectionRegistry?.closeRevokedDevice(deviceId);
     return { ok: true };
   });
 }

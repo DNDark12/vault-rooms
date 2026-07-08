@@ -4,16 +4,21 @@ import { createId } from "@vault-rooms/protocol";
 import type WebSocket from "ws";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { isActivePrincipal } from "../db/repositories/relayRepository.js";
-import { assertRoomPermission } from "../services/policyService.js";
+import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import { ConnectionRegistry, sendJson, type SyncConnection } from "./connectionRegistry.js";
 
 export function registerSyncRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number }
+  options: { maxFileBytes: number; maxConnections: number }
 ): void {
   app.get("/sync", { websocket: true }, (socket: WebSocket) => {
+    if (registry.size() >= options.maxConnections) {
+      socket.close(1013, "Too many connections");
+      return;
+    }
+
     const connection: SyncConnection = {
       id: createId("req"),
       socket,
@@ -151,16 +156,29 @@ async function handleMessage(
         return;
       }
       connection.subscriptions.add(room.id);
+      const snapshotAclRules = repo.listAclRulesForRoom(room.id);
       sendJson(connection.socket, {
         type: "room_snapshot",
         requestId: message.requestId,
         roomId: room.id,
-        files: repo.listFiles(room.id).map((file) => ({
-          relativePath: file.relative_path,
-          version: file.version,
-          sha256: file.sha256,
-          deleted: Boolean(file.deleted_at)
-        }))
+        files: repo
+          .listFiles(room.id)
+          .filter((file) =>
+            hasRoomPermission({
+              repo,
+              principal: connection.principal!,
+              room,
+              permission: "file:read",
+              relativePath: file.relative_path,
+              aclRules: snapshotAclRules
+            })
+          )
+          .map((file) => ({
+            relativePath: file.relative_path,
+            version: file.version,
+            sha256: file.sha256,
+            deleted: Boolean(file.deleted_at)
+          }))
       });
     } catch (error) {
       sendRejection(connection.socket, message.requestId, error);
@@ -201,6 +219,7 @@ async function handleMessage(
         version: result.version,
         sha256: result.sha256
       });
+      const fileChangeAclRules = repo.listAclRulesForRoom(room.id);
       registry.broadcastToRoom(
         room.id,
         {
@@ -213,7 +232,11 @@ async function handleMessage(
           updatedBy: { userId: connection.principal.userId, displayName: connection.principal.userDisplayName },
           updatedAt: new Date().toISOString()
         },
-        { exclude: connection }
+        {
+          exclude: connection,
+          canReceive: (principal) =>
+            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath, aclRules: fileChangeAclRules })
+        }
       );
     } catch (error) {
       sendRejection(connection.socket, message.requestId, error);
@@ -240,6 +263,7 @@ async function handleMessage(
         relativePath,
         version: result.version
       });
+      const fileDeleteAclRules = repo.listAclRulesForRoom(room.id);
       registry.broadcastToRoom(
         room.id,
         {
@@ -250,7 +274,11 @@ async function handleMessage(
           deletedBy: { userId: connection.principal.userId, displayName: connection.principal.userDisplayName },
           deletedAt: new Date().toISOString()
         },
-        { exclude: connection }
+        {
+          exclude: connection,
+          canReceive: (principal) =>
+            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath, aclRules: fileDeleteAclRules })
+        }
       );
     } catch (error) {
       sendRejection(connection.socket, message.requestId, error);
