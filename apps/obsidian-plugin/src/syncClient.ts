@@ -71,6 +71,37 @@ export function mountPathForRoom(input: {
   return input.owner ? stripSlashes(input.sourcePath) : [stripSlashes(input.mountRoot), input.mountName].map(stripSlashes).join("/");
 }
 
+/**
+ * Decides the effective local mount path for a room, given a possibly-stale per-room override
+ * (settings.roomMountPaths[room.id]). For the room OWNER, "Local mount path" is no longer a
+ * supported concept - the owner's device always mounts in place at the room's real sourcePath (see
+ * mountPathForRoom's doc comment), so any existing override is ignored rather than honored. This
+ * makes the fix self-healing for rooms that already have a stray owner override saved from before
+ * "Local mount path" was hidden for owners (e.g. earlier testing): re-derive from sourcePath every
+ * time instead of trusting the stored value. Non-owners keep full control of their override, which
+ * remains a legitimate, user-facing setting.
+ */
+export function resolveRoomMountPath(input: {
+  owner: boolean;
+  configuredOverride: string | undefined;
+  mountRoot: string;
+  mountName: string;
+  sourcePath: string;
+}): string {
+  if (!input.owner) {
+    const configured = input.configuredOverride?.trim();
+    if (configured) {
+      return configured;
+    }
+  }
+  return mountPathForRoom({
+    owner: input.owner,
+    mountRoot: input.mountRoot,
+    mountName: input.mountName,
+    sourcePath: input.sourcePath
+  });
+}
+
 export async function createConflictCopyPath(vault: VaultAdapter, path: string, deviceName: string, now = new Date()): Promise<string> {
   const slash = path.lastIndexOf("/");
   const directory = slash >= 0 ? path.slice(0, slash + 1) : "";
@@ -199,7 +230,12 @@ export class VaultSyncEngine {
       return;
     }
 
-    const baseVersion = current?.serverVersion ?? 0;
+    // A tombstoned entry (serverSha256: null, from applyRemoteDelete) or a never-tracked file
+    // (current undefined) both mean "no live server content to base a write on," so baseVersion
+    // must be 0 - only trust current.serverVersion as a real prior version when serverSha256 is
+    // non-null. Otherwise a file recreated after a remote delete would send the tombstone's real
+    // (non-zero) version and the server would unconditionally reject it with FILE_DELETED.
+    const baseVersion = current?.serverSha256 != null ? current.serverVersion : 0;
     try {
       const result = await this.api.writeFile(room.roomId, relativePath, baseVersion, content);
       room.files[relativePath] = {

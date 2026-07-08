@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
+import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, resolveRoomMountPath, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
@@ -90,6 +90,46 @@ describe("plugin sync core", () => {
     expect(mountPathForRoom({ owner: true, mountRoot: "Vault Rooms", mountName: "Projects Demo", sourcePath: "Projects/Demo" })).toBe(
       "Projects/Demo"
     );
+  });
+
+  it("ignores a stale owner mount-path override and self-heals to sourcePath", () => {
+    // Reproduces the reported stuck-room bug: a room this device owns has a stray
+    // settings.roomMountPaths[roomId] override (e.g. left over from earlier testing, before "Local
+    // mount path" was hidden for owners) pointing at some unrelated stale subfolder. The owner's
+    // mount path must always be sourcePath-derived regardless of what is stored.
+    expect(
+      resolveRoomMountPath({
+        owner: true,
+        configuredOverride: "Vault Rooms/stale-testing-subfolder",
+        mountRoot: "Vault Rooms",
+        mountName: "Projects Demo",
+        sourcePath: "Projects/Demo"
+      })
+    ).toBe("Projects/Demo");
+  });
+
+  it("honors a non-owner's configured mount-path override", () => {
+    expect(
+      resolveRoomMountPath({
+        owner: false,
+        configuredOverride: "My Custom Folder",
+        mountRoot: "Vault Rooms",
+        mountName: "Projects Demo",
+        sourcePath: "Projects/Demo"
+      })
+    ).toBe("My Custom Folder");
+  });
+
+  it("falls back to the default mount path for a non-owner with no override", () => {
+    expect(
+      resolveRoomMountPath({
+        owner: false,
+        configuredOverride: undefined,
+        mountRoot: "Vault Rooms",
+        mountName: "Projects Demo",
+        sourcePath: "Projects/Demo"
+      })
+    ).toBe("Vault Rooms/Projects Demo");
   });
 
   it("creates collision-safe conflict copy paths", async () => {
@@ -245,6 +285,37 @@ describe("plugin sync core", () => {
 
     expect(room.files["Board.md"]?.dirty).toBe(true);
     expect(room.files["Untouched.md"]?.dirty).toBe(false);
+  });
+
+  it("pushLocalChange recreates a remotely-deleted (tombstoned) file with baseVersion 0, not the tombstone's stale version", async () => {
+    // Regression test: applyRemoteDelete stores the tombstone's real (non-zero) serverVersion
+    // alongside serverSha256: null. pushLocalChange used to compute baseVersion as
+    // `current?.serverVersion ?? 0`, which is the tombstone's non-zero version (not 0/undefined)
+    // even though the file has no live server content - the server unconditionally rejects any
+    // non-zero baseVersion against a deleted file with FILE_DELETED, so a file recreated locally
+    // after a remote delete could never sync again.
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api, () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: {
+        "Board.md": { serverVersion: 1, serverSha256: "server-1", localSha256: "server-1", dirty: false }
+      }
+    };
+
+    // Remote delete tombstones the file - serverVersion is real/non-zero, serverSha256 is null.
+    await engine.applyRemoteDelete(room, { relativePath: "Board.md", version: 2 }, "B laptop");
+    expect(room.files["Board.md"]).toMatchObject({ serverVersion: 2, serverSha256: null });
+
+    // Recreate the file locally and push it.
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# recreated\n");
+    api.nextWrite = { ok: true, relativePath: "Board.md", version: 3, sha256: "server-3" };
+    await engine.pushLocalChange(room, "Board.md", "B laptop");
+
+    expect(api.writes[0]).toMatchObject({ roomId: "room_1", relativePath: "Board.md", baseVersion: 0, content: "# recreated\n" });
+    expect(room.files["Board.md"]).toMatchObject({ serverVersion: 3, serverSha256: "server-3", dirty: false });
   });
 
   it("reconcileLocalEdits leaves already-dirty files and missing local files untouched", async () => {
