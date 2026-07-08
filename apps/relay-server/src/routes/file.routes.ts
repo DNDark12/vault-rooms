@@ -14,15 +14,27 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
   app.get("/api/rooms/:roomId/files", async (request) => {
     const principal = getActivePrincipal(repo, request);
     const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
-    assertRoomPermission({ repo, principal, room, permission: "file:read" });
+    const listAclRules = repo.listAclRulesForRoom(room.id);
     return {
-      files: repo.listFiles(room.id).map((file) => ({
-        relativePath: file.relative_path,
-        kind: file.kind,
-        version: file.version,
-        sha256: file.sha256,
-        deleted: Boolean(file.deleted_at)
-      }))
+      files: repo
+        .listFiles(room.id)
+        .filter((file) =>
+          hasRoomPermission({
+            repo,
+            principal,
+            room,
+            permission: "file:read",
+            relativePath: file.relative_path,
+            aclRules: listAclRules
+          })
+        )
+        .map((file) => ({
+          relativePath: file.relative_path,
+          kind: file.kind,
+          version: file.version,
+          sha256: file.sha256,
+          deleted: Boolean(file.deleted_at)
+        }))
     };
   });
 

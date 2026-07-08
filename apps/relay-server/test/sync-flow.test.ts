@@ -356,6 +356,165 @@ describe("WebSocket sync", () => {
     );
   });
 
+  it("filters GET /api/rooms/:roomId/files to only paths the caller can file:read", async () => {
+    // Regression test: this REST listing endpoint used to do a single top-level
+    // assertRoomPermission({ permission: "file:read" }) (relativePath defaulting to "") and then
+    // return repo.listFiles(room.id) completely unfiltered - the exact same class of leak already
+    // fixed for the WS room_snapshot and for the file-change/file-delete broadcasts, but missed
+    // here. A reader scoped to "public/**/*" must not see files outside that scope in the listing.
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    apps.push(app);
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const invite = (
+      await app.inject({
+        method: "POST",
+        url: `/api/teams/${owner.team.id}/invites`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+      })
+    ).json();
+    const member = (
+      await app.inject({
+        method: "POST",
+        url: "/api/join",
+        payload: { inviteToken: invite.inviteToken, displayName: "M", deviceName: "M laptop" }
+      })
+    ).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      })
+    ).json().room;
+    // Member M is a reader, but only scoped to "public/**/*" - unlike every other ACL fixture in
+    // this file, which grants "**/*".
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "public/**/*" }
+    });
+
+    const publicWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "public/notes.md", baseVersion: 0, content: "hello public" }
+    });
+    expect(publicWrite.statusCode).toBe(200);
+    const secretWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "secret/plan.md", baseVersion: 0, content: "top secret" }
+    });
+    expect(secretWrite.statusCode).toBe(200);
+
+    const listing = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files`,
+      headers: { authorization: `Bearer ${member.deviceToken}` }
+    });
+    expect(listing.statusCode).toBe(200);
+    expect(listing.json().files).toEqual(
+      expect.arrayContaining([expect.objectContaining({ relativePath: "public/notes.md" })])
+    );
+    expect(listing.json().files).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ relativePath: "secret/plan.md" })])
+    );
+
+    // A full-access reader (the owner) still gets the whole room.
+    const ownerListing = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(ownerListing.statusCode).toBe(200);
+    expect(ownerListing.json().files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ relativePath: "public/notes.md" }),
+        expect.objectContaining({ relativePath: "secret/plan.md" })
+      ])
+    );
+  });
+
+  it("excludes files matched by a more specific deny rule on a subpath despite a broad file:read allow, in GET /api/rooms/:roomId/files", async () => {
+    // Sharper version of the same bug: a broad allow "**/*" plus a specific deny on a subpath
+    // (e.g. "secret/**/*") should still block the denied files from the listing. Before the fix,
+    // the single relativePath="" assertRoomPermission check trivially passed (the deny rule
+    // doesn't match relativePath="") and the listing leaked every file including the denied ones.
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    apps.push(app);
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const invite = (
+      await app.inject({
+        method: "POST",
+        url: `/api/teams/${owner.team.id}/invites`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+      })
+    ).json();
+    const member = (
+      await app.inject({
+        method: "POST",
+        url: "/api/join",
+        payload: { inviteToken: invite.inviteToken, displayName: "M", deviceName: "M laptop" }
+      })
+    ).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      })
+    ).json().room;
+    // Broad allow covering the whole room, including relativePath="".
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "**/*" }
+    });
+    // More specific deny on a subpath - must still block those files from the listing.
+    await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "deny", permissions: ["file:read"], pathPattern: "secret/**/*" }
+    });
+
+    const publicWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "public/notes.md", baseVersion: 0, content: "hello public" }
+    });
+    expect(publicWrite.statusCode).toBe(200);
+    const secretWrite = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "secret/plan.md", baseVersion: 0, content: "top secret" }
+    });
+    expect(secretWrite.statusCode).toBe(200);
+
+    const listing = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files`,
+      headers: { authorization: `Bearer ${member.deviceToken}` }
+    });
+    expect(listing.statusCode).toBe(200);
+    expect(listing.json().files).toEqual(
+      expect.arrayContaining([expect.objectContaining({ relativePath: "public/notes.md" })])
+    );
+    expect(listing.json().files).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ relativePath: "secret/plan.md" })])
+    );
+  });
+
   it("revokes a live subscription (without closing the socket) when the team-membership grant behind it is revoked", async () => {
     // Regression test: access that was only ever granted via a team-subject ACL rule must be
     // re-checked on already-open subscriptions once the underlying team membership is revoked -
