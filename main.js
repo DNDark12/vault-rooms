@@ -46239,7 +46239,7 @@ async function createApp(options = {}) {
   const bootstrapPin = generateBootstrapPin();
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("access-control-allow-origin", "*");
-    reply.header("access-control-allow-methods", "GET,POST,PUT,DELETE,OPTIONS");
+    reply.header("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     reply.header("access-control-allow-headers", "authorization,content-type");
     reply.header("access-control-max-age", "86400");
     if (request.method === "OPTIONS") {
