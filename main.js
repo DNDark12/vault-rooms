@@ -46228,13 +46228,12 @@ function requireRoom3(repo, roomId) {
 
 // ../relay-server/src/app.ts
 async function createApp(options = {}) {
-  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i;
   const maxFileBytes = (_a = options.maxFileBytes) != null ? _a : 5 * 1024 * 1024;
   const maxConnections = (_b = options.maxConnections) != null ? _b : 100;
-  const globalRateLimiter = new FixedWindowRateLimiter((_d = (_c = options.rateLimit) == null ? void 0 : _c.globalMax) != null ? _d : 120, (_f = (_e = options.rateLimit) == null ? void 0 : _e.globalWindowMs) != null ? _f : 6e4);
-  const bootstrapRateLimiter = new FixedWindowRateLimiter((_h = (_g = options.rateLimit) == null ? void 0 : _g.bootstrapMax) != null ? _h : 5, (_j = (_i = options.rateLimit) == null ? void 0 : _i.bootstrapWindowMs) != null ? _j : 6e4);
+  const bootstrapRateLimiter = new FixedWindowRateLimiter((_d = (_c = options.rateLimit) == null ? void 0 : _c.bootstrapMax) != null ? _d : 5, (_f = (_e = options.rateLimit) == null ? void 0 : _e.bootstrapWindowMs) != null ? _f : 6e4);
   const app = (0, import_fastify.default)({ logger: false, bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) });
-  const db = await openRelayDb((_k = options.dbPath) != null ? _k : "data/relay.sqlite", options.sqlJsLocator);
+  const db = await openRelayDb((_g = options.dbPath) != null ? _g : "data/relay.sqlite", options.sqlJsLocator);
   const repo = new RelayRepository(db);
   const connectionRegistry = new ConnectionRegistry();
   const bootstrapPin = generateBootstrapPin();
@@ -46254,10 +46253,6 @@ async function createApp(options = {}) {
       void reply.status(429).send({ error: { code: "RATE_LIMITED", message: "Too many bootstrap attempts. Try again later." } });
       return;
     }
-    if (!globalRateLimiter.consume(request.ip)) {
-      void reply.status(429).send({ error: { code: "RATE_LIMITED", message: "Too many requests. Try again later." } });
-      return;
-    }
     done();
   });
   void app.register(import_websocket.default, { options: { maxPayload: maxFileBytes } });
@@ -46275,8 +46270,8 @@ async function createApp(options = {}) {
   }));
   registerAuthRoutes(app, repo);
   registerTeamRoutes(app, repo, {
-    publicUrl: (_l = options.publicUrl) != null ? _l : "http://127.0.0.1:8787",
-    allowRemoteBootstrap: (_m = options.allowRemoteBootstrap) != null ? _m : false,
+    publicUrl: (_h = options.publicUrl) != null ? _h : "http://127.0.0.1:8787",
+    allowRemoteBootstrap: (_i = options.allowRemoteBootstrap) != null ? _i : false,
     bootstrapPin,
     connectionRegistry
   });
