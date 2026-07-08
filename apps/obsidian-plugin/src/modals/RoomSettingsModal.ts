@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting, TFolder } from "obsidian";
+import { Modal, Notice, Setting } from "obsidian";
 import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
 import type VaultRoomsPlugin from "../main.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
@@ -9,7 +9,10 @@ type CapabilityDraft = { pluginId: string; displayName: string; mode: string; mi
 
 export class RoomSettingsModal extends Modal {
   private name: string;
-  private type: "file" | "folder";
+  /** Rooms are always folder rooms now - see CreateRoomModal.ts's matching note. Kept as a literal
+   *  "folder" purely because updateRoomSettings' input type still carries a type field the server
+   *  stores for back-compat with rooms created before this change. */
+  private readonly type = "folder" as const;
   private sourcePath: string;
   private mountName: string;
   private localMountPath: string;
@@ -31,7 +34,6 @@ export class RoomSettingsModal extends Modal {
   ) {
     super(plugin.app);
     this.name = room.name;
-    this.type = room.type;
     this.sourcePath = room.sourcePath;
     this.mountName = room.mountName;
     this.conflictPolicy = room.conflictPolicy;
@@ -82,25 +84,33 @@ export class RoomSettingsModal extends Modal {
         }
       })
     );
-    new Setting(parent)
-      .setName("Source path")
-      .setDesc("The folder (or file) in the owner's vault that this room shares - this is the content that actually gets synced to every member.")
-      .addText((text) =>
-        text.setValue(this.sourcePath).onChange((value) => {
-          this.sourcePath = value.trim();
-          this.type = inferPathType(this.app, this.sourcePath, this.type);
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Choose folder").onClick(() => {
-          new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path, "folder")).open();
-        })
-      )
-      .addButton((button) =>
-        button.setButtonText("Choose file").onClick(() => {
-          new VaultPathSuggestModal(this.app, "file", (path) => this.applyChosenPath(path, "file")).open();
-        })
-      );
+    const isOwner = this.isOwnRoom();
+    if (isOwner) {
+      // For the owner, "Source path" (server-side) and "Local mount path" (client-side override)
+      // are the same thing: the owner's device always mounts the room's real folder in place (see
+      // main.ts's mountPathForRoom doc comment). Showing both as separately-editable fields let the
+      // room drift into a broken state - an override different from sourcePath silently watched/
+      // synced the wrong folder. Collapse to a single field that drives sourcePath directly; no
+      // override is offered or persisted for the owner (see updateRoomSettings()).
+      new Setting(parent)
+        .setName("Room folder")
+        .setDesc("The folder in your vault that this room shares - this is the content that actually gets synced to every member.")
+        .addText((text) =>
+          text.setValue(this.sourcePath).onChange((value) => {
+            this.sourcePath = value.trim();
+          })
+        )
+        .addButton((button) =>
+          button.setButtonText("Choose folder").onClick(() => {
+            new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
+          })
+        );
+    } else {
+      new Setting(parent)
+        .setName("Source path")
+        .setDesc("The folder in the owner's vault that this room shares - this is the content that actually gets synced to every member. Only the owner can change this.")
+        .addText((text) => text.setValue(this.sourcePath).setDisabled(true));
+    }
     new Setting(parent)
       .setName("Mount name")
       .setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).")
@@ -110,15 +120,15 @@ export class RoomSettingsModal extends Modal {
           this.mountNameTouched = true;
         })
       );
-    new Setting(parent)
-      .setName("Local mount path")
-      .setDesc(
-        (this.isOwnRoom()
-          ? "Where this device keeps the room's files. You created this room, so by default it's the source path itself - your existing files stay right where they are, nothing is duplicated."
-          : "Where this device keeps its local copy of the room's files (a folder under Settings → Vault Rooms → Sync → Mount root by default). Leave blank to use that default.") +
-          (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
-      )
-      .addText((text) => text.setValue(this.localMountPath).onChange((value) => (this.localMountPath = value.trim())));
+    if (!isOwner) {
+      new Setting(parent)
+        .setName("Local mount path")
+        .setDesc(
+          "Where this device keeps its local copy of the room's files (a folder under Settings → Vault Rooms → Sync → Mount root by default). Leave blank to use that default." +
+            (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
+        )
+        .addText((text) => text.setValue(this.localMountPath).onChange((value) => (this.localMountPath = value.trim())));
+    }
     new Setting(parent)
       .setName("When edits conflict")
       .setDesc(
@@ -139,9 +149,8 @@ export class RoomSettingsModal extends Modal {
     return this.room.ownerUserId === this.plugin.getActiveServer()?.userId;
   }
 
-  private applyChosenPath(path: string, type: "file" | "folder"): void {
+  private applyChosenPath(path: string): void {
     this.sourcePath = path;
-    this.type = type;
     if (!this.name) {
       this.name = basename(path);
     }
@@ -434,19 +443,6 @@ export class RoomSettingsModal extends Modal {
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
-}
-
-/** See the matching helper in CreateRoomModal.ts - "Type" isn't load-bearing, so it's inferred
- *  from the path instead of asking the user to pick it. */
-function inferPathType(app: App, path: string, previous: "file" | "folder"): "file" | "folder" {
-  if (!path) {
-    return previous;
-  }
-  const file = app.vault.getAbstractFileByPath(path);
-  if (!file) {
-    return previous;
-  }
-  return file instanceof TFolder ? "folder" : "file";
 }
 
 /** Keeps "Mount name" a single, filesystem-safe path segment (matches the server's isSafeMountName check). */

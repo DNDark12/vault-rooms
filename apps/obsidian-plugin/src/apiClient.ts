@@ -258,7 +258,17 @@ export class RelayApiClient implements RelayFileApi {
       },
       body: options.body ? JSON.stringify(options.body) : undefined
     });
-    const body = await response.json();
+    // A well-behaved relay always answers with JSON (success or error envelope), but a network-
+    // level proxy, an empty response, or a truncated body could hand back something that isn't -
+    // response.json() throws a raw SyntaxError for that, which would bypass toRelayError()'s
+    // UNAUTHORIZED handling entirely and surface a confusing low-level error to the caller instead
+    // of a clean, actionable one.
+    let body: any;
+    try {
+      body = await response.json();
+    } catch {
+      throw toRelayError(undefined, "Unexpected non-JSON response from relay");
+    }
     if (!response.ok) {
       const error = toRelayError(body);
       if (error.code === "UNAUTHORIZED") {
@@ -270,8 +280,8 @@ export class RelayApiClient implements RelayFileApi {
   }
 }
 
-function toRelayError(body: any): Error & { code?: string } {
-  const error = new Error(body?.error?.message ?? "Relay request failed") as Error & Record<string, unknown>;
+function toRelayError(body: any, fallbackMessage = "Relay request failed"): Error & { code?: string } {
+  const error = new Error(body?.error?.message ?? fallbackMessage) as Error & Record<string, unknown>;
   error.code = body?.error?.code;
   if (body?.error?.details && typeof body.error.details === "object") {
     Object.assign(error, body.error.details);

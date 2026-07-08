@@ -20,7 +20,7 @@ import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
-import { canonicalPathForConflictCopy, isConflictCopyPath, mountPathForRoom, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
+import { canonicalPathForConflictCopy, isConflictCopyPath, resolveRoomMountPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
@@ -500,7 +500,12 @@ export default class VaultRoomsPlugin extends Plugin {
   ): Promise<void> {
     const server = this.requireActiveServer();
     await this.apiFor(server).updateRoom(roomId, input);
-    if (localMountPath.trim()) {
+    // "Local mount path" is not a supported concept for the room owner (their device always mounts
+    // in place at sourcePath, see roomMountPathFor) - never persist an override for it here, so
+    // re-opening the modal doesn't show stale data from before this field was hidden for owners.
+    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+    const isOwner = room?.ownerUserId === server.userId;
+    if (!isOwner && localMountPath.trim()) {
       this.settings.roomMountPaths[roomId] = localMountPath.trim();
     } else {
       delete this.settings.roomMountPaths[roomId];
@@ -760,6 +765,7 @@ export default class VaultRoomsPlugin extends Plugin {
     this.roomWatchers.get(roomId)?.();
     this.roomWatchers.delete(roomId);
     delete this.settings.mountedRooms[roomId];
+    delete this.settings.roomMountPaths[roomId];
     await this.saveSettings();
     this.renderOpenRoomsViews();
     new Notice(`Forgot ${room?.name ?? "room"} on this device`);
@@ -833,14 +839,11 @@ export default class VaultRoomsPlugin extends Plugin {
    * folder under the configured mount root, since they have no pre-existing copy of the room.
    */
   roomMountPathFor(room: RoomSummary): string {
-    const configured = this.settings.roomMountPaths[room.id]?.trim();
-    if (configured) {
-      return configured;
-    }
     const server = this.requireActiveServer();
     const isOwner = room.ownerUserId === server.userId;
-    return mountPathForRoom({
+    return resolveRoomMountPath({
       owner: isOwner,
+      configuredOverride: this.settings.roomMountPaths[room.id],
       mountRoot: this.settings.mountRoot,
       mountName: room.mountName,
       sourcePath: room.sourcePath
@@ -1013,6 +1016,7 @@ export default class VaultRoomsPlugin extends Plugin {
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
         delete this.settings.mountedRooms[roomId];
+        delete this.settings.roomMountPaths[roomId];
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`Your access to ${room?.name ?? "a room"} was revoked.`);
