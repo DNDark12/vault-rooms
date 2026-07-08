@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "vault-rooms-relay/app";
-import { RelayApiClient } from "../src/apiClient.js";
+import { RelayApiClient, type RoomSummary } from "../src/apiClient.js";
 import { mountPathForRoom, VaultSyncEngine, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "../src/syncClient.js";
 import { registerMountedRoomWatcher } from "../src/fileWatcher.js";
 import { RoomPushCoordinator } from "../src/pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "../src/syncWsClient.js";
 import type { ServerConnection } from "../src/settings.js";
+import { withInstalledCapabilities } from "../src/pluginCapabilities.js";
 
 /**
  * Local copy of relay-server's test/bootstrapHelper.ts injectBootstrap - the obsidian-plugin
@@ -602,5 +603,72 @@ describe("real client stack against a real listening relay (no Obsidian)", () =>
     // The untouched seeded file must remain exactly as-is throughout - no spurious resurrection.
     expect(await a.vault.read(`${aMountPath}/Board.md`)).toBe("seeded board");
     expect(await b.vault.read(`${bMountPath}/Board.md`)).toBe("seeded board");
+  });
+});
+
+describe("Room Settings save -> Vault Rooms panel refresh (main.ts's updateRoomSettings/refreshRooms glue)", () => {
+  /**
+   * Regression coverage for a reported bug: after saving Room Settings with a changed "Source
+   * path", the Vault Rooms panel behind the modal kept showing the OLD source path. The existing
+   * "saves room settings" test above only drives the server via raw app.inject/REST - it never
+   * exercises main.ts's own updateRoomSettings() -> refreshRooms() -> renderOpenRoomsViews() chain,
+   * nor withInstalledCapabilities() (the .map() wrapper every room passes through on its way into
+   * `visibleRooms`, which VaultRoomsView.render() reads live to print "Source: <path>").
+   *
+   * Obsidian's own `Plugin`/`ItemView`/`Modal` classes ship as type-only declarations (see
+   * node_modules obsidian package.json: "main": "") - there is no real runtime implementation to
+   * construct VaultRoomsPlugin/VaultRoomsView against in Node, so this test instead drives the
+   * exact reproducible unit: RelayApiClient.updateRoom() (the real HTTP client
+   * apiFor(server).updateRoom() resolves to) followed by RelayApiClient.listRooms(), through the
+   * real withInstalledCapabilities() mapper - i.e. line-for-line what refreshRooms() does - and
+   * then a render step that reads the resulting array LIVE the way VaultRoomsView.render() does
+   * (no local caching of individual room fields).
+   */
+  it("reflects a changed sourcePath after PATCH -> refreshRooms, with no stale field retained by withInstalledCapabilities", async () => {
+    const { app, baseUrl } = await startRelay();
+    const { owner, room } = await setupRoomWithTeamGrant(app);
+    const api = new RelayApiClient(baseUrl, owner.deviceToken);
+
+    // Minimal fake App surface withInstalledCapabilities() actually touches (app.plugins.enabledPlugins).
+    const fakeApp = { plugins: { enabledPlugins: new Set<string>(["com.example.plugin"]) } } as unknown as import("obsidian").App;
+
+    // Exactly refreshRooms()'s own body, called once before the save to capture the "before" render.
+    async function refreshRooms(): Promise<RoomSummary[]> {
+      const result = await api.listRooms();
+      return result.rooms.map((r) => withInstalledCapabilities(fakeApp, r));
+    }
+
+    // Exactly VaultRoomsView's "Source: ${room.sourcePath}" line - reads the passed-in array LIVE,
+    // no caching/memoization of prior renders.
+    function renderSourceLines(visibleRooms: RoomSummary[]): string[] {
+      return visibleRooms.map((r) => `Source: ${r.sourcePath}`);
+    }
+
+    const before = await refreshRooms();
+    expect(renderSourceLines(before)).toContainEqual(`Source: ${room.sourcePath}`);
+    expect(room.sourcePath).not.toBe("Team/Room/Renamed");
+
+    // Exactly updateRoomSettings()'s call sequence: apiFor(server).updateRoom(roomId, input) then
+    // refreshRooms() (the PATCH response body itself is intentionally ignored by updateRoomSettings,
+    // same as production code - only the follow-up listRooms() result feeds visibleRooms).
+    await api.updateRoom(room.id, {
+      name: "Team Room",
+      type: "folder",
+      sourcePath: "Team/Room/Renamed",
+      mountName: room.mountName,
+      conflictPolicy: "keep_both",
+      capabilities: [{ pluginId: "com.example.plugin", displayName: "Example Plugin", mode: "optional" }]
+    });
+
+    const after = await refreshRooms();
+    const afterRoom = after.find((r) => r.id === room.id);
+    expect(afterRoom?.sourcePath).toBe("Team/Room/Renamed");
+    expect(renderSourceLines(after)).toContainEqual("Source: Team/Room/Renamed");
+    expect(renderSourceLines(after)).not.toContainEqual(`Source: ${room.sourcePath}`);
+
+    // withInstalledCapabilities() must derive purely from the fresh server row, not merge/retain
+    // anything from the "before" object it produced for the same room id on the previous call.
+    expect(afterRoom).not.toBe(before.find((r) => r.id === room.id));
+    expect(afterRoom?.capabilities).toEqual([{ pluginId: "com.example.plugin", displayName: "Example Plugin", mode: "optional", minVersion: undefined, installed: true }]);
   });
 });
