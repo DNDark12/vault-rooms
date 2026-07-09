@@ -61,7 +61,7 @@ export class ServerConnectionManager {
       if (!(adapter instanceof FileSystemAdapter)) {
         throw new Error("Vault Rooms requires the desktop app (filesystem access).");
       }
-      const pluginDir = join(adapter.getBasePath(), this.ctx.manifest.dir ?? `.obsidian/plugins/${this.ctx.manifest.id}`);
+      const pluginDir = join(adapter.getBasePath(), this.ctx.manifest.dir ?? `${this.ctx.app.vault.configDir}/plugins/${this.ctx.manifest.id}`);
       const dataDir = join(pluginDir, "server-data");
       this.embeddedServer = new EmbeddedRelayServer(dataDir);
     }

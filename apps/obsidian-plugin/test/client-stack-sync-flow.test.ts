@@ -201,9 +201,14 @@ function buildClient(input: {
     debounceMs: 20,
     isStillMounted: () => true
   });
-  const unsubscribeWatcher = registerMountedRoomWatcher(vault, room, (event, relativePath) => {
-    coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
-  });
+  const unsubscribeWatcher = registerMountedRoomWatcher(
+    vault,
+    room,
+    (event, relativePath) => {
+      coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
+    },
+    ".obsidian"
+  );
   const client: Client = { vault, server, api, syncEngine, room, socket, coordinator, states, appliedCount: 0, unsubscribeWatcher };
   Object.defineProperty(client, "appliedCount", { get: () => appliedCount });
   clients.push(client);

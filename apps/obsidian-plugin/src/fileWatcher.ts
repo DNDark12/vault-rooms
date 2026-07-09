@@ -3,10 +3,11 @@ import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type Vaul
 
 /** Shared by isWatchableChange (single-path events) and classifyRenameEvent (each side of a
  *  rename/move) - one place that decides "is this vault-relative path something we sync at all".
- *  configDir defaults to Obsidian's default ".obsidian" for callers (mainly tests) that don't
- *  have a real Vault to read Vault#configDir from - a room mounted at the vault root needs the
- *  caller's actual (possibly user-customized) configDir to filter out the real config folder. */
-function relativePathIfWatchable(path: string, room: MountedRoomState, configDir = ".obsidian"): string | null {
+ *  configDir is required (no fallback default) - a room mounted at the vault root needs the
+ *  caller's actual (possibly user-customized) Vault#configDir to filter out the real config
+ *  folder, so callers must always pass it explicitly rather than risk silently assuming a
+ *  default that may not match. */
+function relativePathIfWatchable(path: string, room: MountedRoomState, configDir: string): string | null {
   const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
   if (!path.startsWith(prefix)) {
     return null;
@@ -30,7 +31,7 @@ function relativePathIfWatchable(path: string, room: MountedRoomState, configDir
   return relativePath;
 }
 
-export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomState, configDir?: string): string | null {
+export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomState, configDir: string): string | null {
   return relativePathIfWatchable(event.path, room, configDir);
 }
 
@@ -46,7 +47,7 @@ export type RenameClassification =
  * effectively a delete of the old path, old-out/new-in is effectively a create of the new path,
  * and both outside (or either side ineligible/a conflict copy) is ignored entirely.
  */
-export function classifyRenameEvent(oldPath: string, newPath: string, room: MountedRoomState, configDir?: string): RenameClassification {
+export function classifyRenameEvent(oldPath: string, newPath: string, room: MountedRoomState, configDir: string): RenameClassification {
   const oldRelativePath = relativePathIfWatchable(oldPath, room, configDir);
   const newRelativePath = relativePathIfWatchable(newPath, room, configDir);
   if (oldRelativePath && newRelativePath) {
@@ -72,7 +73,7 @@ export function registerMountedRoomWatcher(
   vault: VaultAdapter,
   room: MountedRoomState,
   cb: (event: VaultChangeEvent, relativePath: string) => void,
-  configDir?: string
+  configDir: string
 ): () => void {
   return vault.onChange((event) => {
     if (event.type === "rename") {

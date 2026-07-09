@@ -43997,7 +43997,7 @@ function isVersionConflict(error) {
 }
 
 // src/fileWatcher.ts
-function relativePathIfWatchable(path, room, configDir = ".obsidian") {
+function relativePathIfWatchable(path, room, configDir) {
   const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
   if (!path.startsWith(prefix)) {
     return null;
@@ -48389,7 +48389,7 @@ var ServerConnectionManager = class {
       if (!(adapter instanceof import_obsidian12.FileSystemAdapter)) {
         throw new Error("Vault Rooms requires the desktop app (filesystem access).");
       }
-      const pluginDir = (0, import_node_path3.join)(adapter.getBasePath(), (_a = this.ctx.manifest.dir) != null ? _a : `.obsidian/plugins/${this.ctx.manifest.id}`);
+      const pluginDir = (0, import_node_path3.join)(adapter.getBasePath(), (_a = this.ctx.manifest.dir) != null ? _a : `${this.ctx.app.vault.configDir}/plugins/${this.ctx.manifest.id}`);
       const dataDir = (0, import_node_path3.join)(pluginDir, "server-data");
       this.embeddedServer = new EmbeddedRelayServer(dataDir);
     }
