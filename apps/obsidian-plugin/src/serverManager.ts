@@ -140,7 +140,7 @@ async function describeBusyPort(port: number): Promise<string> {
 
 async function isVaultRoomsServerOnPort(port: number): Promise<boolean> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 800);
+  const timeout = window.setTimeout(() => controller.abort(), 800);
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
     const body = (await response.json()) as { name?: unknown };
@@ -148,6 +148,6 @@ async function isVaultRoomsServerOnPort(port: number): Promise<boolean> {
   } catch {
     return false;
   } finally {
-    clearTimeout(timeout);
+    window.clearTimeout(timeout);
   }
 }

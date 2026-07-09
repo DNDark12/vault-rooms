@@ -48,6 +48,14 @@ export type FriendSummary = {
   teams: Array<{ id: string; role: "admin" | "member" }>;
 };
 
+export type BootstrapResponse = {
+  user: { id: string; displayName: string };
+  device: { id: string; displayName: string };
+  deviceToken: string;
+  isServerOwner: boolean;
+  team?: { id: string; slug: string; name: string };
+};
+
 export type AclRuleSummary = {
   id: string;
   roomId: string;
@@ -76,20 +84,20 @@ export class RelayApiClient implements RelayFileApi {
 
   async testConnection(): Promise<{ ok: true; version: string }> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3_000);
+    const timeout = window.setTimeout(() => controller.abort(), 3_000);
     try {
       const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
-      const body = await response.json();
+      const body = (await response.json()) as { name?: string; version?: string };
       if (body.name !== "vault-rooms") {
         throw new Error("Something answered, but it is not a Vault Rooms server.");
       }
-      return { ok: true, version: body.version };
+      return { ok: true, version: body.version ?? "unknown" };
     } finally {
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
     }
   }
 
-  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; pin: string }) {
+  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; pin: string }): Promise<BootstrapResponse> {
     return this.request("/api/bootstrap", {
       method: "POST",
       body: input
@@ -144,7 +152,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async createInvite(teamId: string, role: "member" | "admin" = "member") {
+  async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<{ inviteId: string; inviteToken: string; serverUrl: string; joinUrl: string }> {
     return this.request(`/api/teams/${teamId}/invites`, {
       method: "POST",
       body: { role, expiresInMinutes: 60, maxUses: 1 }
@@ -162,7 +170,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async join(inviteToken: string, displayName: string, deviceName: string) {
+  async join(inviteToken: string, displayName: string, deviceName: string): Promise<BootstrapResponse & { team: { id: string; slug: string; name: string } }> {
     return this.request("/api/join", {
       method: "POST",
       body: { inviteToken, displayName, deviceName }
@@ -180,7 +188,7 @@ export class RelayApiClient implements RelayFileApi {
     mountName: string;
     conflictPolicy?: "keep_both" | "owner_wins";
     capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
-  }) {
+  }): Promise<{ room: RoomSummary }> {
     return this.request("/api/rooms", {
       method: "POST",
       body: input
@@ -204,7 +212,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }) {
+  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }): Promise<{ aclRule: AclRuleSummary }> {
     return this.request(`/api/rooms/${roomId}/acl`, {
       method: "POST",
       body: input
@@ -249,7 +257,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  private async request(path: string, options: { method?: string; body?: unknown } = {}) {
+  private async request<T = unknown>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: options.method ?? "GET",
       headers: {
@@ -263,7 +271,7 @@ export class RelayApiClient implements RelayFileApi {
     // response.json() throws a raw SyntaxError for that, which would bypass toRelayError()'s
     // UNAUTHORIZED handling entirely and surface a confusing low-level error to the caller instead
     // of a clean, actionable one.
-    let body: any;
+    let body: unknown;
     try {
       body = await response.json();
     } catch {
@@ -276,15 +284,18 @@ export class RelayApiClient implements RelayFileApi {
       }
       throw error;
     }
-    return body;
+    return body as T;
   }
 }
 
-function toRelayError(body: any, fallbackMessage = "Relay request failed"): Error & { code?: string } {
-  const error = new Error(body?.error?.message ?? fallbackMessage) as Error & Record<string, unknown>;
-  error.code = body?.error?.code;
-  if (body?.error?.details && typeof body.error.details === "object") {
-    Object.assign(error, body.error.details);
+type RelayErrorBody = { error?: { message?: string; code?: string; details?: Record<string, unknown> } };
+
+function toRelayError(body: unknown, fallbackMessage = "Relay request failed"): Error & { code?: string } {
+  const errorBody = body as RelayErrorBody | undefined;
+  const error = new Error(errorBody?.error?.message ?? fallbackMessage) as Error & Record<string, unknown>;
+  error.code = errorBody?.error?.code;
+  if (errorBody?.error?.details && typeof errorBody.error.details === "object") {
+    Object.assign(error, errorBody.error.details);
   }
   return error;
 }

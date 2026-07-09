@@ -67,7 +67,7 @@ export class ObsidianVaultAdapter implements VaultAdapter {
   }
 
   onChange(cb: (event: VaultChangeEvent) => void): () => void {
-    const vault = this.app.vault as Vault;
+    const vault = this.app.vault;
     const refs = [
       vault.on("create", (file) => cb({ type: "create", path: file.path })),
       vault.on("modify", (file) => cb({ type: "modify", path: file.path })),

@@ -43506,17 +43506,18 @@ var RelayApiClient = class {
     this.onUnauthorized = onUnauthorized;
   }
   async testConnection() {
+    var _a;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3e3);
+    const timeout = window.setTimeout(() => controller.abort(), 3e3);
     try {
       const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
       const body = await response.json();
       if (body.name !== "vault-rooms") {
         throw new Error("Something answered, but it is not a Vault Rooms server.");
       }
-      return { ok: true, version: body.version };
+      return { ok: true, version: (_a = body.version) != null ? _a : "unknown" };
     } finally {
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
     }
   }
   async bootstrapServer(input) {
@@ -43660,10 +43661,11 @@ var RelayApiClient = class {
 };
 function toRelayError(body, fallbackMessage = "Relay request failed") {
   var _a, _b, _c, _d;
-  const error = new Error((_b = (_a = body == null ? void 0 : body.error) == null ? void 0 : _a.message) != null ? _b : fallbackMessage);
-  error.code = (_c = body == null ? void 0 : body.error) == null ? void 0 : _c.code;
-  if (((_d = body == null ? void 0 : body.error) == null ? void 0 : _d.details) && typeof body.error.details === "object") {
-    Object.assign(error, body.error.details);
+  const errorBody = body;
+  const error = new Error((_b = (_a = errorBody == null ? void 0 : errorBody.error) == null ? void 0 : _a.message) != null ? _b : fallbackMessage);
+  error.code = (_c = errorBody == null ? void 0 : errorBody.error) == null ? void 0 : _c.code;
+  if (((_d = errorBody == null ? void 0 : errorBody.error) == null ? void 0 : _d.details) && typeof errorBody.error.details === "object") {
+    Object.assign(error, errorBody.error.details);
   }
   return error;
 }
@@ -43995,13 +43997,13 @@ function isVersionConflict(error) {
 }
 
 // src/fileWatcher.ts
-function relativePathIfWatchable(path, room) {
+function relativePathIfWatchable(path, room, configDir = ".obsidian") {
   const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
   if (!path.startsWith(prefix)) {
     return null;
   }
   const relativePath = path.slice(prefix.length);
-  if (!relativePath || relativePath.startsWith(".obsidian/") || relativePath.startsWith(".git/") || relativePath.startsWith("node_modules/") || relativePath.endsWith(".tmp") || relativePath.endsWith(".DS_Store") || isConflictCopyPath(relativePath) || // Skip file types we don't sync at all (v0.1: text/markdown/canvas/json/csv plus common
+  if (!relativePath || relativePath.startsWith(`${configDir}/`) || relativePath.startsWith(".git/") || relativePath.startsWith("node_modules/") || relativePath.endsWith(".tmp") || relativePath.endsWith(".DS_Store") || isConflictCopyPath(relativePath) || // Skip file types we don't sync at all (v0.1: text/markdown/canvas/json/csv plus common
   // image formats and PDF) - avoids a doomed round trip to the server on every keystroke/save
   // for files that were never eligible in the first place.
   !isEligiblePath(relativePath)) {
@@ -44009,12 +44011,12 @@ function relativePathIfWatchable(path, room) {
   }
   return relativePath;
 }
-function isWatchableChange(event, room) {
-  return relativePathIfWatchable(event.path, room);
+function isWatchableChange(event, room, configDir) {
+  return relativePathIfWatchable(event.path, room, configDir);
 }
-function classifyRenameEvent(oldPath, newPath, room) {
-  const oldRelativePath = relativePathIfWatchable(oldPath, room);
-  const newRelativePath = relativePathIfWatchable(newPath, room);
+function classifyRenameEvent(oldPath, newPath, room, configDir) {
+  const oldRelativePath = relativePathIfWatchable(oldPath, room, configDir);
+  const newRelativePath = relativePathIfWatchable(newPath, room, configDir);
   if (oldRelativePath && newRelativePath) {
     return { kind: "rename", oldRelativePath, relativePath: newRelativePath };
   }
@@ -44026,10 +44028,10 @@ function classifyRenameEvent(oldPath, newPath, room) {
   }
   return { kind: "ignore" };
 }
-function registerMountedRoomWatcher(vault, room, cb) {
+function registerMountedRoomWatcher(vault, room, cb, configDir) {
   return vault.onChange((event) => {
     if (event.type === "rename") {
-      const classification = classifyRenameEvent(event.oldPath, event.path, room);
+      const classification = classifyRenameEvent(event.oldPath, event.path, room, configDir);
       if (classification.kind === "rename") {
         cb({ type: "delete", path: event.oldPath }, classification.oldRelativePath);
         cb({ type: "create", path: event.path }, classification.relativePath);
@@ -44040,7 +44042,7 @@ function registerMountedRoomWatcher(vault, room, cb) {
       }
       return;
     }
-    const relativePath = isWatchableChange(event, room);
+    const relativePath = isWatchableChange(event, room, configDir);
     if (relativePath) {
       cb(event, relativePath);
     }
@@ -45014,8 +45016,8 @@ var RoomPushCoordinator = class {
     __publicField(this, "schedule");
     __publicField(this, "cancel");
     var _a, _b;
-    this.schedule = (_a = deps.schedule) != null ? _a : ((fn, ms) => setTimeout(fn, ms));
-    this.cancel = (_b = deps.cancel) != null ? _b : ((id) => clearTimeout(id));
+    this.schedule = (_a = deps.schedule) != null ? _a : ((fn, ms) => window.setTimeout(fn, ms));
+    this.cancel = (_b = deps.cancel) != null ? _b : ((id) => window.clearTimeout(id));
   }
   /** Handles one already-classified local vault event for this room. */
   handleLocalChange(type, relativePath) {
@@ -48326,7 +48328,7 @@ async function describeBusyPort(port) {
 }
 async function isVaultRoomsServerOnPort(port) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 800);
+  const timeout = window.setTimeout(() => controller.abort(), 800);
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
     const body = await response.json();
@@ -48334,7 +48336,7 @@ async function isVaultRoomsServerOnPort(port) {
   } catch (e) {
     return false;
   } finally {
-    clearTimeout(timeout);
+    window.clearTimeout(timeout);
   }
 }
 
@@ -49279,12 +49281,17 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       debounceMs: this.settings.debounceMs,
       isStillMounted: () => this.settings.mountedRooms[roomId] === roomState && !roomState.unmounted
     });
-    const unsubscribe = registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
-      if (this.settings.mountedRooms[roomId] !== roomState) {
-        return;
-      }
-      coordinator.handleLocalChange(event.type, relativePath);
-    });
+    const unsubscribe = registerMountedRoomWatcher(
+      this.vaultAdapter,
+      roomState,
+      (event, relativePath) => {
+        if (this.settings.mountedRooms[roomId] !== roomState) {
+          return;
+        }
+        coordinator.handleLocalChange(event.type, relativePath);
+      },
+      this.app.vault.configDir
+    );
     this.roomCoordinators.set(roomId, coordinator);
     this.roomWatchers.set(roomId, () => {
       unsubscribe();

@@ -246,7 +246,7 @@ export default class VaultRoomsPlugin extends Plugin {
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...loaded,
-      servers: isLegacy ? [] : ((loaded?.servers as VaultRoomsSettings["servers"] | undefined) ?? DEFAULT_SETTINGS.servers),
+      servers: isLegacy ? [] : (loaded?.servers ?? DEFAULT_SETTINGS.servers),
       activeServerId: isLegacy ? undefined : loaded?.activeServerId,
       mountedRooms: isLegacy ? {} : (loaded?.mountedRooms ?? DEFAULT_SETTINGS.mountedRooms),
       roomMountPaths: isLegacy ? {} : (loaded?.roomMountPaths ?? DEFAULT_SETTINGS.roomMountPaths),
@@ -783,15 +783,20 @@ export default class VaultRoomsPlugin extends Plugin {
       debounceMs: this.settings.debounceMs,
       isStillMounted: () => this.settings.mountedRooms[roomId] === roomState && !roomState.unmounted
     });
-    const unsubscribe = registerMountedRoomWatcher(this.vaultAdapter, roomState, (event, relativePath) => {
-      if (this.settings.mountedRooms[roomId] !== roomState) {
-        return;
-      }
-      // registerMountedRoomWatcher already translates "rename" into a synthetic delete-old +
-      // create-new pair (see classifyRenameEvent), so event.type here is always "create" |
-      // "modify" | "delete".
-      coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
-    });
+    const unsubscribe = registerMountedRoomWatcher(
+      this.vaultAdapter,
+      roomState,
+      (event, relativePath) => {
+        if (this.settings.mountedRooms[roomId] !== roomState) {
+          return;
+        }
+        // registerMountedRoomWatcher already translates "rename" into a synthetic delete-old +
+        // create-new pair (see classifyRenameEvent), so event.type here is always "create" |
+        // "modify" | "delete".
+        coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
+      },
+      this.app.vault.configDir
+    );
     this.roomCoordinators.set(roomId, coordinator);
     this.roomWatchers.set(roomId, () => {
       unsubscribe();

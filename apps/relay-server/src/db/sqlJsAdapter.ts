@@ -7,8 +7,8 @@ export type SqlRow = Record<string, unknown>;
 export interface PreparedStatement {
   run(...params: unknown[]): { changes: number };
   // Untyped like better-sqlite3's Statement#get/#all: callers cast the row shape themselves.
-  get(...params: unknown[]): any;
-  all(...params: unknown[]): any[];
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
 }
 
 export interface RelayDb {
@@ -111,7 +111,7 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
         try {
           stmt.bind(normalizeParams(params));
           const hasRow = stmt.step();
-          return hasRow ? (stmt.getAsObject() as SqlRow) : undefined;
+          return hasRow ? stmt.getAsObject() : undefined;
         } finally {
           stmt.free();
         }
@@ -123,7 +123,7 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
         try {
           stmt.bind(normalizeParams(params));
           while (stmt.step()) {
-            rows.push(stmt.getAsObject() as SqlRow);
+            rows.push(stmt.getAsObject());
           }
         } finally {
           stmt.free();
