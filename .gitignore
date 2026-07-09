@@ -36,3 +36,4 @@ apps/relay-server/test/health.test.d.ts.map
 # manually" and "Release checklist" in README.md. sql-wasm.wasm is embedded into main.js at build
 # time (esbuild.config.mjs), not shipped as a separate file.
 apps/obsidian-plugin/main.js
+apps/obsidian-plugin/assets/
