@@ -1,6 +1,7 @@
 import { ItemView, Notice, Setting, WorkspaceLeaf } from "obsidian";
 import type { TeamSummary } from "../apiClient.js";
 import type VaultRoomsPlugin from "../main.js";
+import { confirmModal } from "../modals/ConfirmModal.js";
 
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
 
@@ -347,7 +348,7 @@ export class VaultRoomsView extends ItemView {
   }
 
   private async deleteTeamWithConfirm(team: TeamSummary): Promise<void> {
-    if (!window.confirm(`Delete team "${team.name}"? This removes its members, invites, and room access grants for everyone. Rooms are not deleted. This cannot be undone.`)) {
+    if (!(await confirmModal(this.app, "Delete team", `Delete team "${team.name}"? This removes its members, invites, and room access grants for everyone. Rooms are not deleted. This cannot be undone.`, "Delete team"))) {
       return;
     }
     await this.plugin.deleteTeam(team.id);

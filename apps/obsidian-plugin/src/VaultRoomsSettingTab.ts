@@ -1,5 +1,6 @@
 import { Notice, PluginSettingTab, Setting } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
+import { confirmModal } from "./modals/ConfirmModal.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
   constructor(private readonly plugin: VaultRoomsPlugin) {
@@ -194,9 +195,9 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       setting.addButton((button) =>
         button
           .setButtonText("Forget")
-          .setWarning()
+          .setDestructive()
           .onClick(async () => {
-            if (!window.confirm(`Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
+            if (!(await confirmModal(this.app, "Forget server", `Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`, "Forget"))) {
               return;
             }
             await this.plugin.forgetServer(server.id);

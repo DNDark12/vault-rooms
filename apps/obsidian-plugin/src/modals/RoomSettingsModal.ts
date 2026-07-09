@@ -1,6 +1,7 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
 import type VaultRoomsPlugin from "../main.js";
+import { confirmModal } from "./ConfirmModal.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
 
 const PERMISSIONS = ["room:read", "room:write", "room:delete", "file:read", "file:write", "file:create", "file:delete", "sync:subscribe", "sync:push"];
@@ -353,7 +354,7 @@ export class RoomSettingsModal extends Modal {
       row.addButton((button) =>
         button
           .setButtonText("Remove")
-          .setWarning()
+          .setDestructive()
           .onClick(async () => {
             try {
               await this.plugin.removeRoomAccess(this.room.id, rule.id);
@@ -378,9 +379,9 @@ export class RoomSettingsModal extends Modal {
       .addButton((button) =>
         button
           .setButtonText("Delete room")
-          .setWarning()
+          .setDestructive()
           .onClick(async () => {
-            if (!window.confirm(`Delete room "${this.room.name}"? This removes it and all of its files for every member. This cannot be undone.`)) {
+            if (!(await confirmModal(this.app, "Delete room", `Delete room "${this.room.name}"? This removes it and all of its files for every member. This cannot be undone.`, "Delete room"))) {
               return;
             }
             try {

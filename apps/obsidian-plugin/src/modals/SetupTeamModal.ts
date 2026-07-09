@@ -1,5 +1,6 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
+import { defaultDeviceName } from "./deviceName.js";
 
 export class SetupTeamModal extends Modal {
   private teamName = "";
@@ -28,7 +29,7 @@ export class SetupTeamModal extends Modal {
     new Setting(contentEl)
       .setName("Device name")
       .setDesc("Identifies this specific device (shown in conflict-copy filenames, and lets a lost/stolen device be revoked separately from your account later).")
-      .addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => (this.deviceName = value.trim())));
+      .addText((text) => text.setValue(this.deviceName || defaultDeviceName()).onChange((value) => (this.deviceName = value.trim())));
     new Setting(contentEl)
       .setName("First team name")
       .setDesc("Optional - creates a team you own right away. You can create more teams later.")

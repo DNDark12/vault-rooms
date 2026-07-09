@@ -1,5 +1,6 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
+import { defaultDeviceName } from "./deviceName.js";
 
 export class JoinTeamModal extends Modal {
   private inviteInput = "";
@@ -50,7 +51,7 @@ export class JoinTeamModal extends Modal {
       });
     new Setting(contentEl)
       .setName("Device name")
-      .addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => (this.deviceName = value.trim())));
+      .addText((text) => text.setValue(this.deviceName || defaultDeviceName()).onChange((value) => (this.deviceName = value.trim())));
     new Setting(contentEl).addButton((button) =>
       button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
         await this.submit();
@@ -91,7 +92,7 @@ export class JoinTeamModal extends Modal {
     new Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => (this.displayName = value.trim())));
     new Setting(contentEl)
       .setName("Device name")
-      .addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => (this.deviceName = value.trim())));
+      .addText((text) => text.setValue(this.deviceName || defaultDeviceName()).onChange((value) => (this.deviceName = value.trim())));
     new Setting(contentEl).addButton((button) =>
       button.setButtonText("Test connection").onClick(async () => {
         await this.plugin.testConnection(this.serverUrl);

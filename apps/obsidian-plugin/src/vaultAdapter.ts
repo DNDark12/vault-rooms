@@ -50,7 +50,7 @@ export class ObsidianVaultAdapter implements VaultAdapter {
   async delete(path: string): Promise<void> {
     const existing = this.app.vault.getAbstractFileByPath(normalizePath(path));
     if (existing) {
-      await this.app.vault.trash(existing, true);
+      await this.app.fileManager.trashFile(existing);
     }
   }
 

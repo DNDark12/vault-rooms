@@ -3,13 +3,13 @@ import {
   RelayApiClient,
   type AclRuleSummary,
   type FriendSummary,
-  type MyTeamSummary,
   type RoomSummary,
   type TeamDirectoryEntry,
   type TeamMemberSummary,
   type TeamSummary
 } from "./apiClient.js";
 import { registerMountedRoomWatcher } from "./fileWatcher.js";
+import { confirmModal } from "./modals/ConfirmModal.js";
 import { DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type ServerConnection, type VaultRoomsSettings } from "./settings.js";
 import type { EmbeddedServerStatus } from "./serverManager.js";
 import { VaultRoomsSettingTab } from "./VaultRoomsSettingTab.js";
@@ -177,7 +177,9 @@ export default class VaultRoomsPlugin extends Plugin {
 
     const handleJoinLink = (params: ObsidianProtocolData) => {
       const mode = params.mode ?? params.op ?? "join";
-      if (mode !== "join" || !params.server || !params.token) {
+      const inviteServer = params.server;
+      const inviteToken = params.token;
+      if (mode !== "join" || !inviteServer || !inviteToken) {
         new Notice("Vault Rooms invite link is missing server/token parameters.");
         return;
       }
@@ -185,15 +187,15 @@ export default class VaultRoomsPlugin extends Plugin {
       // team" invite for someone who already has an account there - accept it directly onto the
       // caller's existing user/device instead of running through the (new account) join modal.
       const existing = this.settings.servers.find(
-        (server) => server.status === "active" && normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(params.server as string)
+        (server) => server.status === "active" && normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(inviteServer)
       );
       if (existing) {
-        this.acceptInviteForServer(existing, params.token as string).catch((error) => {
+        this.acceptInviteForServer(existing, inviteToken).catch((error) => {
           new Notice(error instanceof Error ? error.message : "Failed to accept invite");
         });
         return;
       }
-      new JoinTeamModal(this, "join", params.server, params.token).open();
+      new JoinTeamModal(this, "join", inviteServer, inviteToken).open();
     };
     // Accept both obsidian://vault-rooms?mode=join&... and obsidian://vault-rooms/join?... link shapes.
     this.registerObsidianProtocolHandler("vault-rooms", handleJoinLink);
@@ -218,7 +220,7 @@ export default class VaultRoomsPlugin extends Plugin {
     });
   }
 
-  async onunload(): Promise<void> {
+  onunload(): void {
     // Obsidian's public Plugin.onunload()/Component.unload() lifecycle does not await this
     // promise (and register() callbacks are fire-and-forget too), so a fast plugin reload may
     // start a new autoStart server before this embedded server has fully released its port. The
@@ -232,7 +234,7 @@ export default class VaultRoomsPlugin extends Plugin {
       this.stopWatchingRoom(roomId);
     }
     this.syncSocket?.disconnect();
-    await this.serverConnectionManager.stopSilently();
+    void this.serverConnectionManager.stopSilently();
   }
 
   async loadSettings(): Promise<void> {
@@ -486,7 +488,7 @@ export default class VaultRoomsPlugin extends Plugin {
       const team = this.teams.find((candidate) => candidate.id === teamId);
       const activeMembers = this.teamMembersByTeam[teamId]?.filter((member) => !member.revokedAt) ?? [];
       if (team && activeMembers.length === 0 && this.canDeleteTeam(team)) {
-        if (window.confirm(`Team "${team.name}" now has no members left. Delete it too?`)) {
+        if (await confirmModal(this.app, "Delete team", `Team "${team.name}" now has no members left. Delete it too?`, "Delete team")) {
           await this.deleteTeam(teamId);
         }
       }

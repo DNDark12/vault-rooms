@@ -41,7 +41,7 @@ export class VaultPathSuggestModal extends SuggestModal<TAbstractFile> {
     const needle = query.toLowerCase().trim();
     const files = this.type === "folder" ? this.app.vault.getAllLoadedFiles().filter(isFolder) : this.app.vault.getFiles();
     return files
-      .filter((file) => file.path && !file.path.startsWith(".obsidian/"))
+      .filter((file) => file.path && !file.path.startsWith(`${this.app.vault.configDir}/`))
       .filter((file) => !needle || file.path.toLowerCase().includes(needle))
       .slice(0, 100);
   }
