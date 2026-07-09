@@ -23,6 +23,7 @@ export type RoomSyncSocketDeps = {
 
 const MIN_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+const HEALTH_PROBE_TIMEOUT_MS = 2500;
 
 /**
  * Keeps a live WebSocket connection to the relay's /sync endpoint so remote edits made by
@@ -60,7 +61,7 @@ export class RoomSyncSocket {
   connect(): void {
     this.closedByUser = false;
     this.setState("connecting");
-    this.open();
+    void this.open();
   }
 
   disconnect(): void {
@@ -86,7 +87,26 @@ export class RoomSyncSocket {
     }
   }
 
-  private open(): void {
+  private async open(): Promise<void> {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);
+    let healthy = false;
+    try {
+      const response = await fetch(`${this.server.baseUrl.replace(/\/+$/, "")}/health`, { signal: controller.signal });
+      healthy = response.ok;
+    } catch {
+      healthy = false;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+    if (this.closedByUser) {
+      return;
+    }
+    if (!healthy) {
+      this.scheduleReconnect();
+      return;
+    }
+
     let socket: WebSocket;
     try {
       socket = new WebSocket(toWsUrl(this.server.baseUrl));
@@ -136,7 +156,7 @@ export class RoomSyncSocket {
     }
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
-      this.open();
+      void this.open();
     }, this.reconnectDelayMs);
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
   }

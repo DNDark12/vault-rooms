@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RoomSyncSocket, type RoomSyncSocketDeps } from "./syncWsClient.js";
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 import type { ServerConnection } from "./settings.js";
 import type { RelayApiClient } from "./apiClient.js";
+
+(globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
 
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
@@ -81,6 +83,66 @@ function createRoom(): MountedRoomState {
     files: {}
   };
 }
+
+function createDeps(): RoomSyncSocketDeps {
+  const vault = new FakeVaultAdapter();
+  const api = new FakeApi();
+  return {
+    getMountedRoom: () => undefined,
+    getApi: () => api as unknown as RelayApiClient,
+    syncEngine: new VaultSyncEngine(vault, api),
+    onApplied: () => undefined,
+    onRevoked: () => undefined,
+    onRoomDeleted: () => undefined,
+    onAccessRevoked: () => undefined
+  };
+}
+
+function stubWebSocket(): ReturnType<typeof vi.fn> {
+  const WebSocketSpy = vi.fn(function (this: { readyState: number; addEventListener: () => void; close: () => void; send: () => void }, _url: string) {
+    this.readyState = 0;
+    this.addEventListener = vi.fn();
+    this.close = vi.fn();
+    this.send = vi.fn();
+  });
+  (WebSocketSpy as unknown as { OPEN: number }).OPEN = 1;
+  vi.stubGlobal("WebSocket", WebSocketSpy);
+  return WebSocketSpy;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("RoomSyncSocket health probe", () => {
+  it("schedules a reconnect without constructing a WebSocket when the health probe fails", async () => {
+    const WebSocketSpy = stubWebSocket();
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    const socket = new RoomSyncSocket(createServer(), createDeps());
+
+    socket.connect();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetch).toHaveBeenCalledWith("http://localhost:8787/health", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(WebSocketSpy).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
+    socket.disconnect();
+  });
+
+  it("constructs the WebSocket with the sync URL when the health probe succeeds", async () => {
+    const WebSocketSpy = stubWebSocket();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    const socket = new RoomSyncSocket(createServer(), createDeps());
+
+    socket.connect();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(WebSocketSpy).toHaveBeenCalledWith("ws://localhost:8787/sync");
+    socket.disconnect();
+  });
+});
 
 describe("RoomSyncSocket.reconcileSnapshot", () => {
   it("does not resurrect a remote change over a path with a pending local delete (offline delete, teammate edit, reconnect)", async () => {

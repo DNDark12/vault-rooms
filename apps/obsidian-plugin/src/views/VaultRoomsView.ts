@@ -30,7 +30,7 @@ export class VaultRoomsView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    if (this.plugin.getActiveServer()) {
+    if (this.plugin.getActiveServer() && !this.plugin.activeServerIsOwnStoppedServer()) {
       await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
         new Notice(error instanceof Error ? error.message : "Failed to load rooms");
       });
@@ -165,11 +165,19 @@ export class VaultRoomsView extends ItemView {
 
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
     card.createEl("div", { text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
-    const syncState = this.plugin.getSyncState();
     const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
-    const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting…" : "Live sync: offline";
-    const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
-    badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    if (this.plugin.activeServerIsOwnStoppedServer()) {
+      badgeRow.createSpan({ cls: "vault-rooms-badge is-stopped", text: "Live sync: server stopped" });
+      card.createEl("div", {
+        cls: "vault-rooms-room-meta",
+        text: "Start this device's server above (\"This device's server\"), or enable \"Start automatically\" in Settings → Vault Rooms → Relay server."
+      });
+    } else {
+      const syncState = this.plugin.getSyncState();
+      const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting…" : "Live sync: offline";
+      const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
+      badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    }
 
     // Only "Join another server" belongs here: a person can legitimately be a client of many
     // servers (each teammate's own), but can only ever own one hosted server on this device (see
@@ -229,7 +237,10 @@ export class VaultRoomsView extends ItemView {
     this.renderCollapsibleSection(parent, "friends", "Friends", others.length, (body) => {
       const list = body.createDiv({ cls: "vault-rooms-friend-list" });
       if (others.length === 0) {
-        list.createDiv({ cls: "vault-rooms-empty", text: "No friends yet - share an invite link to add one." });
+        list.createDiv({
+          cls: "vault-rooms-empty",
+          text: this.plugin.activeServerIsOwnStoppedServer() ? "This device's server is stopped - start it above to load friends." : "No friends yet - share an invite link to add one."
+        });
         return;
       }
       for (const friend of others) {
@@ -265,7 +276,10 @@ export class VaultRoomsView extends ItemView {
       }
 
       if (this.plugin.teams.length === 0) {
-        body.createDiv({ cls: "vault-rooms-empty", text: "No teams yet." });
+        body.createDiv({
+          cls: "vault-rooms-empty",
+          text: this.plugin.activeServerIsOwnStoppedServer() ? "This device's server is stopped - start it above to load teams." : "No teams yet."
+        });
         return;
       }
 
@@ -349,7 +363,10 @@ export class VaultRoomsView extends ItemView {
       });
 
       if (this.plugin.visibleRooms.length === 0) {
-        body.createDiv({ cls: "vault-rooms-empty", text: "No rooms loaded." });
+        body.createDiv({
+          cls: "vault-rooms-empty",
+          text: this.plugin.activeServerIsOwnStoppedServer() ? "This device's server is stopped - start it above to load rooms." : "No rooms loaded."
+        });
         return;
       }
 

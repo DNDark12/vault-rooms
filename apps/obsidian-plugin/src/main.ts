@@ -1,6 +1,4 @@
-import { FileSystemAdapter, Notice, Plugin, type ObsidianProtocolData } from "obsidian";
-import { join } from "node:path";
-import { isEligiblePath } from "@vault-rooms/protocol";
+import { Notice, Plugin, type ObsidianProtocolData } from "obsidian";
 import {
   RelayApiClient,
   type AclRuleSummary,
@@ -12,20 +10,23 @@ import {
   type TeamSummary
 } from "./apiClient.js";
 import { registerMountedRoomWatcher } from "./fileWatcher.js";
-import { activeServer, DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type ServerConnection, type VaultRoomsSettings } from "./settings.js";
-import { EmbeddedRelayServer, type EmbeddedServerStatus } from "./serverManager.js";
+import { DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type ServerConnection, type VaultRoomsSettings } from "./settings.js";
+import type { EmbeddedServerStatus } from "./serverManager.js";
 import { VaultRoomsSettingTab } from "./VaultRoomsSettingTab.js";
 import { CreateRoomModal } from "./modals/CreateRoomModal.js";
 import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
-import { canonicalPathForConflictCopy, isConflictCopyPath, resolveRoomMountPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
+import { VaultSyncEngine, type MountedRoomState } from "./syncClient.js";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
 import { VAULT_ROOMS_VIEW_TYPE, VaultRoomsView } from "./views/VaultRoomsView.js";
 import { withInstalledCapabilities } from "./pluginCapabilities.js";
+import type { PluginContext } from "./controllers/PluginContext.js";
+import { ServerConnectionManager } from "./controllers/ServerConnectionManager.js";
+import { RoomMountController, type RoomMountControllerDeps } from "./controllers/RoomMountController.js";
 
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
@@ -52,14 +53,40 @@ export default class VaultRoomsPlugin extends Plugin {
   /** One RoomPushCoordinator per currently-watched mounted room - used by connectSyncSocket()'s
    *  onStateChange to retry any dirty/pending-delete files once the live-sync socket reconnects. */
   private roomCoordinators = new Map<string, RoomPushCoordinator>();
-  private embeddedServer: EmbeddedRelayServer | null = null;
   private syncSocket: RoomSyncSocket | null = null;
   private syncState: SyncConnectionState = "offline";
+  private roomMountController!: RoomMountController;
+  /** Getter-backed facade passed to controllers so state reads stay live without exposing the plugin's full surface. */
+  private readonly ctx: PluginContext & RoomMountControllerDeps = ((self: VaultRoomsPlugin): PluginContext & RoomMountControllerDeps => ({
+    app: self.app,
+    manifest: self.manifest,
+    get settings(): VaultRoomsSettings {
+      return self.settings;
+    },
+    get visibleRooms(): RoomSummary[] {
+      return self.visibleRooms;
+    },
+    apiFor: (server) => self.apiFor(server),
+    requireActiveServer: () => self.requireActiveServer(),
+    saveSettings: () => self.saveSettings(),
+    renderOpenRoomsViews: () => self.renderOpenRoomsViews(),
+    get vaultAdapter(): ObsidianVaultAdapter {
+      return self.vaultAdapter;
+    },
+    getSyncEngine: () => self.syncEngine,
+    stopWatchingRoom: (roomId) => self.stopWatchingRoom(roomId),
+    watchMountedRoom: (roomId) => self.watchMountedRoom(roomId),
+    subscribeRoom: (roomId) => {
+      self.syncSocket?.subscribe(roomId);
+    }
+  }))(this);
+  private readonly serverConnectionManager: ServerConnectionManager = new ServerConnectionManager(this.ctx);
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.vaultAdapter = new ObsidianVaultAdapter(this);
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, new RelayApiClient("http://127.0.0.1:8787"));
+    this.roomMountController = new RoomMountController(this.ctx);
     this.addSettingTab(new VaultRoomsSettingTab(this));
     this.registerView(VAULT_ROOMS_VIEW_TYPE, (leaf) => new VaultRoomsView(leaf, this));
     this.addRibbonIcon("box", "Vault Rooms", () => this.openRoomsPanel());
@@ -140,8 +167,7 @@ export default class VaultRoomsPlugin extends Plugin {
       id: "disconnect",
       name: "Disconnect",
       callback: async () => {
-        this.syncSocket?.disconnect();
-        this.syncSocket = null;
+        this.disconnectSyncSocket();
         this.settings.activeServerId = undefined;
         await this.saveSettings();
         this.renderOpenRoomsViews();
@@ -183,6 +209,11 @@ export default class VaultRoomsPlugin extends Plugin {
     // connectSyncSocket()'s other call sites (setupServer/joinServer/activateServer/etc.), which
     // already only ever run well after startup in response to user actions.
     this.app.workspace.onLayoutReady(() => {
+      // If the active connection is this device's own stopped embedded server, there is nothing
+      // listening yet; Start server calls connectSyncSocket() again after the relay is running.
+      if (this.activeServerIsOwnStoppedServer()) {
+        return;
+      }
       this.connectSyncSocket();
     });
   }
@@ -197,12 +228,11 @@ export default class VaultRoomsPlugin extends Plugin {
     // per-room debounce timers in roomWatchers are plain window.setTimeout() calls - left running,
     // they'd fire after unload and try to push through an already-disconnected socket/stopped
     // server. Tear every mounted room's watcher down explicitly, same as unmountRoom() does.
-    for (const unsubscribe of this.roomWatchers.values()) {
-      unsubscribe();
+    for (const roomId of Array.from(this.roomWatchers.keys())) {
+      this.stopWatchingRoom(roomId);
     }
-    this.roomWatchers.clear();
     this.syncSocket?.disconnect();
-    await this.embeddedServer?.stop();
+    await this.serverConnectionManager.stopSilently();
   }
 
   async loadSettings(): Promise<void> {
@@ -227,7 +257,7 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   getServerStatus(): EmbeddedServerStatus {
-    return this.embeddedServer?.getStatus() ?? { running: false };
+    return this.serverConnectionManager.getServerStatus();
   }
 
   /** Live-sync WebSocket state - separate from getServerStatus(), which is about *hosting* the embedded server. */
@@ -236,49 +266,25 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   async startEmbeddedServer(): Promise<EmbeddedServerStatus> {
-    const server = this.getOrCreateEmbeddedServer();
-    const previousPinnedPort = this.settings.server.pinnedPort;
-    const status = await server.start(this.settings.server);
-    this.renderOpenRoomsViews();
-    if (status.running) {
-      if (!this.settings.server.port && status.port !== this.settings.server.pinnedPort) {
-        this.settings.server.pinnedPort = status.port;
-        await this.saveSettings();
-      }
-      if (status.portPinChanged) {
-        const reason =
-          status.portPinFallbackReason === "zombie"
-            ? "The old port still looks like a previous Vault Rooms server instance."
-            : status.portPinFallbackReason === "occupied"
-              ? "The old port is occupied by another app."
-              : "The old port is occupied.";
-        new Notice(
-          `Vault Rooms server moved from port ${previousPinnedPort} to ${status.port}. ${reason} Invite links and saved logins that reference the old port may need regenerating.`,
-          0
-        );
-      }
-      new Notice(`Vault Rooms server running at ${status.localUrl}`);
+    const status = await this.serverConnectionManager.startEmbeddedServer();
+    const server = this.getActiveServer();
+    if (status.running && server && this.isOwnEmbeddedServerConnection(server)) {
+      this.connectSyncSocket();
+      await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
+      this.renderOpenRoomsViews();
     }
     return status;
   }
 
+  /** Disconnects live sync when this device's own server is intentionally stopped, so the socket
+   *  cannot fall into reconnect backoff against a relay we just shut down on purpose. */
   async stopEmbeddedServer(): Promise<void> {
-    await this.embeddedServer?.stop();
-    this.renderOpenRoomsViews();
-    new Notice("Vault Rooms server stopped.");
-  }
-
-  private getOrCreateEmbeddedServer(): EmbeddedRelayServer {
-    if (!this.embeddedServer) {
-      const adapter = this.app.vault.adapter;
-      if (!(adapter instanceof FileSystemAdapter)) {
-        throw new Error("Vault Rooms requires the desktop app (filesystem access).");
-      }
-      const pluginDir = join(adapter.getBasePath(), this.manifest.dir ?? `.obsidian/plugins/${this.manifest.id}`);
-      const dataDir = join(pluginDir, "server-data");
-      this.embeddedServer = new EmbeddedRelayServer(dataDir);
+    const server = this.getActiveServer();
+    const wasOwnEmbeddedServerConnection = Boolean(server && this.isOwnEmbeddedServerConnection(server));
+    await this.serverConnectionManager.stopEmbeddedServer();
+    if (wasOwnEmbeddedServerConnection) {
+      this.disconnectSyncSocket();
     }
-    return this.embeddedServer;
   }
 
   async saveSettings(): Promise<void> {
@@ -286,7 +292,23 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   getActiveServer(): ServerConnection | undefined {
-    return activeServer(this.settings);
+    return this.serverConnectionManager.getActiveServer();
+  }
+
+  /** True only for this plugin's own embedded relay connection. isServerOwner alone is too broad:
+   *  this account can own a standalone vault-rooms-relay deployment running elsewhere. Bootstrap
+   *  through this plugin's UI always stores the embedded server's loopback localUrl (see
+   *  setupServer() and serverManager.ts), so pairing owner identity with a loopback baseUrl pins it
+   *  to this device's embedded server. */
+  private isOwnEmbeddedServerConnection(server: ServerConnection): boolean {
+    return server.isServerOwner && isLoopbackUrl(server.baseUrl);
+  }
+
+  /** Used to skip live-sync WebSocket creation and REST refreshes when there is genuinely nothing
+   *  listening yet. This is never true for a remote server, even one this account owns. */
+  activeServerIsOwnStoppedServer(): boolean {
+    const server = this.getActiveServer();
+    return Boolean(server && this.isOwnEmbeddedServerConnection(server) && !this.getServerStatus().running);
   }
 
   /**
@@ -298,12 +320,11 @@ export default class VaultRoomsPlugin extends Plugin {
    * completed"). The panel uses this to stop offering "Set up server" once it would only ever fail.
    */
   hasOwnServer(): boolean {
-    return this.settings.servers.some((server) => server.isServerOwner);
+    return this.serverConnectionManager.hasOwnServer();
   }
 
   async testConnection(baseUrl: string): Promise<void> {
-    await new RelayApiClient(baseUrl).testConnection();
-    new Notice(`Connected to Vault Rooms`);
+    return this.serverConnectionManager.testConnection(baseUrl);
   }
 
   async setupServer(displayName: string, deviceName: string, teamName?: string): Promise<void> {
@@ -325,7 +346,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // Same-process read, no network round-trip - see EmbeddedRelayServer.getBootstrapPin(). This
     // device is always the legitimate bootstrap caller (only the owner ever bootstraps; teammates
     // join via invite token instead), so supplying the PIN here is transparent to the user.
-    const bootstrapPin = this.getOrCreateEmbeddedServer().getBootstrapPin();
+    const bootstrapPin = this.serverConnectionManager.getBootstrapPin();
     if (!bootstrapPin) {
       throw new Error("Could not read the relay server's bootstrap PIN.");
     }
@@ -587,21 +608,14 @@ export default class VaultRoomsPlugin extends Plugin {
     // entries are removed.
     for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
       if (roomState.serverId === server.id) {
-        this.roomWatchers.get(roomId)?.();
-        this.roomWatchers.delete(roomId);
+        this.stopWatchingRoom(roomId);
         delete this.settings.mountedRooms[roomId];
         delete this.settings.roomMountPaths[roomId];
       }
     }
     if (isActive) {
-      this.syncSocket?.disconnect();
-      this.syncSocket = null;
-      this.visibleRooms = [];
-      this.teams = [];
-      this.teamDirectory = [];
-      this.friends = [];
-      this.myTeamRoles = {};
-      this.teamMembersByTeam = {};
+      this.disconnectSyncSocket();
+      this.resetSessionState();
     }
     await this.saveSettings();
     if (isActive) {
@@ -617,12 +631,7 @@ export default class VaultRoomsPlugin extends Plugin {
       throw new Error("Server not found.");
     }
     this.settings.activeServerId = serverId;
-    this.visibleRooms = [];
-    this.teams = [];
-    this.teamDirectory = [];
-    this.friends = [];
-    this.myTeamRoles = {};
-    this.teamMembersByTeam = {};
+    this.resetSessionState();
     await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
@@ -646,208 +655,43 @@ export default class VaultRoomsPlugin extends Plugin {
     if (this.visibleRooms.length === 0) {
       await this.refreshRooms();
     }
-    const room = this.visibleRooms[0];
-    if (!room) {
-      new Notice("No visible rooms to mount.");
-      return;
-    }
-    await this.mountRoom(room);
+    await this.roomMountController.mountFirstVisibleRoom();
   }
 
-  /**
-   * (Re)mounts a room locally. The relay server's file listing is always treated as the
-   * authoritative source of truth (the owner/host is where files actually live) - this matters
-   * most when a member is removed from a room and later re-added: any files that were deleted on
-   * the server in the meantime carry a tombstone (`deleted: true`) in the listing and must be
-   * removed locally rather than left behind as stale copies. Files whose server version already
-   * matches what we last synced are left untouched so we don't clobber unpushed local edits;
-   * everything else is routed through VaultSyncEngine so dirty local edits get a conflict copy
-   * instead of being silently overwritten.
-   */
   async mountRoom(room: RoomSummary): Promise<void> {
-    // Single-file rooms are no longer supported (see CreateRoomModal.ts) - their sync prefix logic
-    // never actually worked (mountPath was always treated as a directory), so mounting one would
-    // silently sync nothing at all with no indication why. Rooms created before this change can
-    // still exist server-side (the server keeps accepting the stored `type` for back-compat); flag
-    // it clearly instead of proceeding into a no-op mount.
-    if (room.type === "file") {
-      new Notice(`"${room.name}" is a single-file room, which is no longer supported - recreate it as a folder room.`);
-      return;
-    }
-    const server = this.requireActiveServer();
-    const mountPath = this.roomMountPathFor(room);
-    const state = (this.settings.mountedRooms[room.id] = this.settings.mountedRooms[room.id] ?? {
-      roomId: room.id,
-      serverId: server.id,
-      mountPath,
-      files: {}
-    });
-    state.mountPath = mountPath;
-    state.serverId = server.id;
-    state.unmounted = false;
-    // The watcher (which normally marks an edited file dirty - see pushCoordinator.ts) is off
-    // while a room is unmounted, so an edit made during that window would otherwise be invisible
-    // here: the listing loop below only compares against the server's version and would skip a
-    // file whose server version hasn't changed, silently downloading over the local edit. Re-hash
-    // every already-tracked file first so such edits are treated as dirty-equivalent and get a
-    // conflict copy instead of being clobbered.
-    await this.syncEngine.reconcileLocalEdits(state);
-    const api = this.apiFor(server);
-    const files = await api.listFiles(room.id);
-    const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
-    for (const file of files.files) {
-      const tracked = state.files[file.relativePath];
-      if (file.deleted) {
-        if (tracked) {
-          await this.syncEngine.applyRemoteDelete(state, { relativePath: file.relativePath, version: file.version }, server.deviceName);
-        }
-        continue;
-      }
-      if (tracked && !tracked.dirty && tracked.serverVersion === file.version) {
-        continue;
-      }
-      const content = await api.readFile(room.id, file.relativePath);
-      await this.syncEngine.applyRemoteChange(state, content, server.deviceName);
-    }
-
-    // The server's listing only covers what's already been synced. On the room owner's own
-    // device, mountPath is the real sourcePath folder, which typically already has real content
-    // before the room ever existed - without this, that pre-existing content would just sit there
-    // forever, since the local file watcher only reacts to *future* edits. Push anything under
-    // mountPath the server has never heard of (skips anything it already knows about, including
-    // tombstoned/deleted paths - those are intentional server-side deletions, not "missing" files).
-    const localPaths = await this.vaultAdapter.list(mountPath);
-    for (const localPath of localPaths) {
-      const relativePath = localPath.slice(mountPath.length + 1);
-      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
-        continue;
-      }
-      try {
-        await this.syncEngine.pushLocalChange(state, relativePath, server.deviceName);
-      } catch (error) {
-        console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
-      }
-    }
-
-    this.watchMountedRoom(room.id);
-    this.syncSocket?.subscribe(room.id);
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new Notice(`Mounted ${room.name}`);
+    await this.roomMountController.mountRoom(room);
   }
 
-  /**
-   * Non-destructively unmounts a room: stops the local watcher and live-sync subscription for it,
-   * but leaves local files and tracking (settings.mountedRooms[roomId]) in place - see
-   * MountedRoomState.unmounted. This matters most for re-mounting later: without kept tracking,
-   * mountRoom() would see no tracked state for any file and download the server's copy over
-   * whatever is on disk, with no conflict copy, silently discarding any local edits made in the
-   * meantime. Use forgetRoom() for the old fully-destructive "drop everything" behavior.
-   */
   async unmountRoom(roomId: string): Promise<void> {
-    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
-    const roomState = this.settings.mountedRooms[roomId];
-    this.roomWatchers.get(roomId)?.();
-    this.roomWatchers.delete(roomId);
-    if (roomState) {
-      roomState.unmounted = true;
-    }
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new Notice(`Unmounted ${room?.name ?? "room"}`);
+    await this.roomMountController.unmountRoom(roomId);
   }
 
-  /** Destructively forgets a room's local tracking (the old unmountRoom() behavior) - local files
-   *  on disk are left alone (same as unmountRoom), but this device's sync tracking for the room is
-   *  dropped entirely, so a later mount starts over as if the room were never mounted here. */
   async forgetRoom(roomId: string): Promise<void> {
-    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
-    this.roomWatchers.get(roomId)?.();
-    this.roomWatchers.delete(roomId);
-    delete this.settings.mountedRooms[roomId];
-    delete this.settings.roomMountPaths[roomId];
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new Notice(`Forgot ${room?.name ?? "room"} on this device`);
+    await this.roomMountController.forgetRoom(roomId);
   }
 
   isRoomMounted(roomId: string): boolean {
-    const state = this.settings.mountedRooms[roomId];
-    return Boolean(state) && !state?.unmounted;
+    return this.roomMountController.isRoomMounted(roomId);
   }
 
   mountedPathFor(roomId: string): string | undefined {
-    return this.settings.mountedRooms[roomId]?.mountPath;
+    return this.roomMountController.mountedPathFor(roomId);
   }
 
-  /** Which server (settings.servers[].id) a mounted room belongs to - see the serverId note on
-   *  MountedRoomState. Used by the panel to tell whether a mounted room is under the currently
-   *  active server (syncing) or a different, currently-inactive one (paused). */
   mountedRoomServerId(roomId: string): string | undefined {
-    return this.settings.mountedRooms[roomId]?.serverId;
+    return this.roomMountController.mountedRoomServerId(roomId);
   }
 
-  /**
-   * Conflict copies are local-only files (see isConflictCopyPath - they're never pushed or
-   * synced), so finding them is a plain local file-listing scan, not a server call. Used to
-   * render a "Resolve" list per mounted room instead of leaving people to sort them out by hand
-   * in the file explorer.
-   */
   listRoomConflicts(roomId: string): Array<{ relativePath: string; conflictRelativePath: string }> {
-    const mountPath = this.mountedPathFor(roomId);
-    if (!mountPath) {
-      return [];
-    }
-    const prefix = mountPath.replace(/\/+$/, "");
-    const conflicts: Array<{ relativePath: string; conflictRelativePath: string }> = [];
-    for (const file of this.app.vault.getFiles()) {
-      const path = file.path;
-      if (path !== prefix && !path.startsWith(`${prefix}/`)) {
-        continue;
-      }
-      if (!isConflictCopyPath(path)) {
-        continue;
-      }
-      const canonical = canonicalPathForConflictCopy(path);
-      if (!canonical) {
-        continue;
-      }
-      conflicts.push({
-        relativePath: canonical.slice(prefix.length + 1),
-        conflictRelativePath: path.slice(prefix.length + 1)
-      });
-    }
-    return conflicts;
+    return this.roomMountController.listRoomConflicts(roomId);
   }
 
   async resolveRoomConflict(roomId: string, relativePath: string, conflictRelativePath: string, keep: "mine" | "theirs"): Promise<void> {
-    const server = this.requireActiveServer();
-    const roomState = this.settings.mountedRooms[roomId];
-    if (!roomState) {
-      throw new Error("Room is not mounted.");
-    }
-    await this.syncEngine.resolveConflict(roomState, relativePath, conflictRelativePath, keep, server.deviceName);
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new Notice(keep === "mine" ? "Kept your version and re-synced it." : "Kept the synced version and removed your local copy.");
+    await this.roomMountController.resolveRoomConflict(roomId, relativePath, conflictRelativePath, keep);
   }
 
-  /**
-   * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
-   * folder) - there's nothing to "download," their files already live there, so a separate copy
-   * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
-   * folder under the configured mount root, since they have no pre-existing copy of the room.
-   */
   roomMountPathFor(room: RoomSummary): string {
-    const server = this.requireActiveServer();
-    const isOwner = room.ownerUserId === server.userId;
-    return resolveRoomMountPath({
-      owner: isOwner,
-      configuredOverride: this.settings.roomMountPaths[room.id],
-      mountRoot: this.settings.mountRoot,
-      mountName: room.mountName,
-      sourcePath: room.sourcePath
-    });
+    return this.roomMountController.roomMountPathFor(room);
   }
 
   openSetupServerModal(): void {
@@ -874,6 +718,29 @@ export default class VaultRoomsPlugin extends Plugin {
     }
   }
 
+  private stopWatchingRoom(roomId: string): void {
+    this.roomWatchers.get(roomId)?.();
+    this.roomWatchers.delete(roomId);
+  }
+
+  private disconnectSyncSocket(): void {
+    this.syncSocket?.disconnect();
+    this.syncSocket = null;
+  }
+
+  private resetSessionState(): void {
+    this.visibleRooms = [];
+    this.teams = [];
+    this.teamDirectory = [];
+    this.friends = [];
+    this.myTeamRoles = {};
+    this.teamMembersByTeam = {};
+  }
+
+  private roomIsLiveUnder(serverId: string, roomState: MountedRoomState): boolean {
+    return roomState.serverId === serverId;
+  }
+
   private watchMountedRoom(roomId: string): void {
     const roomState = this.settings.mountedRooms[roomId];
     const server = this.getActiveServer();
@@ -885,7 +752,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // silently try to push this room's edits to the wrong server (guaranteed to fail - that server
     // has never heard of this roomId). It stays un-watched (edits queue up unsynced on disk, same as
     // if Obsidian were closed) until its own server is reactivated and it's re-mounted/reconnected.
-    if (roomState.serverId !== server.id) {
+    if (!this.roomIsLiveUnder(server.id, roomState)) {
       return;
     }
     if (this.roomWatchers.has(roomId)) {
@@ -946,8 +813,7 @@ export default class VaultRoomsPlugin extends Plugin {
    * switch back to a server to resume syncing whatever's mounted under it.
    */
   private connectSyncSocket(): void {
-    this.syncSocket?.disconnect();
-    this.syncSocket = null;
+    this.disconnectSyncSocket();
     this.syncState = "offline";
     // Every watcher was registered against whichever server was active when it was set up; that
     // binding is about to go stale (syncEngine below is being replaced), so every watcher must be
@@ -965,6 +831,14 @@ export default class VaultRoomsPlugin extends Plugin {
     }
     for (const roomId of Object.keys(this.settings.mountedRooms)) {
       this.watchMountedRoom(roomId);
+    }
+    // Opening a WebSocket here would only retry the handshake forever against a closed local port
+    // (console spam, panel stuck on "reconnecting"). Keeping this guard inside connectSyncSocket()
+    // protects setup/join/activate/forget call sites too, and it never affects remote servers
+    // because activeServerIsOwnStoppedServer() only matches this device's own embedded server.
+    if (this.activeServerIsOwnStoppedServer()) {
+      this.renderOpenRoomsViews();
+      return;
     }
     const socket = new RoomSyncSocket(server, {
       // Unmounted rooms (see unmountRoom()/MountedRoomState.unmounted) keep their tracking so a
@@ -1006,8 +880,7 @@ export default class VaultRoomsPlugin extends Plugin {
       onRoomDeleted: (roomId) => {
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
-        delete this.settings.mountedRooms[roomId];
-        delete this.settings.roomMountPaths[roomId];
+        this.roomMountController.dropRoomTracking(roomId);
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`${room?.name ?? "A room"} was deleted by the owner/admin.`);
@@ -1015,8 +888,7 @@ export default class VaultRoomsPlugin extends Plugin {
       onAccessRevoked: (roomId) => {
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
-        delete this.settings.mountedRooms[roomId];
-        delete this.settings.roomMountPaths[roomId];
+        this.roomMountController.dropRoomTracking(roomId);
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`Your access to ${room?.name ?? "a room"} was revoked.`);
@@ -1027,7 +899,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // MountedRoomState. Subscribing a foreign room here would ask this server about a roomId it
     // has never issued, which the relay would just reject.
     for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
-      if (roomState.serverId === server.id) {
+      if (this.roomIsLiveUnder(server.id, roomState)) {
         socket.subscribe(roomId);
       }
     }
@@ -1039,33 +911,11 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   private apiFor(server: ServerConnection): RelayApiClient {
-    return new RelayApiClient(server.baseUrl, server.deviceToken, () => this.markServerRevoked(server));
-  }
-
-  /**
-   * A 401 from a server means the saved device token no longer resolves to anything there - most
-   * commonly because that server's data was reset/recreated since the token was issued (fresh
-   * install, wiped data dir, or switching between embedded/standalone with different data files).
-   * Reflect that in the UI (Settings → Vault Rooms → Servers already shows `status`) instead of
-   * leaving it as a one-off error toast with no lasting trace, so it's clear this server needs to
-   * be removed and set up/joined again rather than retried.
-   */
-  private markServerRevoked(server: ServerConnection): void {
-    if (server.status === "revoked") {
-      return;
-    }
-    server.status = "revoked";
-    void this.saveSettings();
-    this.renderOpenRoomsViews();
-    new Notice(`"${server.baseUrl}" - saved login is no longer valid on this server. Remove it and set up/join again from Settings → Vault Rooms → Servers.`);
+    return this.serverConnectionManager.apiFor(server);
   }
 
   private requireActiveServer(): ServerConnection {
-    const server = this.getActiveServer();
-    if (!server) {
-      throw new Error("No active Vault Rooms server.");
-    }
-    return server;
+    return this.serverConnectionManager.requireActiveServer();
   }
 
   private upsertServer(
@@ -1077,22 +927,19 @@ export default class VaultRoomsPlugin extends Plugin {
       isServerOwner: boolean;
     }
   ): void {
-    const config: ServerConnection = {
-      id: response.device.id,
-      baseUrl,
-      userId: response.user.id,
-      userDisplayName: response.user.displayName,
-      deviceId: response.device.id,
-      deviceName: response.device.displayName,
-      deviceToken: response.deviceToken,
-      isServerOwner: response.isServerOwner,
-      status: "active"
-    };
-    this.settings.servers = [...this.settings.servers.filter((server) => server.id !== config.id), config];
-    this.settings.activeServerId = config.id;
+    this.serverConnectionManager.upsertServer(baseUrl, response);
   }
 }
 
 function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]" || parsed.hostname === "::1";
+  } catch {
+    return false;
+  }
 }

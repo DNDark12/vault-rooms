@@ -43496,87 +43496,7 @@ __export(main_exports, {
   default: () => VaultRoomsPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian10 = require("obsidian");
-var import_node_path3 = require("node:path");
-
-// ../../packages/protocol/src/errors.ts
-var AppError = class extends Error {
-  constructor(code, message, statusCode = 400, details) {
-    super(message);
-    this.code = code;
-    this.statusCode = statusCode;
-    this.details = details;
-  }
-};
-function toApiError(error) {
-  return {
-    error: {
-      code: error.code,
-      message: error.message,
-      ...error.details === void 0 ? {} : { details: error.details }
-    }
-  };
-}
-
-// ../../packages/protocol/src/ids.ts
-var import_node_crypto = require("node:crypto");
-function createId(prefix) {
-  return `${prefix}_${(0, import_node_crypto.randomBytes)(12).toString("base64url")}`;
-}
-
-// ../../packages/protocol/src/paths.ts
-var DRIVE_LETTER = /^[a-zA-Z]:[\\/]/;
-var ELIGIBLE_EXTENSIONS = /* @__PURE__ */ new Set([".md", ".txt", ".canvas", ".json", ".csv", ".excalidraw"]);
-var ELIGIBLE_BINARY_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"]);
-var MAX_PATH_LENGTH = 1024;
-var MAX_SEGMENT_LENGTH = 255;
-function normalizeRelativePath(input) {
-  if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
-    throw new AppError("INVALID_PATH", "Path must be a safe relative path.", 422);
-  }
-  if (input.length > MAX_PATH_LENGTH) {
-    throw new AppError("INVALID_PATH", `Path must be ${MAX_PATH_LENGTH} characters or fewer.`, 422);
-  }
-  const normalized = input.replaceAll("\\", "/").replace(/\/+/g, "/");
-  const segments = normalized.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith("."))) {
-    throw new AppError("INVALID_PATH", "Path must not contain empty, hidden, current, or parent segments.", 422);
-  }
-  if (segments.some((segment) => segment.length > MAX_SEGMENT_LENGTH)) {
-    throw new AppError("INVALID_PATH", `Each path segment must be ${MAX_SEGMENT_LENGTH} characters or fewer.`, 422);
-  }
-  return segments.join("/");
-}
-function contentTypeForPath(path) {
-  if (path.toLowerCase().endsWith(".md")) {
-    return "markdown";
-  }
-  return isEligibleBinaryPath(path) ? "binary" : "text";
-}
-function isEligibleTextPath(path) {
-  const lastDot = path.lastIndexOf(".");
-  return lastDot >= 0 && ELIGIBLE_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
-}
-function isEligibleBinaryPath(path) {
-  const lastDot = path.lastIndexOf(".");
-  return lastDot >= 0 && ELIGIBLE_BINARY_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
-}
-function isEligiblePath(path) {
-  return isEligibleTextPath(path) || isEligibleBinaryPath(path);
-}
-
-// ../../packages/protocol/src/tokens.ts
-var import_node_crypto2 = require("node:crypto");
-function createToken(kind) {
-  return `tr_${kind}_${(0, import_node_crypto2.randomBytes)(32).toString("base64url")}`;
-}
-function hashToken(token) {
-  return (0, import_node_crypto2.createHash)("sha256").update(token).digest("hex");
-}
-
-// ../../packages/protocol/src/index.ts
-var PRODUCT_NAME = "vault-rooms";
-var PRODUCT_VERSION = "0.1.0";
+var import_obsidian12 = require("obsidian");
 
 // src/apiClient.ts
 var RelayApiClient = class {
@@ -43747,6 +43667,85 @@ function toRelayError(body, fallbackMessage = "Relay request failed") {
   }
   return error;
 }
+
+// ../../packages/protocol/src/errors.ts
+var AppError = class extends Error {
+  constructor(code, message, statusCode = 400, details) {
+    super(message);
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
+  }
+};
+function toApiError(error) {
+  return {
+    error: {
+      code: error.code,
+      message: error.message,
+      ...error.details === void 0 ? {} : { details: error.details }
+    }
+  };
+}
+
+// ../../packages/protocol/src/ids.ts
+var import_node_crypto = require("node:crypto");
+function createId(prefix) {
+  return `${prefix}_${(0, import_node_crypto.randomBytes)(12).toString("base64url")}`;
+}
+
+// ../../packages/protocol/src/paths.ts
+var DRIVE_LETTER = /^[a-zA-Z]:[\\/]/;
+var ELIGIBLE_EXTENSIONS = /* @__PURE__ */ new Set([".md", ".txt", ".canvas", ".json", ".csv", ".excalidraw"]);
+var ELIGIBLE_BINARY_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"]);
+var MAX_PATH_LENGTH = 1024;
+var MAX_SEGMENT_LENGTH = 255;
+function normalizeRelativePath(input) {
+  if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
+    throw new AppError("INVALID_PATH", "Path must be a safe relative path.", 422);
+  }
+  if (input.length > MAX_PATH_LENGTH) {
+    throw new AppError("INVALID_PATH", `Path must be ${MAX_PATH_LENGTH} characters or fewer.`, 422);
+  }
+  const normalized = input.replaceAll("\\", "/").replace(/\/+/g, "/");
+  const segments = normalized.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith("."))) {
+    throw new AppError("INVALID_PATH", "Path must not contain empty, hidden, current, or parent segments.", 422);
+  }
+  if (segments.some((segment) => segment.length > MAX_SEGMENT_LENGTH)) {
+    throw new AppError("INVALID_PATH", `Each path segment must be ${MAX_SEGMENT_LENGTH} characters or fewer.`, 422);
+  }
+  return segments.join("/");
+}
+function contentTypeForPath(path) {
+  if (path.toLowerCase().endsWith(".md")) {
+    return "markdown";
+  }
+  return isEligibleBinaryPath(path) ? "binary" : "text";
+}
+function isEligibleTextPath(path) {
+  const lastDot = path.lastIndexOf(".");
+  return lastDot >= 0 && ELIGIBLE_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
+}
+function isEligibleBinaryPath(path) {
+  const lastDot = path.lastIndexOf(".");
+  return lastDot >= 0 && ELIGIBLE_BINARY_EXTENSIONS.has(path.slice(lastDot).toLowerCase());
+}
+function isEligiblePath(path) {
+  return isEligibleTextPath(path) || isEligibleBinaryPath(path);
+}
+
+// ../../packages/protocol/src/tokens.ts
+var import_node_crypto2 = require("node:crypto");
+function createToken(kind) {
+  return `tr_${kind}_${(0, import_node_crypto2.randomBytes)(32).toString("base64url")}`;
+}
+function hashToken(token) {
+  return (0, import_node_crypto2.createHash)("sha256").update(token).digest("hex");
+}
+
+// ../../packages/protocol/src/index.ts
+var PRODUCT_NAME = "vault-rooms";
+var PRODUCT_VERSION = "0.1.0";
 
 // src/syncClient.ts
 function mountPathForRoom(input) {
@@ -44066,6 +44065,1772 @@ function activeServer(settings) {
   var _a;
   return (_a = settings.servers.find((server) => server.id === settings.activeServerId)) != null ? _a : settings.servers[0];
 }
+
+// src/VaultRoomsSettingTab.ts
+var import_obsidian = require("obsidian");
+var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
+  constructor(plugin) {
+    super(plugin.app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    this.renderServerSettings(containerEl);
+    this.renderSyncSettings(containerEl);
+    this.renderServersSettings(containerEl);
+  }
+  renderServerSettings(containerEl) {
+    new import_obsidian.Setting(containerEl).setName("Relay server").setHeading();
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "This device hosts the relay server directly \u2014 no separate process or terminal needed. Set up or join from the Vault Rooms panel and it starts automatically if it isn't already running."
+    });
+    const status = this.plugin.getServerStatus();
+    new import_obsidian.Setting(containerEl).setName("Status").setDesc(
+      status.running ? `Running \u2014 this device: ${status.localUrl}${status.lanUrl ? `, LAN: ${status.lanUrl}` : status.lanDetectionFailed ? " \u2014 could NOT auto-detect a LAN IP; invite links will point at 127.0.0.1 and won't work for teammates until you set a Public URL override below, then restart the server." : ""}` : status.error ? `Stopped \u2014 last error: ${status.error}` : "Stopped"
+    ).addButton(
+      (button) => button.setButtonText(status.running ? "Stop" : "Start").setCta().onClick(async () => {
+        try {
+          if (status.running) {
+            await this.plugin.stopEmbeddedServer();
+          } else {
+            await this.plugin.startEmbeddedServer();
+          }
+        } catch (error) {
+          new import_obsidian.Notice(error instanceof Error ? error.message : "Vault Rooms server action failed");
+        }
+        this.display();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Public URL override").setDesc(
+      "The server always listens on your local network so teammates can connect - no TLS in v0.1, so only run this on networks you trust. Set this only if LAN IP auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers): this device's real LAN address, e.g. http://192.168.1.42:8787. Leave blank to auto-detect."
+    ).addText(
+      (text) => {
+        var _a;
+        return text.setPlaceholder("auto-detect").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
+          const trimmed = value.trim();
+          this.plugin.settings.server.publicUrlOverride = trimmed || void 0;
+          await this.plugin.saveSettings();
+          if (this.plugin.getServerStatus().running) {
+            new import_obsidian.Notice("Restart the server for this change to take effect.");
+          }
+        });
+      }
+    );
+    new import_obsidian.Setting(containerEl).setName("Port").setDesc("Leave blank to auto-pick a free port starting at 8787.").addText(
+      (text) => text.setPlaceholder("auto").setValue(this.plugin.settings.server.port ? String(this.plugin.settings.server.port) : "").onChange(async (value) => {
+        const trimmed = value.trim();
+        const parsed = trimmed ? Number.parseInt(trimmed, 10) : void 0;
+        if (trimmed && (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535)) {
+          return;
+        }
+        this.plugin.settings.server.port = parsed;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Allow remote bootstrap").setDesc("Allow creating the first team from a non-localhost address. Leave off unless you know you need it.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.server.allowRemoteBootstrap).onChange(async (value) => {
+        this.plugin.settings.server.allowRemoteBootstrap = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Max synced file size").setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).").addText(
+      (text) => text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
+        const parsed = Number.parseInt(value, 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          this.plugin.settings.server.maxFileBytes = parsed;
+          await this.plugin.saveSettings();
+        }
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Start automatically").setDesc("Start the relay server whenever this vault opens in Obsidian.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.server.autoStart).onChange(async (value) => {
+        this.plugin.settings.server.autoStart = value;
+        await this.plugin.saveSettings();
+      })
+    );
+  }
+  renderSyncSettings(containerEl) {
+    new import_obsidian.Setting(containerEl).setName("Sync").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Mount root").setDesc("Default root for member-mounted rooms.").addText(
+      (text) => text.setValue(this.plugin.settings.mountRoot).onChange(async (value) => {
+        this.plugin.settings.mountRoot = value.trim() || "Vault Rooms";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Debounce").setDesc("Milliseconds to debounce local file changes.").addText(
+      (text) => text.setValue(String(this.plugin.settings.debounceMs)).onChange(async (value) => {
+        const parsed = Number.parseInt(value, 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          this.plugin.settings.debounceMs = parsed;
+          await this.plugin.saveSettings();
+        }
+      })
+    );
+  }
+  renderServersSettings(containerEl) {
+    var _a;
+    new import_obsidian.Setting(containerEl).setName("Servers").setHeading();
+    if (this.plugin.settings.servers.length === 0) {
+      containerEl.createEl("p", { cls: "setting-item-description", text: "No servers connected yet." });
+      return;
+    }
+    for (const server of this.plugin.settings.servers) {
+      const active = server.id === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.id);
+      const isRevoked = server.status === "revoked";
+      const setting = new import_obsidian.Setting(containerEl).setName(`${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}${active ? " - active" : ""}`).setDesc(
+        isRevoked ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join again.` : `${server.baseUrl} (${server.status})`
+      );
+      setting.addButton(
+        (button) => button.setButtonText("Use").setDisabled(active).onClick(async () => {
+          try {
+            await this.plugin.activateServer(server.id);
+            this.display();
+          } catch (error) {
+            new import_obsidian.Notice(error instanceof Error ? error.message : "Server switch failed");
+          }
+        })
+      );
+      setting.addButton(
+        (button) => button.setButtonText("Test").onClick(async () => {
+          try {
+            await this.plugin.testConnection(server.baseUrl);
+          } catch (error) {
+            new import_obsidian.Notice(error instanceof Error ? error.message : "Connection failed");
+          }
+        })
+      );
+      setting.addButton(
+        (button) => button.setButtonText("Forget").setWarning().onClick(async () => {
+          if (!window.confirm(`Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
+            return;
+          }
+          await this.plugin.forgetServer(server.id);
+          this.display();
+        })
+      );
+    }
+  }
+};
+
+// src/modals/CreateRoomModal.ts
+var import_obsidian3 = require("obsidian");
+
+// src/modals/pickers.ts
+var import_obsidian2 = require("obsidian");
+var KNOWN_PLUGINS = [
+  { pluginId: "obsidian-tasks-plugin", displayName: "Tasks" },
+  { pluginId: "obsidian-kanban", displayName: "Kanban" },
+  { pluginId: "dataview", displayName: "Dataview" },
+  { pluginId: "obsidian-excalidraw-plugin", displayName: "Excalidraw" }
+];
+function pluginOptions(app, selected = []) {
+  var _a, _b, _c, _d;
+  const registry = app.plugins;
+  const options = /* @__PURE__ */ new Map();
+  for (const plugin of KNOWN_PLUGINS) {
+    options.set(plugin.pluginId, plugin);
+  }
+  for (const pluginId of (_a = registry == null ? void 0 : registry.enabledPlugins) != null ? _a : []) {
+    options.set(pluginId, { pluginId, displayName: (_d = (_c = (_b = registry == null ? void 0 : registry.manifests) == null ? void 0 : _b[pluginId]) == null ? void 0 : _c.name) != null ? _d : pluginId });
+  }
+  for (const plugin of selected) {
+    options.set(plugin.pluginId, plugin);
+  }
+  return [...options.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+var VaultPathSuggestModal = class extends import_obsidian2.SuggestModal {
+  constructor(app, type, onChoose) {
+    super(app);
+    this.type = type;
+    this.onChoose = onChoose;
+    this.setPlaceholder(type === "folder" ? "Choose folder" : "Choose file");
+  }
+  getSuggestions(query) {
+    const needle = query.toLowerCase().trim();
+    const files = this.type === "folder" ? this.app.vault.getAllLoadedFiles().filter(isFolder) : this.app.vault.getFiles();
+    return files.filter((file) => file.path && !file.path.startsWith(".obsidian/")).filter((file) => !needle || file.path.toLowerCase().includes(needle)).slice(0, 100);
+  }
+  renderSuggestion(file, el) {
+    el.createEl("div", { text: file.path });
+    el.createEl("small", { text: this.type === "folder" ? "Folder" : "File" });
+  }
+  onChooseSuggestion(file) {
+    this.onChoose(file.path);
+  }
+};
+function isFolder(file) {
+  return file instanceof import_obsidian2.TFolder;
+}
+
+// src/modals/CreateRoomModal.ts
+var CreateRoomModal = class extends import_obsidian3.Modal {
+  constructor(plugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    __publicField(this, "name", "Projects Demo");
+    /** Rooms are always folder rooms now - single-file rooms are no longer creatable (their sync
+     *  prefix logic never actually worked - see the audited finding). Kept as a literal "folder" for
+     *  now purely because RoomSummary/createRoom's input type still carries a type field the server
+     *  stores for back-compat with rooms created before this change. */
+    __publicField(this, "type", "folder");
+    __publicField(this, "sourcePath", "Projects/Demo");
+    __publicField(this, "mountName", "Projects Demo");
+    /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
+    __publicField(this, "mountNameTouched", false);
+    __publicField(this, "conflictPolicy", "keep_both");
+    __publicField(this, "capabilities", [
+      { pluginId: "obsidian-tasks-plugin", displayName: "Tasks", mode: "recommended" },
+      { pluginId: "obsidian-kanban", displayName: "Kanban", mode: "recommended" }
+    ]);
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.setTitle("Create room");
+    new import_obsidian3.Setting(contentEl).setName("Name").addText(
+      (text) => text.setValue(this.name).onChange((value) => {
+        this.name = value.trim();
+        if (!this.mountNameTouched) {
+          this.mountName = sanitizeMountName(this.name);
+        }
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("Source path").setDesc("The folder in your vault to share. Pick one with the button below, or type a path directly.").addText(
+      (text) => text.setValue(this.sourcePath).onChange((value) => {
+        this.sourcePath = value.trim();
+      })
+    ).addButton(
+      (button) => button.setButtonText("Choose folder").onClick(() => {
+        new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
+      (text) => text.setValue(this.mountName).onChange((value) => {
+        this.mountName = value.trim();
+        this.mountNameTouched = true;
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("When edits conflict").setDesc(
+      "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("keep_both", "Keep both (default)").addOption("owner_wins", "Owner's version always wins").setValue(this.conflictPolicy).onChange((value) => {
+        this.conflictPolicy = value;
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("Plugin capabilities").setHeading();
+    contentEl.createEl("p", {
+      cls: "vault-rooms-setting-hint",
+      text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
+    });
+    const options = pluginOptions(this.app, this.capabilities);
+    for (const capability of this.capabilities) {
+      new import_obsidian3.Setting(contentEl).setName("Plugin").addDropdown((dropdown) => {
+        for (const option of options) {
+          dropdown.addOption(option.pluginId, option.displayName);
+        }
+        dropdown.setValue(capability.pluginId).onChange((pluginId) => {
+          var _a;
+          const selected = options.find((option) => option.pluginId === pluginId);
+          capability.pluginId = pluginId;
+          capability.displayName = (_a = selected == null ? void 0 : selected.displayName) != null ? _a : pluginId;
+          this.onOpen();
+        });
+      }).addDropdown(
+        (dropdown) => dropdown.addOption("off", "Off").addOption("optional", "Optional").addOption("recommended", "Recommended").addOption("required", "Required").setValue(capability.mode).onChange((value) => {
+          capability.mode = value;
+          if (value === "off") {
+            this.capabilities = this.capabilities.filter((item) => item !== capability);
+            this.onOpen();
+          }
+        })
+      );
+    }
+    new import_obsidian3.Setting(contentEl).addButton(
+      (button) => button.setButtonText("Add plugin").onClick(() => {
+        var _a;
+        const existing = new Set(this.capabilities.map((capability) => capability.pluginId));
+        const option = (_a = options.find((candidate) => !existing.has(candidate.pluginId))) != null ? _a : options[0];
+        if (!option) {
+          new import_obsidian3.Notice("No plugins found.");
+          return;
+        }
+        this.capabilities.push({ pluginId: option.pluginId, displayName: option.displayName, mode: "optional" });
+        this.onOpen();
+      })
+    );
+    new import_obsidian3.Setting(contentEl).addButton(
+      (button) => button.setCta().setButtonText("Create").onClick(async () => {
+        try {
+          await this.plugin.createRoom({
+            name: this.name,
+            type: this.type,
+            sourcePath: this.sourcePath,
+            mountName: this.mountName,
+            conflictPolicy: this.conflictPolicy,
+            capabilities: this.capabilities.filter((capability) => capability.mode !== "off")
+          });
+          this.close();
+        } catch (error) {
+          new import_obsidian3.Notice(error instanceof Error ? error.message : "Room creation failed");
+        }
+      })
+    );
+  }
+  applyChosenPath(path) {
+    this.sourcePath = path;
+    if (!this.name || this.name === "Projects Demo") {
+      this.name = basename(path);
+    }
+    if (!this.mountNameTouched) {
+      this.mountName = sanitizeMountName(this.name);
+    }
+    this.onOpen();
+  }
+};
+function basename(path) {
+  var _a;
+  return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
+}
+function sanitizeMountName(name) {
+  const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
+  return cleaned || "Room";
+}
+
+// src/modals/InviteMemberModal.ts
+var import_obsidian4 = require("obsidian");
+var InviteMemberModal = class extends import_obsidian4.Modal {
+  constructor(plugin, inviteText, joinUrl) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.inviteText = inviteText;
+    this.joinUrl = joinUrl;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.setTitle("Invite member");
+    contentEl.createEl("p", {
+      text: "Send this link to a teammate on the same LAN. Clicking it opens Obsidian and pre-fills the join form (Vault Rooms plugin must already be installed on their side)."
+    });
+    contentEl.createEl("a", { text: this.joinUrl, href: this.joinUrl }).setAttr("style", "display: block; word-break: break-all; margin-bottom: 12px;");
+    new import_obsidian4.Setting(contentEl).addButton(
+      (button) => button.setButtonText("Copy invite link").onClick(async () => {
+        await navigator.clipboard.writeText(this.joinUrl);
+        new import_obsidian4.Notice("Invite link copied.");
+      })
+    );
+    contentEl.createEl("p", { text: "Full details (server URL, token, link):" });
+    contentEl.createEl("textarea", { text: this.inviteText }).setAttr("style", "width: 100%; min-height: 100px;");
+    new import_obsidian4.Setting(contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
+  }
+};
+
+// src/modals/JoinTeamModal.ts
+var import_obsidian5 = require("obsidian");
+var JoinTeamModal = class extends import_obsidian5.Modal {
+  constructor(plugin, mode = "join", serverUrl = "", inviteToken = "") {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.mode = mode;
+    __publicField(this, "inviteInput", "");
+    __publicField(this, "serverUrl", "");
+    __publicField(this, "inviteToken", "");
+    __publicField(this, "displayName", "");
+    __publicField(this, "deviceName", "");
+    /** True when we already have a real server+token (opened via an invite link) - in that case
+     *  there's nothing to parse or re-enter, so the form only needs to ask for a display name. */
+    __publicField(this, "hasKnownInvite");
+    __publicField(this, "showManualForm");
+    this.serverUrl = serverUrl;
+    this.inviteToken = inviteToken;
+    this.hasKnownInvite = Boolean(serverUrl && inviteToken);
+    this.showManualForm = !this.hasKnownInvite;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.setTitle(this.mode === "join" ? "Join Vault Rooms" : "Rejoin Vault Rooms");
+    if (this.hasKnownInvite && !this.showManualForm) {
+      this.renderKnownInviteForm(contentEl);
+      return;
+    }
+    this.renderManualForm(contentEl);
+  }
+  /** The common case: opened by clicking an invite link, so server+token are already known - the
+   *  only thing genuinely missing is the person's name. */
+  renderKnownInviteForm(contentEl) {
+    contentEl.createEl("p", { text: `Joining ${this.serverUrl} via invite link. Add your display name to finish.` });
+    new import_obsidian5.Setting(contentEl).setName("Display name").setDesc("This is what teammates will see you as.").addText((text) => {
+      text.setValue(this.displayName).onChange((value) => this.displayName = value.trim());
+      window.setTimeout(() => text.inputEl.focus(), 0);
+    });
+    new import_obsidian5.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
+        await this.submit();
+      })
+    );
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setButtonText("Use a different invite link").onClick(() => {
+        this.showManualForm = true;
+        this.onOpen();
+      })
+    );
+  }
+  /** Fallback for opening this modal without a link already in hand (command palette, or "use a
+   *  different invite link") - lets someone paste a full invite link/text or fill fields by hand. */
+  renderManualForm(contentEl) {
+    if (this.inviteToken) {
+      contentEl.createEl("p", { text: "Invite link details filled in below. Add your display name to finish joining." });
+    }
+    new import_obsidian5.Setting(contentEl).setName("Invite link").setDesc("Paste a full obsidian://vault-rooms invite link or the raw text a teammate sent you.").addText(
+      (text) => text.setPlaceholder("obsidian://vault-rooms/join?server=...&token=...").setValue(this.inviteInput).onChange((value) => this.inviteInput = value.trim())
+    ).addButton(
+      (button) => button.setButtonText("Parse").onClick(() => {
+        if (!this.applyInviteInput(true)) {
+          new import_obsidian5.Notice("Invite link must include server and token.");
+        }
+      })
+    );
+    new import_obsidian5.Setting(contentEl).setName("Server URL").addText((text) => text.setValue(this.serverUrl).onChange((value) => this.serverUrl = value.trim()));
+    new import_obsidian5.Setting(contentEl).setName("Invite token").addText((text) => text.setValue(this.inviteToken).onChange((value) => this.inviteToken = value.trim()));
+    new import_obsidian5.Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => this.displayName = value.trim()));
+    new import_obsidian5.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setButtonText("Test connection").onClick(async () => {
+        await this.plugin.testConnection(this.serverUrl);
+      })
+    );
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
+        this.applyInviteInput(false);
+        await this.submit();
+      })
+    );
+  }
+  async submit() {
+    try {
+      await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop");
+      this.close();
+    } catch (error) {
+      new import_obsidian5.Notice(error instanceof Error ? error.message : "Join failed");
+    }
+  }
+  applyInviteInput(render) {
+    if (!this.inviteInput) {
+      return false;
+    }
+    const parsed = parseInviteInput(this.inviteInput);
+    if (!parsed.serverUrl || !parsed.inviteToken) {
+      return false;
+    }
+    this.serverUrl = parsed.serverUrl;
+    this.inviteToken = parsed.inviteToken;
+    if (render) {
+      this.onOpen();
+    }
+    return true;
+  }
+};
+function parseInviteInput(input) {
+  var _a, _b;
+  const text = input.trim();
+  const parsed = parseInviteUrl(text);
+  if (parsed.serverUrl || parsed.inviteToken) {
+    return parsed;
+  }
+  const inviteToken = (_a = text.match(/tr_inv_[A-Za-z0-9_-]+/)) == null ? void 0 : _a[0];
+  const urls = [...text.matchAll(/https?:\/\/[^\s]+/g)].map((match) => match[0]);
+  const serverUrl = (_b = urls.find((url) => !url.includes("token=") && !url.includes("tr_inv_"))) != null ? _b : urls[0];
+  return { serverUrl, inviteToken };
+}
+function parseInviteUrl(input) {
+  var _a, _b, _c;
+  try {
+    const url = new URL(input);
+    return {
+      serverUrl: (_a = url.searchParams.get("server")) != null ? _a : void 0,
+      inviteToken: (_c = (_b = url.searchParams.get("token")) != null ? _b : url.searchParams.get("inviteToken")) != null ? _c : void 0
+    };
+  } catch (e) {
+    return {};
+  }
+}
+
+// src/modals/RoomSettingsModal.ts
+var import_obsidian6 = require("obsidian");
+var PERMISSIONS = ["room:read", "room:write", "room:delete", "file:read", "file:write", "file:create", "file:delete", "sync:subscribe", "sync:push"];
+var RoomSettingsModal = class extends import_obsidian6.Modal {
+  constructor(plugin, room) {
+    var _a;
+    super(plugin.app);
+    this.plugin = plugin;
+    this.room = room;
+    __publicField(this, "name");
+    /** Rooms are always folder rooms now - see CreateRoomModal.ts's matching note. Kept as a literal
+     *  "folder" purely because updateRoomSettings' input type still carries a type field the server
+     *  stores for back-compat with rooms created before this change. */
+    __publicField(this, "type", "folder");
+    __publicField(this, "sourcePath");
+    __publicField(this, "mountName");
+    __publicField(this, "localMountPath");
+    /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
+    __publicField(this, "mountNameTouched", false);
+    __publicField(this, "conflictPolicy");
+    __publicField(this, "capabilities");
+    __publicField(this, "aclRules", []);
+    __publicField(this, "subjectType", "team");
+    __publicField(this, "subjectId", "");
+    __publicField(this, "effect", "allow");
+    __publicField(this, "preset", "reader");
+    __publicField(this, "pathPattern", "**/*");
+    __publicField(this, "customPermissions", /* @__PURE__ */ new Set(["room:read", "file:read", "sync:subscribe"]));
+    this.name = room.name;
+    this.sourcePath = room.sourcePath;
+    this.mountName = room.mountName;
+    this.conflictPolicy = room.conflictPolicy;
+    this.localMountPath = (_a = plugin.settings.roomMountPaths[room.id]) != null ? _a : plugin.roomMountPathFor(room);
+    this.capabilities = room.capabilities.map((capability) => ({
+      pluginId: capability.pluginId,
+      displayName: capability.displayName,
+      mode: capability.mode,
+      minVersion: capability.minVersion
+    }));
+  }
+  onOpen() {
+    this.render();
+    void this.loadAccessData();
+  }
+  async loadAccessData() {
+    try {
+      await this.plugin.refreshTeams({ notify: false });
+      this.subjectId = this.subjectId || this.defaultSubjectId();
+      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
+      this.render();
+    } catch (error) {
+      new import_obsidian6.Notice(error instanceof Error ? error.message : "Failed to load room settings");
+    }
+  }
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("vault-rooms-settings-modal");
+    this.setTitle(`Room settings: ${this.room.name}`);
+    this.renderRoomFields(contentEl);
+    this.renderCapabilities(contentEl);
+    this.renderAccess(contentEl);
+    this.renderDangerZone(contentEl);
+  }
+  renderRoomFields(parent) {
+    new import_obsidian6.Setting(parent).setName("Room").setHeading();
+    new import_obsidian6.Setting(parent).setName("Name").addText(
+      (text) => text.setValue(this.name).onChange((value) => {
+        this.name = value.trim();
+        if (!this.mountNameTouched) {
+          this.mountName = sanitizeMountName2(this.name);
+        }
+      })
+    );
+    const isOwner = this.isOwnRoom();
+    if (isOwner) {
+      new import_obsidian6.Setting(parent).setName("Room folder").setDesc("The folder in your vault that this room shares - this is the content that actually gets synced to every member.").addText(
+        (text) => text.setValue(this.sourcePath).onChange((value) => {
+          this.sourcePath = value.trim();
+        })
+      ).addButton(
+        (button) => button.setButtonText("Choose folder").onClick(() => {
+          new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
+        })
+      );
+    } else {
+      new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder in the owner's vault that this room shares - this is the content that actually gets synced to every member. Only the owner can change this.").addText((text) => text.setValue(this.sourcePath).setDisabled(true));
+    }
+    new import_obsidian6.Setting(parent).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
+      (text) => text.setValue(this.mountName).onChange((value) => {
+        this.mountName = value.trim();
+        this.mountNameTouched = true;
+      })
+    );
+    if (!isOwner) {
+      new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
+        "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default." + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
+      ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
+    }
+    new import_obsidian6.Setting(parent).setName("When edits conflict").setDesc(
+      "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("keep_both", "Keep both (default)").addOption("owner_wins", "Owner's version always wins").setValue(this.conflictPolicy).onChange((value) => {
+        this.conflictPolicy = value;
+      })
+    );
+  }
+  isOwnRoom() {
+    var _a;
+    return this.room.ownerUserId === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.userId);
+  }
+  applyChosenPath(path) {
+    this.sourcePath = path;
+    if (!this.name) {
+      this.name = basename2(path);
+    }
+    if (!this.mountNameTouched) {
+      this.mountName = sanitizeMountName2(this.name || basename2(path));
+    }
+    this.render();
+  }
+  renderCapabilities(parent) {
+    new import_obsidian6.Setting(parent).setName("Plugin capabilities").setHeading();
+    parent.createEl("p", {
+      cls: "vault-rooms-setting-hint",
+      text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
+    });
+    const options = pluginOptions(this.app, this.capabilities);
+    for (const capability of this.capabilities) {
+      new import_obsidian6.Setting(parent).setName("Plugin").addDropdown((dropdown) => {
+        for (const option of options) {
+          dropdown.addOption(option.pluginId, option.displayName);
+        }
+        dropdown.setValue(capability.pluginId).onChange((pluginId) => {
+          var _a;
+          const selected = options.find((option) => option.pluginId === pluginId);
+          capability.pluginId = pluginId;
+          capability.displayName = (_a = selected == null ? void 0 : selected.displayName) != null ? _a : pluginId;
+          this.render();
+        });
+      }).addDropdown(
+        (dropdown) => dropdown.addOption("optional", "Optional").addOption("recommended", "Recommended").addOption("required", "Required").setValue(capability.mode).onChange((value) => capability.mode = value)
+      ).addText((text) => {
+        var _a;
+        return text.setPlaceholder("min version").setValue((_a = capability.minVersion) != null ? _a : "").onChange((value) => capability.minVersion = value.trim() || void 0);
+      }).addButton(
+        (button) => button.setButtonText("Remove").onClick(() => {
+          this.capabilities = this.capabilities.filter((item) => item !== capability);
+          this.render();
+        })
+      );
+    }
+    new import_obsidian6.Setting(parent).addButton(
+      (button) => button.setButtonText("Add plugin").onClick(() => {
+        var _a;
+        const existing = new Set(this.capabilities.map((capability) => capability.pluginId));
+        const option = (_a = options.find((candidate) => !existing.has(candidate.pluginId))) != null ? _a : options[0];
+        if (!option) {
+          new import_obsidian6.Notice("No plugins found.");
+          return;
+        }
+        this.capabilities.push({ pluginId: option.pluginId, displayName: option.displayName, mode: "optional" });
+        this.render();
+      })
+    );
+    new import_obsidian6.Setting(parent).addButton(
+      (button) => button.setCta().setButtonText("Save room settings").onClick(async () => {
+        var _a;
+        try {
+          await this.plugin.updateRoomSettings(
+            this.room.id,
+            {
+              name: this.name,
+              type: this.type,
+              sourcePath: this.sourcePath,
+              mountName: this.mountName,
+              conflictPolicy: this.conflictPolicy,
+              capabilities: this.capabilities
+            },
+            this.localMountPath
+          );
+          this.room = (_a = this.plugin.visibleRooms.find((room) => room.id === this.room.id)) != null ? _a : this.room;
+          this.render();
+        } catch (error) {
+          new import_obsidian6.Notice(error instanceof Error ? error.message : "Room update failed");
+        }
+      })
+    );
+  }
+  renderAccess(parent) {
+    new import_obsidian6.Setting(parent).setName("Room access").setHeading();
+    parent.createEl("p", {
+      cls: "vault-rooms-setting-hint",
+      text: "Grant a whole team or a specific friend access to this room."
+    });
+    new import_obsidian6.Setting(parent).setName("Grant access to").addDropdown(
+      (dropdown) => dropdown.addOption("team", "Team").addOption("user", "Specific friend").setValue(this.subjectType).onChange((value) => {
+        this.subjectType = value;
+        this.subjectId = this.defaultSubjectId();
+        this.render();
+      })
+    );
+    if (this.subjectType === "team") {
+      if (this.plugin.teamDirectory.length === 0) {
+        new import_obsidian6.Setting(parent).setDesc("No teams yet - create one from the Vault Rooms panel first.");
+      } else {
+        new import_obsidian6.Setting(parent).setName("Team").addDropdown((dropdown) => {
+          for (const team of this.plugin.teamDirectory) {
+            dropdown.addOption(team.id, team.name);
+          }
+          dropdown.setValue(this.subjectId).onChange((value) => this.subjectId = value);
+        });
+      }
+    } else {
+      const activeFriends = this.plugin.friends.filter((friend) => !friend.revokedAt);
+      if (activeFriends.length === 0) {
+        new import_obsidian6.Setting(parent).setDesc("No friends yet - invite someone first.");
+      } else {
+        new import_obsidian6.Setting(parent).setName("Friend").addDropdown((dropdown) => {
+          for (const friend of activeFriends) {
+            dropdown.addOption(friend.id, friend.displayName);
+          }
+          dropdown.setValue(this.subjectId).onChange((value) => this.subjectId = value);
+        });
+      }
+    }
+    new import_obsidian6.Setting(parent).setName("Access").addDropdown(
+      (dropdown) => dropdown.addOption("allow", "Allow").addOption("deny", "Deny").setValue(this.effect).onChange((value) => this.effect = value)
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("reader", "Reader").addOption("editor", "Editor").addOption("custom", "Custom").setValue(this.preset).onChange((value) => {
+        this.preset = value;
+        this.render();
+      })
+    );
+    new import_obsidian6.Setting(parent).setName("Path pattern").addText((text) => text.setValue(this.pathPattern).onChange((value) => this.pathPattern = value.trim() || "**/*"));
+    if (this.preset === "custom") {
+      const permissions = parent.createDiv({ cls: "vault-rooms-permission-grid" });
+      for (const permission of PERMISSIONS) {
+        const label = permissions.createEl("label");
+        const checkbox = label.createEl("input", { type: "checkbox" });
+        checkbox.checked = this.customPermissions.has(permission);
+        checkbox.onchange = () => {
+          if (checkbox.checked) {
+            this.customPermissions.add(permission);
+          } else {
+            this.customPermissions.delete(permission);
+          }
+        };
+        label.createSpan({ text: permission });
+      }
+    }
+    const applyRow = new import_obsidian6.Setting(parent);
+    if (this.subjectType === "team") {
+      applyRow.addButton(
+        (button) => button.setButtonText("Add team as editor").onClick(async () => {
+          if (!this.subjectId) {
+            new import_obsidian6.Notice("Pick a team first.");
+            return;
+          }
+          await this.grantAccess({ subjectType: "team", subjectId: this.subjectId, effect: "allow", preset: "editor", pathPattern: "**/*" });
+        })
+      );
+    }
+    applyRow.addButton(
+      (button) => button.setCta().setButtonText("Apply access").onClick(async () => {
+        await this.grantAccess({
+          subjectType: this.subjectType,
+          subjectId: this.subjectId,
+          effect: this.effect,
+          ...this.preset === "custom" ? { permissions: [...this.customPermissions] } : { preset: this.preset },
+          pathPattern: this.pathPattern
+        });
+      })
+    );
+    const acl = parent.createDiv({ cls: "vault-rooms-acl-list" });
+    if (this.aclRules.length === 0) {
+      acl.createDiv({ cls: "vault-rooms-empty", text: "No explicit room access rules." });
+      return;
+    }
+    for (const rule of this.aclRules) {
+      const row = new import_obsidian6.Setting(acl).setName(`${rule.effect} - ${this.subjectLabel(rule)}`).setDesc(`${rule.permissions.join(", ")} / ${rule.pathPattern}`);
+      row.addButton(
+        (button) => button.setButtonText("Remove").setWarning().onClick(async () => {
+          try {
+            await this.plugin.removeRoomAccess(this.room.id, rule.id);
+            this.aclRules = await this.plugin.listRoomAcl(this.room.id);
+            this.render();
+          } catch (error) {
+            new import_obsidian6.Notice(error instanceof Error ? error.message : "Failed to remove access rule");
+          }
+        })
+      );
+    }
+  }
+  renderDangerZone(parent) {
+    if (!this.room.permissions.includes("room:delete")) {
+      return;
+    }
+    new import_obsidian6.Setting(parent).setName("Danger zone").setHeading();
+    new import_obsidian6.Setting(parent).setName("Delete room").setDesc("Permanently deletes this room and all of its files/history on the server for every member. This cannot be undone.").addButton(
+      (button) => button.setButtonText("Delete room").setWarning().onClick(async () => {
+        if (!window.confirm(`Delete room "${this.room.name}"? This removes it and all of its files for every member. This cannot be undone.`)) {
+          return;
+        }
+        try {
+          await this.plugin.deleteRoom(this.room);
+          this.close();
+        } catch (error) {
+          new import_obsidian6.Notice(error instanceof Error ? error.message : "Failed to delete room");
+        }
+      })
+    );
+  }
+  async grantAccess(input) {
+    if (!input.subjectId) {
+      new import_obsidian6.Notice("Subject id is required.");
+      return;
+    }
+    if (input.permissions && input.permissions.length === 0) {
+      new import_obsidian6.Notice("Pick at least one permission.");
+      return;
+    }
+    try {
+      await this.plugin.grantRoomAccess(this.room.id, input);
+      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
+      this.render();
+    } catch (error) {
+      new import_obsidian6.Notice(error instanceof Error ? error.message : "Room access update failed");
+    }
+  }
+  defaultSubjectId() {
+    var _a, _b, _c, _d;
+    if (this.subjectType === "team") {
+      return (_b = (_a = this.plugin.teamDirectory[0]) == null ? void 0 : _a.id) != null ? _b : "";
+    }
+    if (this.subjectType === "user") {
+      return (_d = (_c = this.plugin.friends.find((friend) => !friend.revokedAt)) == null ? void 0 : _c.id) != null ? _d : "";
+    }
+    return "";
+  }
+  subjectLabel(rule) {
+    if (rule.subjectType === "user") {
+      const friend = this.plugin.friends.find((candidate) => candidate.id === rule.subjectId);
+      return friend ? friend.displayName : rule.subjectId;
+    }
+    if (rule.subjectType === "team") {
+      const team = this.plugin.teamDirectory.find((candidate) => candidate.id === rule.subjectId);
+      return team ? team.name : rule.subjectId;
+    }
+    return `${rule.subjectType}:${rule.subjectId}`;
+  }
+};
+function basename2(path) {
+  var _a;
+  return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
+}
+function sanitizeMountName2(name) {
+  const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
+  return cleaned || "Room";
+}
+
+// src/modals/SetupTeamModal.ts
+var import_obsidian7 = require("obsidian");
+var SetupTeamModal = class extends import_obsidian7.Modal {
+  constructor(plugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    __publicField(this, "teamName", "");
+    __publicField(this, "displayName", "");
+    __publicField(this, "deviceName", "");
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.setTitle("Set up server");
+    contentEl.createEl("p", {
+      cls: "setting-item-description",
+      text: `Creates your account and device identity on this device's relay server (starting it first if it isn't running yet - no separate address to enter). Do this once per server - after that, use "Create team" and "Invite" from the Vault Rooms panel.`
+    });
+    new import_obsidian7.Setting(contentEl).setName("Display name").setDesc("This is what teammates will see you as.").addText((text) => {
+      window.setTimeout(() => text.inputEl.focus(), 0);
+      text.setValue(this.displayName).onChange((value) => this.displayName = value.trim());
+    });
+    new import_obsidian7.Setting(contentEl).setName("Device name").setDesc("Identifies this specific device (shown in conflict-copy filenames, and lets a lost/stolen device be revoked separately from your account later).").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
+    new import_obsidian7.Setting(contentEl).setName("First team name").setDesc("Optional - creates a team you own right away. You can create more teams later.").addText((text) => text.setValue(this.teamName).onChange((value) => this.teamName = value.trim()));
+    new import_obsidian7.Setting(contentEl).addButton(
+      (button) => button.setCta().setButtonText("Set up server").onClick(async () => {
+        if (!this.displayName) {
+          new import_obsidian7.Notice("Display name is required.");
+          return;
+        }
+        try {
+          await this.plugin.setupServer(this.displayName, this.deviceName || "Obsidian desktop", this.teamName || void 0);
+          this.close();
+        } catch (error) {
+          new import_obsidian7.Notice(error instanceof Error ? error.message : "Server setup failed");
+        }
+      })
+    );
+  }
+};
+
+// src/pushCoordinator.ts
+var TERMINAL_ERROR_CODES = /* @__PURE__ */ new Set(["FILE_TOO_LARGE", "INVALID_PATH", "VALIDATION_ERROR"]);
+function isTerminalSyncError(error) {
+  const code = error == null ? void 0 : error.code;
+  return typeof code === "string" && TERMINAL_ERROR_CODES.has(code);
+}
+var RoomPushCoordinator = class {
+  constructor(deps) {
+    this.deps = deps;
+    __publicField(this, "pendingTimers", /* @__PURE__ */ new Map());
+    __publicField(this, "pushChains", /* @__PURE__ */ new Map());
+    __publicField(this, "schedule");
+    __publicField(this, "cancel");
+    var _a, _b;
+    this.schedule = (_a = deps.schedule) != null ? _a : ((fn, ms) => setTimeout(fn, ms));
+    this.cancel = (_b = deps.cancel) != null ? _b : ((id) => clearTimeout(id));
+  }
+  /** Handles one already-classified local vault event for this room. */
+  handleLocalChange(type, relativePath) {
+    if (isConflictCopyPath(relativePath)) {
+      return;
+    }
+    if (type === "delete") {
+      this.handleLocalDelete(relativePath);
+      return;
+    }
+    this.handleLocalEdit(relativePath);
+  }
+  /** Re-enqueues every file currently marked dirty or pending-delete (and not terminally failed)
+   *  through the exact same debounced/serialized push machinery - call this when connectivity is
+   *  restored (e.g. the sync socket reaches "connected") instead of maintaining a second queue. */
+  retryPending() {
+    if (!this.deps.isStillMounted()) {
+      return;
+    }
+    for (const [relativePath, state] of Object.entries(this.deps.room.files)) {
+      if (state.syncError) {
+        continue;
+      }
+      if (state.localDeleted) {
+        this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalDelete(this.deps.room, relativePath));
+      } else if (state.dirty) {
+        this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalChange(this.deps.room, relativePath, this.deps.deviceName));
+      }
+    }
+  }
+  /** Cancels all pending debounce timers - call on unmount/dispose so nothing fires after teardown. */
+  dispose() {
+    for (const timer of this.pendingTimers.values()) {
+      this.cancel(timer);
+    }
+    this.pendingTimers.clear();
+  }
+  handleLocalEdit(relativePath) {
+    const { room } = this.deps;
+    const existing = room.files[relativePath];
+    room.files[relativePath] = existing ? { ...existing, dirty: true, localDeleted: false, syncError: void 0 } : { serverVersion: 0, serverSha256: null, localSha256: null, dirty: true };
+    this.deps.onPersist();
+    this.debounce(relativePath, () => this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalChange(room, relativePath, this.deps.deviceName)));
+  }
+  handleLocalDelete(relativePath) {
+    const { room } = this.deps;
+    const current = room.files[relativePath];
+    if (!current || current.serverSha256 === null) {
+      const existingTimer = this.pendingTimers.get(relativePath);
+      if (existingTimer !== void 0) {
+        this.cancel(existingTimer);
+        this.pendingTimers.delete(relativePath);
+      }
+      delete room.files[relativePath];
+      this.deps.onPersist();
+      return;
+    }
+    room.files[relativePath] = { ...current, localDeleted: true, syncError: void 0 };
+    this.deps.onPersist();
+    this.debounce(relativePath, () => this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalDelete(room, relativePath)));
+  }
+  debounce(relativePath, run) {
+    const existingTimer = this.pendingTimers.get(relativePath);
+    if (existingTimer !== void 0) {
+      this.cancel(existingTimer);
+    }
+    const timer = this.schedule(() => {
+      this.pendingTimers.delete(relativePath);
+      if (!this.deps.isStillMounted()) {
+        return;
+      }
+      run();
+    }, this.deps.debounceMs);
+    this.pendingTimers.set(relativePath, timer);
+  }
+  /** Chains onto any push already in flight for this path, so overlapping pushes for the same
+   *  path never race each other (see the class doc comment). */
+  enqueue(relativePath, push) {
+    var _a;
+    if (!this.deps.isStillMounted()) {
+      return;
+    }
+    const previous = (_a = this.pushChains.get(relativePath)) != null ? _a : Promise.resolve();
+    const next = previous.catch(() => void 0).then(() => {
+      if (!this.deps.isStillMounted()) {
+        return;
+      }
+      return push();
+    }).then(() => {
+      if (this.deps.isStillMounted()) {
+        this.deps.onPersist();
+      }
+    }).catch((error) => {
+      if (!this.deps.isStillMounted()) {
+        return;
+      }
+      if (isTerminalSyncError(error)) {
+        const state = this.deps.room.files[relativePath];
+        if (state) {
+          this.deps.room.files[relativePath] = { ...state, syncError: error instanceof Error ? error.message : String(error) };
+        }
+        this.deps.onPersist();
+      }
+      this.deps.onError(relativePath, error);
+    });
+    this.pushChains.set(relativePath, next);
+  }
+};
+
+// src/syncWsClient.ts
+var MIN_RECONNECT_DELAY_MS = 1e3;
+var MAX_RECONNECT_DELAY_MS = 3e4;
+var HEALTH_PROBE_TIMEOUT_MS = 2500;
+var RoomSyncSocket = class {
+  constructor(server, deps) {
+    this.server = server;
+    this.deps = deps;
+    __publicField(this, "socket", null);
+    __publicField(this, "helloAcked", false);
+    __publicField(this, "closedByUser", true);
+    __publicField(this, "reconnectTimer", null);
+    __publicField(this, "reconnectDelayMs", MIN_RECONNECT_DELAY_MS);
+    __publicField(this, "pendingSubscriptions", /* @__PURE__ */ new Set());
+    __publicField(this, "subscribedRooms", /* @__PURE__ */ new Set());
+    __publicField(this, "state", "offline");
+  }
+  getState() {
+    return this.state;
+  }
+  setState(state) {
+    var _a, _b;
+    if (this.state === state) {
+      return;
+    }
+    this.state = state;
+    (_b = (_a = this.deps).onStateChange) == null ? void 0 : _b.call(_a, state);
+  }
+  connect() {
+    this.closedByUser = false;
+    this.setState("connecting");
+    void this.open();
+  }
+  disconnect() {
+    var _a;
+    this.closedByUser = true;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    (_a = this.socket) == null ? void 0 : _a.close();
+    this.socket = null;
+    this.helloAcked = false;
+    this.setState("offline");
+  }
+  subscribe(roomId) {
+    if (this.subscribedRooms.has(roomId)) {
+      return;
+    }
+    if (this.helloAcked) {
+      this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
+    } else {
+      this.pendingSubscriptions.add(roomId);
+    }
+  }
+  async open() {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);
+    let healthy = false;
+    try {
+      const response = await fetch(`${this.server.baseUrl.replace(/\/+$/, "")}/health`, { signal: controller.signal });
+      healthy = response.ok;
+    } catch (e) {
+      healthy = false;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+    if (this.closedByUser) {
+      return;
+    }
+    if (!healthy) {
+      this.scheduleReconnect();
+      return;
+    }
+    let socket;
+    try {
+      socket = new WebSocket(toWsUrl(this.server.baseUrl));
+    } catch (e) {
+      this.scheduleReconnect();
+      return;
+    }
+    this.socket = socket;
+    socket.addEventListener("open", () => {
+      this.send({
+        type: "hello",
+        requestId: createRequestId(),
+        token: this.server.deviceToken,
+        client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: this.server.deviceName }
+      });
+    });
+    socket.addEventListener("message", (event) => {
+      void this.handleMessage(String(event.data));
+    });
+    socket.addEventListener("close", () => {
+      this.helloAcked = false;
+      for (const roomId of this.subscribedRooms) {
+        this.pendingSubscriptions.add(roomId);
+      }
+      this.subscribedRooms.clear();
+      if (!this.closedByUser) {
+        this.setState("connecting");
+        this.scheduleReconnect();
+      } else {
+        this.setState("offline");
+      }
+    });
+    socket.addEventListener("error", () => {
+    });
+  }
+  scheduleReconnect() {
+    if (this.closedByUser || this.reconnectTimer !== null) {
+      return;
+    }
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.open();
+    }, this.reconnectDelayMs);
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+  }
+  send(message) {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(message));
+    }
+  }
+  async handleMessage(raw) {
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+    switch (message.type) {
+      case "hello_ok": {
+        this.helloAcked = true;
+        this.reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
+        this.setState("connected");
+        for (const roomId of this.pendingSubscriptions) {
+          this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
+        }
+        this.pendingSubscriptions.clear();
+        return;
+      }
+      case "hello_error":
+      case "revoked": {
+        this.setState("offline");
+        this.deps.onRevoked();
+        this.disconnect();
+        return;
+      }
+      case "room_snapshot": {
+        this.subscribedRooms.add(message.roomId);
+        await this.reconcileSnapshot(message.roomId, message.files);
+        return;
+      }
+      case "remote_file_change": {
+        const room = this.deps.getMountedRoom(message.roomId);
+        if (!room) {
+          return;
+        }
+        await this.deps.syncEngine.applyRemoteChange(
+          room,
+          { relativePath: message.relativePath, version: message.version, sha256: message.sha256, content: message.content },
+          message.updatedBy.displayName
+        );
+        this.deps.onApplied();
+        return;
+      }
+      case "remote_file_delete": {
+        const room = this.deps.getMountedRoom(message.roomId);
+        if (!room) {
+          return;
+        }
+        await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: message.relativePath, version: message.version }, message.deletedBy.displayName);
+        this.deps.onApplied();
+        return;
+      }
+      case "room_deleted": {
+        this.subscribedRooms.delete(message.roomId);
+        this.deps.onRoomDeleted(message.roomId);
+        return;
+      }
+      case "room_access_revoked": {
+        this.subscribedRooms.delete(message.roomId);
+        this.deps.onAccessRevoked(message.roomId);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+  async reconcileSnapshot(roomId, files) {
+    const room = this.deps.getMountedRoom(roomId);
+    if (!room) {
+      return;
+    }
+    const api = this.deps.getApi();
+    let changed = false;
+    for (const file of files) {
+      const local = room.files[file.relativePath];
+      if ((local == null ? void 0 : local.dirty) || (local == null ? void 0 : local.localDeleted)) {
+        continue;
+      }
+      if (file.deleted) {
+        if (local && local.serverSha256 !== null) {
+          await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync");
+          changed = true;
+        }
+        continue;
+      }
+      if (!local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {
+        const content = await api.readFile(roomId, file.relativePath);
+        await this.deps.syncEngine.applyRemoteChange(room, content, "sync");
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.deps.onApplied();
+    }
+  }
+};
+function toWsUrl(baseUrl) {
+  return `${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}/sync`;
+}
+function createRequestId() {
+  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+// src/vaultAdapter.ts
+var import_obsidian8 = require("obsidian");
+var ObsidianVaultAdapter = class {
+  constructor(plugin) {
+    this.plugin = plugin;
+  }
+  get app() {
+    return this.plugin.app;
+  }
+  async read(path) {
+    const file = this.getFile((0, import_obsidian8.normalizePath)(path));
+    return this.app.vault.read(file);
+  }
+  async write(path, content) {
+    const normalized = (0, import_obsidian8.normalizePath)(path);
+    const existing = this.app.vault.getAbstractFileByPath(normalized);
+    if (existing && isFile(existing)) {
+      await this.app.vault.process(existing, () => content);
+      return;
+    }
+    await this.ensureFolder(normalized);
+    await this.app.vault.create(normalized, content);
+  }
+  async readBinary(path) {
+    return this.app.vault.readBinary(this.getFile((0, import_obsidian8.normalizePath)(path)));
+  }
+  async writeBinary(path, data) {
+    const normalized = (0, import_obsidian8.normalizePath)(path);
+    const existing = this.app.vault.getAbstractFileByPath(normalized);
+    if (existing && isFile(existing)) {
+      await this.app.vault.modifyBinary(existing, data);
+      return;
+    }
+    await this.ensureFolder(normalized);
+    await this.app.vault.createBinary(normalized, data);
+  }
+  async delete(path) {
+    const existing = this.app.vault.getAbstractFileByPath((0, import_obsidian8.normalizePath)(path));
+    if (existing) {
+      await this.app.vault.trash(existing, true);
+    }
+  }
+  async exists(path) {
+    return this.app.vault.getAbstractFileByPath((0, import_obsidian8.normalizePath)(path)) !== null;
+  }
+  async list(prefix) {
+    const normalizedPrefix = (0, import_obsidian8.normalizePath)(prefix).replace(/\/+$/, "");
+    return this.app.vault.getFiles().map((file) => file.path).filter((path) => path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`));
+  }
+  onChange(cb) {
+    const vault = this.app.vault;
+    const refs = [
+      vault.on("create", (file) => cb({ type: "create", path: file.path })),
+      vault.on("modify", (file) => cb({ type: "modify", path: file.path })),
+      vault.on("delete", (file) => cb({ type: "delete", path: file.path })),
+      // Obsidian fires exactly one "rename" event per moved/renamed file (folder renames are
+      // reported as one "rename" per file inside the folder, each with its own old/new path) -
+      // confirmed against Obsidian's own core "file explorer" rename handling, not directly
+      // tested here since it requires the real Obsidian runtime; see classifyRenameEvent for how
+      // this is turned into delete-old/create-new relative to a mounted room.
+      vault.on("rename", (file, oldPath) => cb({ type: "rename", path: file.path, oldPath }))
+    ];
+    for (const ref of refs) {
+      this.plugin.registerEvent(ref);
+    }
+    return () => {
+      for (const ref of refs) {
+        vault.offref(ref);
+      }
+    };
+  }
+  getFile(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file || !isFile(file)) {
+      throw new Error(`File not found: ${path}`);
+    }
+    return file;
+  }
+  async ensureFolder(path) {
+    const slash = path.lastIndexOf("/");
+    if (slash <= 0) {
+      return;
+    }
+    const folder = path.slice(0, slash);
+    if (!this.app.vault.getAbstractFileByPath(folder)) {
+      await this.app.vault.createFolder(folder);
+    }
+  }
+};
+function isFile(file) {
+  return "extension" in file;
+}
+
+// src/views/VaultRoomsView.ts
+var import_obsidian9 = require("obsidian");
+var VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
+var VaultRoomsView = class extends import_obsidian9.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    /** Which collapsible sections are currently collapsed, by key. Not persisted to disk - it's a
+     *  transient display preference, not data, so it resets (all expanded) when the view is closed
+     *  and reopened or Obsidian restarts; that's an acceptable, simple default. */
+    __publicField(this, "collapsedSections", /* @__PURE__ */ new Set());
+  }
+  getViewType() {
+    return VAULT_ROOMS_VIEW_TYPE;
+  }
+  getDisplayText() {
+    return "Vault Rooms";
+  }
+  getIcon() {
+    return "box";
+  }
+  async onOpen() {
+    if (this.plugin.getActiveServer() && !this.plugin.activeServerIsOwnStoppedServer()) {
+      await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
+        new import_obsidian9.Notice(error instanceof Error ? error.message : "Failed to load rooms");
+      });
+    }
+    this.render();
+  }
+  render() {
+    const container = this.containerEl.children[1];
+    container.empty();
+    container.addClass("vault-rooms-view");
+    const header = container.createDiv({ cls: "vault-rooms-header" });
+    new import_obsidian9.Setting(header).setName("Vault Rooms").setHeading();
+    this.renderHostingSection(container);
+    this.renderActiveConnectionSection(container);
+    this.renderOtherServersSection(container);
+    const server = this.plugin.getActiveServer();
+    if (!server) {
+      container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a server above to load teams and rooms." });
+      return;
+    }
+    this.renderFriendsSection(container);
+    this.renderTeamsSection(container);
+    this.renderRoomsSection(container);
+  }
+  /** A collapsible block: a clickable header (title + optional count badge + chevron) that toggles
+   *  whether renderBody() runs. Collapse state is keyed and remembered across re-renders (but not
+   *  across closing/reopening the view - see the collapsedSections field doc comment). Use this for
+   *  anything that can grow long (lists of friends/teams/rooms/servers); leave short, always-useful
+   *  controls (hosting toggle, current connection status) as plain, non-collapsible sections so
+   *  they're never accidentally hidden. */
+  renderCollapsibleSection(parent, key, title, count, renderBody) {
+    const section = parent.createDiv({ cls: "vault-rooms-section" });
+    const collapsed = this.collapsedSections.has(key);
+    const headerEl = section.createDiv({ cls: "vault-rooms-section-header" });
+    headerEl.createDiv({ cls: "vault-rooms-section-title", text: title });
+    if (count !== void 0) {
+      headerEl.createSpan({ cls: "vault-rooms-section-count", text: String(count) });
+    }
+    headerEl.createSpan({ cls: "vault-rooms-section-chevron", text: collapsed ? "\u25B8" : "\u25BE" });
+    headerEl.onClickEvent(() => {
+      if (collapsed) {
+        this.collapsedSections.delete(key);
+      } else {
+        this.collapsedSections.add(key);
+      }
+      this.render();
+    });
+    if (!collapsed) {
+      renderBody(section.createDiv({ cls: "vault-rooms-section-body" }));
+    }
+  }
+  /** Whether this device hosts a relay server at all - orthogonal to which server this device is
+   *  currently *using* as a client (see renderActiveConnectionSection): a host is also a client of
+   *  its own server, and a joining member never sees this section do anything but sit stopped. */
+  renderHostingSection(parent) {
+    const section = parent.createDiv({ cls: "vault-rooms-section" });
+    new import_obsidian9.Setting(section).setName("This device's server").setHeading();
+    const status = this.plugin.getServerStatus();
+    const card = section.createDiv({ cls: "vault-rooms-server-card" });
+    const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
+    badgeRow.createSpan({ cls: status.running ? "vault-rooms-badge is-running" : "vault-rooms-badge is-stopped", text: status.running ? "Running" : "Stopped" });
+    if (status.running) {
+      if (status.lanUrl) {
+        const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
+        lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
+        this.addPanelButton(lanRow, "Copy LAN URL", async () => {
+          var _a;
+          await navigator.clipboard.writeText((_a = status.lanUrl) != null ? _a : "");
+          new import_obsidian9.Notice("LAN URL copied.");
+        });
+      } else {
+        card.createEl("div", {
+          cls: "vault-rooms-error",
+          text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings \u2192 Vault Rooms \u2192 Relay server, then restart the server."
+        });
+      }
+    } else if (!status.running && status.error) {
+      card.createEl("div", { cls: "vault-rooms-error", text: status.error });
+    } else {
+      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Only start this if you want to host a room for others - joining someone else's server doesn't need it." });
+    }
+    const actions = section.createDiv({ cls: "vault-rooms-actions" });
+    if (status.running) {
+      this.addPanelButton(actions, "Stop server", () => this.plugin.stopEmbeddedServer());
+    } else {
+      this.addPanelButton(actions, "Start server", async () => {
+        await this.plugin.startEmbeddedServer();
+      });
+    }
+  }
+  /** The one server this device is currently using as a client (whether that's its own hosted
+   *  server or someone else's) - always visible, never collapsed, since "am I actually synced right
+   *  now" is exactly the kind of thing you glance at, not something to hide behind a click. Only
+   *  this server's mounted rooms are live: see "Other servers" below for what that means. */
+  renderActiveConnectionSection(parent) {
+    const section = parent.createDiv({ cls: "vault-rooms-section" });
+    new import_obsidian9.Setting(section).setName("Active connection").setHeading();
+    const server = this.plugin.getActiveServer();
+    const hasOwnServer = this.plugin.hasOwnServer();
+    if (!server) {
+      section.createDiv({
+        cls: "vault-rooms-empty",
+        text: this.plugin.settings.servers.length > 0 ? 'No server selected - pick one under "Other servers" below, or join/set up a new one.' : "Not connected to any server yet."
+      });
+      const actions2 = section.createDiv({ cls: "vault-rooms-actions" });
+      if (!hasOwnServer) {
+        this.addPanelButton(actions2, "Set up server", () => this.plugin.openSetupServerModal(), true);
+      }
+      this.addPanelButton(actions2, "Join server", () => this.plugin.openJoinTeamModal(), hasOwnServer);
+      return;
+    }
+    const card = section.createDiv({ cls: "vault-rooms-server-card" });
+    card.createEl("div", { text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+    const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
+    if (this.plugin.activeServerIsOwnStoppedServer()) {
+      badgeRow.createSpan({ cls: "vault-rooms-badge is-stopped", text: "Live sync: server stopped" });
+      card.createEl("div", {
+        cls: "vault-rooms-room-meta",
+        text: `Start this device's server above ("This device's server"), or enable "Start automatically" in Settings \u2192 Vault Rooms \u2192 Relay server.`
+      });
+    } else {
+      const syncState = this.plugin.getSyncState();
+      const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting\u2026" : "Live sync: offline";
+      const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
+      badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
+    }
+    if (!hasOwnServer) {
+      return;
+    }
+    const actions = section.createDiv({ cls: "vault-rooms-actions" });
+    this.addPanelButton(actions, "Join another server", () => this.plugin.openJoinTeamModal());
+  }
+  /**
+   * Every *other* saved server (logins this device remembers but isn't currently using) - a plain
+   * list, not an action menu. "Set up/Join another server" already lives in Active connection
+   * above regardless of whether anything is saved here yet, so this section only ever needs to
+   * render when there's something to actually list.
+   *
+   * Only one server is ever live at a time: switching (or setting up/joining another) makes that
+   * one active instead. Rooms mounted under a server that isn't active are simply paused - their
+   * local files stay put and nothing is lost, but neither pushes nor live updates happen until you
+   * switch back to that server (see the note under Rooms below). There's no background multi-server
+   * sync in v0.1; this is a deliberate simplification, not a bug you're missing a setting for.
+   */
+  renderOtherServersSection(parent) {
+    const active = this.plugin.getActiveServer();
+    const others = this.plugin.settings.servers.filter((server) => server.id !== (active == null ? void 0 : active.id));
+    if (others.length === 0) {
+      return;
+    }
+    this.renderCollapsibleSection(parent, "other-servers", "Other servers", others.length, (body) => {
+      body.createEl("p", {
+        cls: "vault-rooms-setting-hint",
+        text: "Only the active connection above syncs live. Switching here pauses sync for rooms mounted under the server you're leaving, and resumes it for rooms under this one."
+      });
+      const list = body.createDiv({ cls: "vault-rooms-team-list" });
+      for (const server of others) {
+        const item = list.createDiv({ cls: "vault-rooms-team" });
+        const title = item.createDiv({ cls: "vault-rooms-team-title" });
+        title.createEl("strong", { text: server.baseUrl });
+        title.createEl("span", { text: server.status });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+        const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+        this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
+        this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl));
+      }
+    });
+  }
+  renderFriendsSection(parent) {
+    const server = this.plugin.getActiveServer();
+    const others = this.plugin.friends.filter((friend) => friend.id !== (server == null ? void 0 : server.userId));
+    this.renderCollapsibleSection(parent, "friends", "Friends", others.length, (body) => {
+      const list = body.createDiv({ cls: "vault-rooms-friend-list" });
+      if (others.length === 0) {
+        list.createDiv({
+          cls: "vault-rooms-empty",
+          text: this.plugin.activeServerIsOwnStoppedServer() ? "This device's server is stopped - start it above to load friends." : "No friends yet - share an invite link to add one."
+        });
+        return;
+      }
+      for (const friend of others) {
+        const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
+        item.createEl("strong", { text: friend.displayName });
+        item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
+        if (server == null ? void 0 : server.isServerOwner) {
+          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+          const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
+          revoke.disabled = Boolean(friend.revokedAt);
+        }
+      }
+    });
+  }
+  renderTeamsSection(parent) {
+    const server = this.plugin.getActiveServer();
+    this.renderCollapsibleSection(parent, "teams", "Teams", this.plugin.teams.length, (body) => {
+      if (server == null ? void 0 : server.isServerOwner) {
+        const actions = body.createDiv({ cls: "vault-rooms-actions" });
+        let newTeamName = "";
+        const nameInput = actions.createEl("input", { type: "text", attr: { placeholder: "New team name" } });
+        nameInput.oninput = () => newTeamName = nameInput.value.trim();
+        this.addPanelButton(actions, "Create team", async () => {
+          if (!newTeamName) {
+            new import_obsidian9.Notice("Team name is required.");
+            return;
+          }
+          await this.plugin.createTeam(newTeamName);
+          this.render();
+        });
+      }
+      if (this.plugin.teams.length === 0) {
+        body.createDiv({
+          cls: "vault-rooms-empty",
+          text: this.plugin.activeServerIsOwnStoppedServer() ? "This device's server is stopped - start it above to load teams." : "No teams yet."
+        });
+        return;
+      }
+      const list = body.createDiv({ cls: "vault-rooms-team-card-list" });
+      for (const team of this.plugin.teams) {
+        this.renderTeamCard(list, team);
+      }
+    });
+  }
+  renderTeamCard(parent, team) {
+    const canManage = this.plugin.canManageTeam(team);
+    const canDelete = this.plugin.canDeleteTeam(team);
+    const members = this.plugin.teamMembersByTeam[team.id];
+    const card = parent.createDiv({ cls: "vault-rooms-team-card" });
+    const title = card.createDiv({ cls: "vault-rooms-team-title" });
+    title.createEl("strong", { text: team.name });
+    const role = this.plugin.myTeamRoles[team.id];
+    if (role) {
+      title.createEl("span", { text: role });
+    }
+    const memberList = card.createDiv({ cls: "vault-rooms-team-member-list" });
+    if (!members) {
+      memberList.createDiv({ cls: "vault-rooms-empty", text: "You are not a member of this team." });
+    } else if (members.length === 0) {
+      memberList.createDiv({ cls: "vault-rooms-empty", text: "No members." });
+    } else {
+      for (const member of members) {
+        const item = memberList.createDiv({ cls: member.revokedAt ? "vault-rooms-team-member is-revoked" : "vault-rooms-team-member" });
+        item.createEl("strong", { text: member.displayName });
+        item.createSpan({ text: ` ${member.role}${member.revokedAt ? " / revoked" : ""}` });
+        if (canManage) {
+          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+          const remove = this.addPanelButton(rowActions, "Remove", () => this.plugin.removeTeamMember(team.id, member.userId));
+          remove.disabled = Boolean(member.revokedAt);
+        }
+      }
+    }
+    const cardActions = card.createDiv({ cls: "vault-rooms-room-actions" });
+    if (canManage) {
+      const candidateFriends = this.plugin.friends.filter((friend) => !friend.revokedAt && !(members == null ? void 0 : members.some((member) => member.userId === friend.id)));
+      if (candidateFriends.length > 0) {
+        const addFriendRow = card.createDiv({ cls: "vault-rooms-add-friend-row" });
+        const select = addFriendRow.createEl("select");
+        for (const friend of candidateFriends) {
+          select.createEl("option", { text: friend.displayName, value: friend.id });
+        }
+        this.addPanelButton(addFriendRow, "Add friend", async () => {
+          if (!select.value) {
+            return;
+          }
+          await this.plugin.addFriendToTeam(team.id, select.value);
+          this.render();
+        });
+      }
+      this.addPanelButton(cardActions, "Invite link", () => this.plugin.createInvite(team.id));
+    }
+    if (canDelete) {
+      const deleteButton = this.addPanelButton(cardActions, "Delete team", () => this.deleteTeamWithConfirm(team));
+      deleteButton.addClass("mod-warning");
+    }
+  }
+  async deleteTeamWithConfirm(team) {
+    if (!window.confirm(`Delete team "${team.name}"? This removes its members, invites, and room access grants for everyone. Rooms are not deleted. This cannot be undone.`)) {
+      return;
+    }
+    await this.plugin.deleteTeam(team.id);
+    this.render();
+  }
+  renderRoomsSection(parent) {
+    this.renderCollapsibleSection(parent, "rooms", "Rooms", this.plugin.visibleRooms.length, (body) => {
+      var _a, _b;
+      const actions = body.createDiv({ cls: "vault-rooms-actions" });
+      this.addPanelButton(actions, "Create room", () => this.plugin.openCreateRoomModal());
+      this.addPanelButton(actions, "Refresh", async () => {
+        await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
+      });
+      if (this.plugin.visibleRooms.length === 0) {
+        body.createDiv({
+          cls: "vault-rooms-empty",
+          text: this.plugin.activeServerIsOwnStoppedServer() ? "This device's server is stopped - start it above to load rooms." : "No rooms loaded."
+        });
+        return;
+      }
+      const activeServerId = (_a = this.plugin.getActiveServer()) == null ? void 0 : _a.id;
+      for (const room of this.plugin.visibleRooms) {
+        const item = body.createDiv({ cls: "vault-rooms-room" });
+        const title = item.createDiv({ cls: "vault-rooms-room-title" });
+        title.createEl("strong", { text: room.name });
+        title.createEl("span", { text: room.type });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Folder: ${room.mountName}` });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Source: ${room.sourcePath}` });
+        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Permissions: ${room.permissions.join(", ") || "none"}` });
+        item.createEl("div", {
+          cls: "vault-rooms-room-meta",
+          text: `Capabilities: ${room.capabilities.map((cap) => `${cap.displayName}: ${cap.installed ? "installed" : "missing"}`).join(", ") || "none"}`
+        });
+        const mounted = this.plugin.isRoomMounted(room.id);
+        item.createEl("div", {
+          cls: mounted ? "vault-rooms-mounted" : "vault-rooms-unmounted",
+          text: mounted ? `Mounted: ${(_b = this.plugin.mountedPathFor(room.id)) != null ? _b : room.mountName}` : "Not mounted"
+        });
+        if (mounted && this.plugin.mountedRoomServerId(room.id) !== void 0 && this.plugin.mountedRoomServerId(room.id) !== activeServerId) {
+          item.createEl("div", {
+            cls: "vault-rooms-error",
+            text: "Not syncing right now - this room was mounted under a different server. Switch to that server (Other servers, above) to resume."
+          });
+        }
+        const roomActions = item.createDiv({ cls: "vault-rooms-room-actions" });
+        this.addPanelButton(roomActions, "Settings", () => this.plugin.openRoomSettingsModal(room));
+        this.addPanelButton(
+          roomActions,
+          mounted ? "Unmount" : "Mount",
+          async () => {
+            if (mounted) {
+              await this.plugin.unmountRoom(room.id);
+            } else {
+              await this.plugin.mountRoom(room);
+            }
+            this.render();
+          },
+          !mounted
+        );
+        if (mounted) {
+          this.renderRoomConflicts(item, room.id);
+        }
+      }
+    });
+  }
+  renderRoomConflicts(parent, roomId) {
+    const conflicts = this.plugin.listRoomConflicts(roomId);
+    if (conflicts.length === 0) {
+      return;
+    }
+    const section = parent.createDiv({ cls: "vault-rooms-conflict-list" });
+    section.createEl("div", {
+      cls: "vault-rooms-error",
+      text: `${conflicts.length} unresolved conflict${conflicts.length > 1 ? "s" : ""} - a teammate's edit and yours landed at the same time:`
+    });
+    for (const conflict of conflicts) {
+      const row = section.createDiv({ cls: "vault-rooms-conflict-row" });
+      row.createEl("div", { cls: "vault-rooms-room-meta", text: conflict.relativePath });
+      const rowActions = row.createDiv({ cls: "vault-rooms-room-actions" });
+      this.addPanelButton(rowActions, "Keep mine", async () => {
+        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "mine");
+        this.render();
+      });
+      this.addPanelButton(rowActions, "Keep synced version", async () => {
+        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "theirs");
+        this.render();
+      });
+    }
+  }
+  addPanelButton(parent, label, action, cta = false) {
+    const button = parent.createEl("button", { text: label });
+    if (cta) {
+      button.addClass("mod-cta");
+    }
+    button.onClickEvent(async () => {
+      button.disabled = true;
+      try {
+        await action();
+      } catch (error) {
+        new import_obsidian9.Notice(error instanceof Error ? error.message : "Vault Rooms action failed");
+      } finally {
+        button.disabled = false;
+      }
+    });
+    return button;
+  }
+};
+
+// src/pluginCapabilities.ts
+function withInstalledCapabilities(app, room) {
+  const plugins = app.plugins;
+  return {
+    ...room,
+    capabilities: room.capabilities.map((capability) => {
+      var _a, _b;
+      return {
+        ...capability,
+        installed: (_b = (_a = plugins == null ? void 0 : plugins.enabledPlugins) == null ? void 0 : _a.has(capability.pluginId)) != null ? _b : false
+      };
+    })
+  };
+}
+
+// src/controllers/ServerConnectionManager.ts
+var import_obsidian10 = require("obsidian");
+var import_node_path3 = require("node:path");
 
 // src/serverManager.ts
 var import_node_path2 = require("node:path");
@@ -44393,11 +46158,148 @@ async function archiveLegacyDbIfNeeded(dbPath, locator) {
   (0, import_node_fs2.renameSync)(dbPath, archivePath);
 }
 
-// ../relay-server/src/db/repositories/relayRepository.ts
+// ../relay-server/src/db/repositories/fileRepository.ts
 var import_node_crypto3 = require("node:crypto");
+var RelayFileRepository = class {
+  constructor(db, audit, getRoom) {
+    this.db = db;
+    this.audit = audit;
+    this.getRoom = getRoom;
+  }
+  listFiles(roomId) {
+    return this.db.prepare("select * from files where room_id = ? order by relative_path asc").all(roomId);
+  }
+  getFile(roomId, relativePath) {
+    var _a;
+    return (_a = this.db.prepare("select * from files where room_id = ? and relative_path = ?").get(roomId, relativePath)) != null ? _a : null;
+  }
+  readFileContent(roomId, relativePath) {
+    const file = this.getFile(roomId, relativePath);
+    if (!file) {
+      throw new AppError("NOT_FOUND", "File not found.", 404);
+    }
+    if (file.deleted_at) {
+      throw new AppError("FILE_DELETED", "The file has been deleted.", 404);
+    }
+    const version = this.latestFileVersion(file.id);
+    if (!version) {
+      throw new AppError("NOT_FOUND", "File content not found.", 404);
+    }
+    return { file, content: version.content };
+  }
+  writeFile(input) {
+    const write = this.db.transaction(() => {
+      var _a;
+      const existing = this.getFile(input.roomId, input.relativePath);
+      const sha256 = sha256Text(input.content);
+      const sizeBytes = Buffer.byteLength(input.content, "utf8");
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const storageKey = `sha256:${sha256}`;
+      if (input.baseVersion === 0) {
+        if (existing && !existing.deleted_at) {
+          throw new AppError("FILE_EXISTS", "The file already exists.", 409, { serverVersion: existing.version });
+        }
+        const version2 = existing ? existing.version + 1 : 1;
+        const fileId = (_a = existing == null ? void 0 : existing.id) != null ? _a : createId("fil");
+        if (existing) {
+          this.db.prepare("update files set version = ?, sha256 = ?, size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ? where id = ?").run(version2, sha256, sizeBytes, input.actorUserId, now, existing.id);
+        } else {
+          this.db.prepare(
+            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, ?, ?, null, ?, ?, ?)"
+          ).run(fileId, input.roomId, input.relativePath, contentTypeForPath(input.relativePath), version2, sha256, sizeBytes, input.actorUserId, now, now);
+        }
+        this.insertFileVersion({ fileId, version: version2, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
+        this.auditFileEvent(input.roomId, input.actorUserId, version2 === 1 ? "file.created" : "file.updated", fileId, input.relativePath, version2);
+        return { ok: true, relativePath: input.relativePath, version: version2, sha256, content: input.content };
+      }
+      if (!existing || existing.deleted_at) {
+        throw new AppError((existing == null ? void 0 : existing.deleted_at) ? "FILE_DELETED" : "NOT_FOUND", (existing == null ? void 0 : existing.deleted_at) ? "The file has been deleted." : "File not found.", 404);
+      }
+      if (existing.version !== input.baseVersion) {
+        const room = this.getRoom(input.roomId);
+        const ownerOverride = (room == null ? void 0 : room.conflict_policy) === "owner_wins" && room.owner_user_id === input.actorUserId;
+        if (!ownerOverride) {
+          throw this.versionConflict(existing);
+        }
+      }
+      const version = existing.version + 1;
+      this.db.prepare("update files set version = ?, sha256 = ?, size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?").run(version, sha256, sizeBytes, input.actorUserId, now, existing.id);
+      this.insertFileVersion({ fileId: existing.id, version, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
+      this.auditFileEvent(input.roomId, input.actorUserId, "file.updated", existing.id, input.relativePath, version);
+      return { ok: true, relativePath: input.relativePath, version, sha256, content: input.content };
+    });
+    return write();
+  }
+  deleteFile(input) {
+    const remove = this.db.transaction(() => {
+      const existing = this.getFile(input.roomId, input.relativePath);
+      if (!existing) {
+        throw new AppError("NOT_FOUND", "File not found.", 404);
+      }
+      if (existing.version !== input.baseVersion) {
+        throw this.versionConflict(existing);
+      }
+      const version = existing.version + 1;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      this.db.prepare("update files set version = ?, sha256 = null, size_bytes = null, deleted_at = ?, updated_by_user_id = ?, updated_at = ? where id = ?").run(version, now, input.actorUserId, now, existing.id);
+      this.auditFileEvent(input.roomId, input.actorUserId, "file.deleted", existing.id, input.relativePath, version);
+      return { ok: true, relativePath: input.relativePath, version };
+    });
+    return remove();
+  }
+  latestFileVersion(fileId) {
+    var _a;
+    return (_a = this.db.prepare(
+      `
+            select fv.*, cb.content
+            from file_versions fv
+            join content_blobs cb on cb.storage_key = fv.content_storage_key
+            where fv.file_id = ?
+            order by fv.version desc
+            limit 1
+          `
+    ).get(fileId)) != null ? _a : null;
+  }
+  insertFileVersion(input) {
+    this.db.prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)").run(input.storageKey, input.content, input.now);
+    this.db.prepare(
+      "insert into file_versions(id, file_id, version, sha256, size_bytes, content_storage_key, created_by_user_id, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(createId("ver"), input.fileId, input.version, input.sha256, input.sizeBytes, input.storageKey, input.actorUserId, input.now);
+  }
+  versionConflict(file) {
+    const latest = this.latestFileVersion(file.id);
+    return new AppError("VERSION_CONFLICT", "The file changed on the server before your edit was applied.", 409, {
+      serverVersion: file.version,
+      serverSha256: file.sha256,
+      ...latest ? { serverContent: latest.content } : {}
+    });
+  }
+  auditFileEvent(roomId, actorUserId, action, fileId, relativePath, version) {
+    this.audit({
+      teamId: null,
+      actorType: "user",
+      actorId: actorUserId,
+      action,
+      resourceType: "file",
+      resourceId: fileId,
+      metadata: { roomId, relativePath, version }
+    });
+  }
+};
+function sha256Text(content) {
+  return (0, import_node_crypto3.createHash)("sha256").update(content).digest("hex");
+}
+
+// ../relay-server/src/db/repositories/relayRepository.ts
 var RelayRepository = class {
   constructor(db) {
     this.db = db;
+    __publicField(this, "files");
+    this.files = new RelayFileRepository(
+      db,
+      (input) => this.audit(input),
+      (roomId) => this.getRoom(roomId)
+    );
   }
   getServerOwnerId() {
     var _a;
@@ -44868,98 +46770,22 @@ var RelayRepository = class {
     return this.db.prepare("select * from acl_rules where room_id = ? order by created_at asc").all(roomId).map(mapAclRule);
   }
   listFiles(roomId) {
-    return this.db.prepare("select * from files where room_id = ? order by relative_path asc").all(roomId);
+    return this.files.listFiles(roomId);
   }
   getFile(roomId, relativePath) {
-    var _a;
-    return (_a = this.db.prepare("select * from files where room_id = ? and relative_path = ?").get(roomId, relativePath)) != null ? _a : null;
+    return this.files.getFile(roomId, relativePath);
   }
   readFileContent(roomId, relativePath) {
-    const file = this.getFile(roomId, relativePath);
-    if (!file) {
-      throw new AppError("NOT_FOUND", "File not found.", 404);
-    }
-    if (file.deleted_at) {
-      throw new AppError("FILE_DELETED", "The file has been deleted.", 404);
-    }
-    const version = this.latestFileVersion(file.id);
-    if (!version) {
-      throw new AppError("NOT_FOUND", "File content not found.", 404);
-    }
-    return { file, content: version.content };
+    return this.files.readFileContent(roomId, relativePath);
   }
   writeFile(input) {
-    const write = this.db.transaction(() => {
-      var _a;
-      const existing = this.getFile(input.roomId, input.relativePath);
-      const sha256 = sha256Text(input.content);
-      const sizeBytes = Buffer.byteLength(input.content, "utf8");
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const storageKey = `sha256:${sha256}`;
-      if (input.baseVersion === 0) {
-        if (existing && !existing.deleted_at) {
-          throw new AppError("FILE_EXISTS", "The file already exists.", 409, { serverVersion: existing.version });
-        }
-        const version2 = existing ? existing.version + 1 : 1;
-        const fileId = (_a = existing == null ? void 0 : existing.id) != null ? _a : createId("fil");
-        if (existing) {
-          this.db.prepare("update files set version = ?, sha256 = ?, size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ? where id = ?").run(version2, sha256, sizeBytes, input.actorUserId, now, existing.id);
-        } else {
-          this.db.prepare(
-            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, ?, ?, null, ?, ?, ?)"
-          ).run(fileId, input.roomId, input.relativePath, contentTypeForPath(input.relativePath), version2, sha256, sizeBytes, input.actorUserId, now, now);
-        }
-        this.insertFileVersion({ fileId, version: version2, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
-        this.auditFileEvent(input.roomId, input.actorUserId, version2 === 1 ? "file.created" : "file.updated", fileId, input.relativePath, version2);
-        return { ok: true, relativePath: input.relativePath, version: version2, sha256, content: input.content };
-      }
-      if (!existing || existing.deleted_at) {
-        throw new AppError((existing == null ? void 0 : existing.deleted_at) ? "FILE_DELETED" : "NOT_FOUND", (existing == null ? void 0 : existing.deleted_at) ? "The file has been deleted." : "File not found.", 404);
-      }
-      if (existing.version !== input.baseVersion) {
-        const room = this.getRoom(input.roomId);
-        const ownerOverride = (room == null ? void 0 : room.conflict_policy) === "owner_wins" && room.owner_user_id === input.actorUserId;
-        if (!ownerOverride) {
-          throw this.versionConflict(existing);
-        }
-      }
-      const version = existing.version + 1;
-      this.db.prepare("update files set version = ?, sha256 = ?, size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?").run(version, sha256, sizeBytes, input.actorUserId, now, existing.id);
-      this.insertFileVersion({ fileId: existing.id, version, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
-      this.auditFileEvent(input.roomId, input.actorUserId, "file.updated", existing.id, input.relativePath, version);
-      return { ok: true, relativePath: input.relativePath, version, sha256, content: input.content };
-    });
-    return write();
+    return this.files.writeFile(input);
   }
   deleteFile(input) {
-    const remove = this.db.transaction(() => {
-      const existing = this.getFile(input.roomId, input.relativePath);
-      if (!existing) {
-        throw new AppError("NOT_FOUND", "File not found.", 404);
-      }
-      if (existing.version !== input.baseVersion) {
-        throw this.versionConflict(existing);
-      }
-      const version = existing.version + 1;
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      this.db.prepare("update files set version = ?, sha256 = null, size_bytes = null, deleted_at = ?, updated_by_user_id = ?, updated_at = ? where id = ?").run(version, now, input.actorUserId, now, existing.id);
-      this.auditFileEvent(input.roomId, input.actorUserId, "file.deleted", existing.id, input.relativePath, version);
-      return { ok: true, relativePath: input.relativePath, version };
-    });
-    return remove();
+    return this.files.deleteFile(input);
   }
   latestFileVersion(fileId) {
-    var _a;
-    return (_a = this.db.prepare(
-      `
-            select fv.*, cb.content
-            from file_versions fv
-            join content_blobs cb on cb.storage_key = fv.content_storage_key
-            where fv.file_id = ?
-            order by fv.version desc
-            limit 1
-          `
-    ).get(fileId)) != null ? _a : null;
+    return this.files.latestFileVersion(fileId);
   }
   getTeam(teamId) {
     var _a;
@@ -45028,31 +46854,6 @@ var RelayRepository = class {
       metadata: { displayName }
     });
   }
-  insertFileVersion(input) {
-    this.db.prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)").run(input.storageKey, input.content, input.now);
-    this.db.prepare(
-      "insert into file_versions(id, file_id, version, sha256, size_bytes, content_storage_key, created_by_user_id, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(createId("ver"), input.fileId, input.version, input.sha256, input.sizeBytes, input.storageKey, input.actorUserId, input.now);
-  }
-  versionConflict(file) {
-    const latest = this.latestFileVersion(file.id);
-    return new AppError("VERSION_CONFLICT", "The file changed on the server before your edit was applied.", 409, {
-      serverVersion: file.version,
-      serverSha256: file.sha256,
-      ...latest ? { serverContent: latest.content } : {}
-    });
-  }
-  auditFileEvent(roomId, actorUserId, action, fileId, relativePath, version) {
-    this.audit({
-      teamId: null,
-      actorType: "user",
-      actorId: actorUserId,
-      action,
-      resourceType: "file",
-      resourceId: fileId,
-      metadata: { roomId, relativePath, version }
-    });
-  }
   nextTeamSlug(name) {
     const base = slugify(name);
     let candidate = base;
@@ -45098,9 +46899,6 @@ function mapPrincipal(row) {
 function slugify(name) {
   const slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return slug || "team";
-}
-function sha256Text(content) {
-  return (0, import_node_crypto3.createHash)("sha256").update(content).digest("hex");
 }
 function mapAclRule(row) {
   return {
@@ -46501,1734 +48299,322 @@ async function isVaultRoomsServerOnPort(port) {
   }
 }
 
-// src/VaultRoomsSettingTab.ts
-var import_obsidian = require("obsidian");
-var VaultRoomsSettingTab = class extends import_obsidian.PluginSettingTab {
-  constructor(plugin) {
-    super(plugin.app, plugin);
-    this.plugin = plugin;
+// src/controllers/ServerConnectionManager.ts
+var ServerConnectionManager = class {
+  constructor(ctx) {
+    this.ctx = ctx;
+    __publicField(this, "embeddedServer", null);
   }
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    this.renderServerSettings(containerEl);
-    this.renderSyncSettings(containerEl);
-    this.renderServersSettings(containerEl);
-  }
-  renderServerSettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Relay server").setHeading();
-    containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: "This device hosts the relay server directly \u2014 no separate process or terminal needed. Set up or join from the Vault Rooms panel and it starts automatically if it isn't already running."
-    });
-    const status = this.plugin.getServerStatus();
-    new import_obsidian.Setting(containerEl).setName("Status").setDesc(
-      status.running ? `Running \u2014 this device: ${status.localUrl}${status.lanUrl ? `, LAN: ${status.lanUrl}` : status.lanDetectionFailed ? " \u2014 could NOT auto-detect a LAN IP; invite links will point at 127.0.0.1 and won't work for teammates until you set a Public URL override below, then restart the server." : ""}` : status.error ? `Stopped \u2014 last error: ${status.error}` : "Stopped"
-    ).addButton(
-      (button) => button.setButtonText(status.running ? "Stop" : "Start").setCta().onClick(async () => {
-        try {
-          if (status.running) {
-            await this.plugin.stopEmbeddedServer();
-          } else {
-            await this.plugin.startEmbeddedServer();
-          }
-        } catch (error) {
-          new import_obsidian.Notice(error instanceof Error ? error.message : "Vault Rooms server action failed");
-        }
-        this.display();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Public URL override").setDesc(
-      "The server always listens on your local network so teammates can connect - no TLS in v0.1, so only run this on networks you trust. Set this only if LAN IP auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers): this device's real LAN address, e.g. http://192.168.1.42:8787. Leave blank to auto-detect."
-    ).addText(
-      (text) => {
-        var _a;
-        return text.setPlaceholder("auto-detect").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
-          const trimmed = value.trim();
-          this.plugin.settings.server.publicUrlOverride = trimmed || void 0;
-          await this.plugin.saveSettings();
-          if (this.plugin.getServerStatus().running) {
-            new import_obsidian.Notice("Restart the server for this change to take effect.");
-          }
-        });
-      }
-    );
-    new import_obsidian.Setting(containerEl).setName("Port").setDesc("Leave blank to auto-pick a free port starting at 8787.").addText(
-      (text) => text.setPlaceholder("auto").setValue(this.plugin.settings.server.port ? String(this.plugin.settings.server.port) : "").onChange(async (value) => {
-        const trimmed = value.trim();
-        const parsed = trimmed ? Number.parseInt(trimmed, 10) : void 0;
-        if (trimmed && (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535)) {
-          return;
-        }
-        this.plugin.settings.server.port = parsed;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Allow remote bootstrap").setDesc("Allow creating the first team from a non-localhost address. Leave off unless you know you need it.").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.server.allowRemoteBootstrap).onChange(async (value) => {
-        this.plugin.settings.server.allowRemoteBootstrap = value;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Max synced file size").setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).").addText(
-      (text) => text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
-        const parsed = Number.parseInt(value, 10);
-        if (Number.isFinite(parsed) && parsed > 0) {
-          this.plugin.settings.server.maxFileBytes = parsed;
-          await this.plugin.saveSettings();
-        }
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Start automatically").setDesc("Start the relay server whenever this vault opens in Obsidian.").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.server.autoStart).onChange(async (value) => {
-        this.plugin.settings.server.autoStart = value;
-        await this.plugin.saveSettings();
-      })
-    );
-  }
-  renderSyncSettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Sync").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Mount root").setDesc("Default root for member-mounted rooms.").addText(
-      (text) => text.setValue(this.plugin.settings.mountRoot).onChange(async (value) => {
-        this.plugin.settings.mountRoot = value.trim() || "Vault Rooms";
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Debounce").setDesc("Milliseconds to debounce local file changes.").addText(
-      (text) => text.setValue(String(this.plugin.settings.debounceMs)).onChange(async (value) => {
-        const parsed = Number.parseInt(value, 10);
-        if (Number.isFinite(parsed) && parsed > 0) {
-          this.plugin.settings.debounceMs = parsed;
-          await this.plugin.saveSettings();
-        }
-      })
-    );
-  }
-  renderServersSettings(containerEl) {
-    var _a;
-    new import_obsidian.Setting(containerEl).setName("Servers").setHeading();
-    if (this.plugin.settings.servers.length === 0) {
-      containerEl.createEl("p", { cls: "setting-item-description", text: "No servers connected yet." });
-      return;
-    }
-    for (const server of this.plugin.settings.servers) {
-      const active = server.id === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.id);
-      const isRevoked = server.status === "revoked";
-      const setting = new import_obsidian.Setting(containerEl).setName(`${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}${active ? " - active" : ""}`).setDesc(
-        isRevoked ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join again.` : `${server.baseUrl} (${server.status})`
-      );
-      setting.addButton(
-        (button) => button.setButtonText("Use").setDisabled(active).onClick(async () => {
-          try {
-            await this.plugin.activateServer(server.id);
-            this.display();
-          } catch (error) {
-            new import_obsidian.Notice(error instanceof Error ? error.message : "Server switch failed");
-          }
-        })
-      );
-      setting.addButton(
-        (button) => button.setButtonText("Test").onClick(async () => {
-          try {
-            await this.plugin.testConnection(server.baseUrl);
-          } catch (error) {
-            new import_obsidian.Notice(error instanceof Error ? error.message : "Connection failed");
-          }
-        })
-      );
-      setting.addButton(
-        (button) => button.setButtonText("Forget").setWarning().onClick(async () => {
-          if (!window.confirm(`Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`)) {
-            return;
-          }
-          await this.plugin.forgetServer(server.id);
-          this.display();
-        })
-      );
-    }
-  }
-};
-
-// src/modals/CreateRoomModal.ts
-var import_obsidian3 = require("obsidian");
-
-// src/modals/pickers.ts
-var import_obsidian2 = require("obsidian");
-var KNOWN_PLUGINS = [
-  { pluginId: "obsidian-tasks-plugin", displayName: "Tasks" },
-  { pluginId: "obsidian-kanban", displayName: "Kanban" },
-  { pluginId: "dataview", displayName: "Dataview" },
-  { pluginId: "obsidian-excalidraw-plugin", displayName: "Excalidraw" }
-];
-function pluginOptions(app, selected = []) {
-  var _a, _b, _c, _d;
-  const registry = app.plugins;
-  const options = /* @__PURE__ */ new Map();
-  for (const plugin of KNOWN_PLUGINS) {
-    options.set(plugin.pluginId, plugin);
-  }
-  for (const pluginId of (_a = registry == null ? void 0 : registry.enabledPlugins) != null ? _a : []) {
-    options.set(pluginId, { pluginId, displayName: (_d = (_c = (_b = registry == null ? void 0 : registry.manifests) == null ? void 0 : _b[pluginId]) == null ? void 0 : _c.name) != null ? _d : pluginId });
-  }
-  for (const plugin of selected) {
-    options.set(plugin.pluginId, plugin);
-  }
-  return [...options.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
-}
-var VaultPathSuggestModal = class extends import_obsidian2.SuggestModal {
-  constructor(app, type, onChoose) {
-    super(app);
-    this.type = type;
-    this.onChoose = onChoose;
-    this.setPlaceholder(type === "folder" ? "Choose folder" : "Choose file");
-  }
-  getSuggestions(query) {
-    const needle = query.toLowerCase().trim();
-    const files = this.type === "folder" ? this.app.vault.getAllLoadedFiles().filter(isFolder) : this.app.vault.getFiles();
-    return files.filter((file) => file.path && !file.path.startsWith(".obsidian/")).filter((file) => !needle || file.path.toLowerCase().includes(needle)).slice(0, 100);
-  }
-  renderSuggestion(file, el) {
-    el.createEl("div", { text: file.path });
-    el.createEl("small", { text: this.type === "folder" ? "Folder" : "File" });
-  }
-  onChooseSuggestion(file) {
-    this.onChoose(file.path);
-  }
-};
-function isFolder(file) {
-  return file instanceof import_obsidian2.TFolder;
-}
-
-// src/modals/CreateRoomModal.ts
-var CreateRoomModal = class extends import_obsidian3.Modal {
-  constructor(plugin) {
-    super(plugin.app);
-    this.plugin = plugin;
-    __publicField(this, "name", "Projects Demo");
-    /** Rooms are always folder rooms now - single-file rooms are no longer creatable (their sync
-     *  prefix logic never actually worked - see the audited finding). Kept as a literal "folder" for
-     *  now purely because RoomSummary/createRoom's input type still carries a type field the server
-     *  stores for back-compat with rooms created before this change. */
-    __publicField(this, "type", "folder");
-    __publicField(this, "sourcePath", "Projects/Demo");
-    __publicField(this, "mountName", "Projects Demo");
-    /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
-    __publicField(this, "mountNameTouched", false);
-    __publicField(this, "conflictPolicy", "keep_both");
-    __publicField(this, "capabilities", [
-      { pluginId: "obsidian-tasks-plugin", displayName: "Tasks", mode: "recommended" },
-      { pluginId: "obsidian-kanban", displayName: "Kanban", mode: "recommended" }
-    ]);
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    this.setTitle("Create room");
-    new import_obsidian3.Setting(contentEl).setName("Name").addText(
-      (text) => text.setValue(this.name).onChange((value) => {
-        this.name = value.trim();
-        if (!this.mountNameTouched) {
-          this.mountName = sanitizeMountName(this.name);
-        }
-      })
-    );
-    new import_obsidian3.Setting(contentEl).setName("Source path").setDesc("The folder in your vault to share. Pick one with the button below, or type a path directly.").addText(
-      (text) => text.setValue(this.sourcePath).onChange((value) => {
-        this.sourcePath = value.trim();
-      })
-    ).addButton(
-      (button) => button.setButtonText("Choose folder").onClick(() => {
-        new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
-      })
-    );
-    new import_obsidian3.Setting(contentEl).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
-      (text) => text.setValue(this.mountName).onChange((value) => {
-        this.mountName = value.trim();
-        this.mountNameTouched = true;
-      })
-    );
-    new import_obsidian3.Setting(contentEl).setName("When edits conflict").setDesc(
-      "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
-    ).addDropdown(
-      (dropdown) => dropdown.addOption("keep_both", "Keep both (default)").addOption("owner_wins", "Owner's version always wins").setValue(this.conflictPolicy).onChange((value) => {
-        this.conflictPolicy = value;
-      })
-    );
-    new import_obsidian3.Setting(contentEl).setName("Plugin capabilities").setHeading();
-    contentEl.createEl("p", {
-      cls: "vault-rooms-setting-hint",
-      text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
-    });
-    const options = pluginOptions(this.app, this.capabilities);
-    for (const capability of this.capabilities) {
-      new import_obsidian3.Setting(contentEl).setName("Plugin").addDropdown((dropdown) => {
-        for (const option of options) {
-          dropdown.addOption(option.pluginId, option.displayName);
-        }
-        dropdown.setValue(capability.pluginId).onChange((pluginId) => {
-          var _a;
-          const selected = options.find((option) => option.pluginId === pluginId);
-          capability.pluginId = pluginId;
-          capability.displayName = (_a = selected == null ? void 0 : selected.displayName) != null ? _a : pluginId;
-          this.onOpen();
-        });
-      }).addDropdown(
-        (dropdown) => dropdown.addOption("off", "Off").addOption("optional", "Optional").addOption("recommended", "Recommended").addOption("required", "Required").setValue(capability.mode).onChange((value) => {
-          capability.mode = value;
-          if (value === "off") {
-            this.capabilities = this.capabilities.filter((item) => item !== capability);
-            this.onOpen();
-          }
-        })
-      );
-    }
-    new import_obsidian3.Setting(contentEl).addButton(
-      (button) => button.setButtonText("Add plugin").onClick(() => {
-        var _a;
-        const existing = new Set(this.capabilities.map((capability) => capability.pluginId));
-        const option = (_a = options.find((candidate) => !existing.has(candidate.pluginId))) != null ? _a : options[0];
-        if (!option) {
-          new import_obsidian3.Notice("No plugins found.");
-          return;
-        }
-        this.capabilities.push({ pluginId: option.pluginId, displayName: option.displayName, mode: "optional" });
-        this.onOpen();
-      })
-    );
-    new import_obsidian3.Setting(contentEl).addButton(
-      (button) => button.setCta().setButtonText("Create").onClick(async () => {
-        try {
-          await this.plugin.createRoom({
-            name: this.name,
-            type: this.type,
-            sourcePath: this.sourcePath,
-            mountName: this.mountName,
-            conflictPolicy: this.conflictPolicy,
-            capabilities: this.capabilities.filter((capability) => capability.mode !== "off")
-          });
-          this.close();
-        } catch (error) {
-          new import_obsidian3.Notice(error instanceof Error ? error.message : "Room creation failed");
-        }
-      })
-    );
-  }
-  applyChosenPath(path) {
-    this.sourcePath = path;
-    if (!this.name || this.name === "Projects Demo") {
-      this.name = basename(path);
-    }
-    if (!this.mountNameTouched) {
-      this.mountName = sanitizeMountName(this.name);
-    }
-    this.onOpen();
-  }
-};
-function basename(path) {
-  var _a;
-  return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
-}
-function sanitizeMountName(name) {
-  const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
-  return cleaned || "Room";
-}
-
-// src/modals/InviteMemberModal.ts
-var import_obsidian4 = require("obsidian");
-var InviteMemberModal = class extends import_obsidian4.Modal {
-  constructor(plugin, inviteText, joinUrl) {
-    super(plugin.app);
-    this.plugin = plugin;
-    this.inviteText = inviteText;
-    this.joinUrl = joinUrl;
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    this.setTitle("Invite member");
-    contentEl.createEl("p", {
-      text: "Send this link to a teammate on the same LAN. Clicking it opens Obsidian and pre-fills the join form (Vault Rooms plugin must already be installed on their side)."
-    });
-    contentEl.createEl("a", { text: this.joinUrl, href: this.joinUrl }).setAttr("style", "display: block; word-break: break-all; margin-bottom: 12px;");
-    new import_obsidian4.Setting(contentEl).addButton(
-      (button) => button.setButtonText("Copy invite link").onClick(async () => {
-        await navigator.clipboard.writeText(this.joinUrl);
-        new import_obsidian4.Notice("Invite link copied.");
-      })
-    );
-    contentEl.createEl("p", { text: "Full details (server URL, token, link):" });
-    contentEl.createEl("textarea", { text: this.inviteText }).setAttr("style", "width: 100%; min-height: 100px;");
-    new import_obsidian4.Setting(contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
-  }
-};
-
-// src/modals/JoinTeamModal.ts
-var import_obsidian5 = require("obsidian");
-var JoinTeamModal = class extends import_obsidian5.Modal {
-  constructor(plugin, mode = "join", serverUrl = "", inviteToken = "") {
-    super(plugin.app);
-    this.plugin = plugin;
-    this.mode = mode;
-    __publicField(this, "inviteInput", "");
-    __publicField(this, "serverUrl", "");
-    __publicField(this, "inviteToken", "");
-    __publicField(this, "displayName", "");
-    __publicField(this, "deviceName", "");
-    /** True when we already have a real server+token (opened via an invite link) - in that case
-     *  there's nothing to parse or re-enter, so the form only needs to ask for a display name. */
-    __publicField(this, "hasKnownInvite");
-    __publicField(this, "showManualForm");
-    this.serverUrl = serverUrl;
-    this.inviteToken = inviteToken;
-    this.hasKnownInvite = Boolean(serverUrl && inviteToken);
-    this.showManualForm = !this.hasKnownInvite;
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    this.setTitle(this.mode === "join" ? "Join Vault Rooms" : "Rejoin Vault Rooms");
-    if (this.hasKnownInvite && !this.showManualForm) {
-      this.renderKnownInviteForm(contentEl);
-      return;
-    }
-    this.renderManualForm(contentEl);
-  }
-  /** The common case: opened by clicking an invite link, so server+token are already known - the
-   *  only thing genuinely missing is the person's name. */
-  renderKnownInviteForm(contentEl) {
-    contentEl.createEl("p", { text: `Joining ${this.serverUrl} via invite link. Add your display name to finish.` });
-    new import_obsidian5.Setting(contentEl).setName("Display name").setDesc("This is what teammates will see you as.").addText((text) => {
-      text.setValue(this.displayName).onChange((value) => this.displayName = value.trim());
-      window.setTimeout(() => text.inputEl.focus(), 0);
-    });
-    new import_obsidian5.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
-    new import_obsidian5.Setting(contentEl).addButton(
-      (button) => button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
-        await this.submit();
-      })
-    );
-    new import_obsidian5.Setting(contentEl).addButton(
-      (button) => button.setButtonText("Use a different invite link").onClick(() => {
-        this.showManualForm = true;
-        this.onOpen();
-      })
-    );
-  }
-  /** Fallback for opening this modal without a link already in hand (command palette, or "use a
-   *  different invite link") - lets someone paste a full invite link/text or fill fields by hand. */
-  renderManualForm(contentEl) {
-    if (this.inviteToken) {
-      contentEl.createEl("p", { text: "Invite link details filled in below. Add your display name to finish joining." });
-    }
-    new import_obsidian5.Setting(contentEl).setName("Invite link").setDesc("Paste a full obsidian://vault-rooms invite link or the raw text a teammate sent you.").addText(
-      (text) => text.setPlaceholder("obsidian://vault-rooms/join?server=...&token=...").setValue(this.inviteInput).onChange((value) => this.inviteInput = value.trim())
-    ).addButton(
-      (button) => button.setButtonText("Parse").onClick(() => {
-        if (!this.applyInviteInput(true)) {
-          new import_obsidian5.Notice("Invite link must include server and token.");
-        }
-      })
-    );
-    new import_obsidian5.Setting(contentEl).setName("Server URL").addText((text) => text.setValue(this.serverUrl).onChange((value) => this.serverUrl = value.trim()));
-    new import_obsidian5.Setting(contentEl).setName("Invite token").addText((text) => text.setValue(this.inviteToken).onChange((value) => this.inviteToken = value.trim()));
-    new import_obsidian5.Setting(contentEl).setName("Display name").addText((text) => text.setValue(this.displayName).onChange((value) => this.displayName = value.trim()));
-    new import_obsidian5.Setting(contentEl).setName("Device name").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
-    new import_obsidian5.Setting(contentEl).addButton(
-      (button) => button.setButtonText("Test connection").onClick(async () => {
-        await this.plugin.testConnection(this.serverUrl);
-      })
-    );
-    new import_obsidian5.Setting(contentEl).addButton(
-      (button) => button.setCta().setButtonText(this.mode === "join" ? "Join" : "Rejoin").onClick(async () => {
-        this.applyInviteInput(false);
-        await this.submit();
-      })
-    );
-  }
-  async submit() {
-    try {
-      await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop");
-      this.close();
-    } catch (error) {
-      new import_obsidian5.Notice(error instanceof Error ? error.message : "Join failed");
-    }
-  }
-  applyInviteInput(render) {
-    if (!this.inviteInput) {
-      return false;
-    }
-    const parsed = parseInviteInput(this.inviteInput);
-    if (!parsed.serverUrl || !parsed.inviteToken) {
-      return false;
-    }
-    this.serverUrl = parsed.serverUrl;
-    this.inviteToken = parsed.inviteToken;
-    if (render) {
-      this.onOpen();
-    }
-    return true;
-  }
-};
-function parseInviteInput(input) {
-  var _a, _b;
-  const text = input.trim();
-  const parsed = parseInviteUrl(text);
-  if (parsed.serverUrl || parsed.inviteToken) {
-    return parsed;
-  }
-  const inviteToken = (_a = text.match(/tr_inv_[A-Za-z0-9_-]+/)) == null ? void 0 : _a[0];
-  const urls = [...text.matchAll(/https?:\/\/[^\s]+/g)].map((match) => match[0]);
-  const serverUrl = (_b = urls.find((url) => !url.includes("token=") && !url.includes("tr_inv_"))) != null ? _b : urls[0];
-  return { serverUrl, inviteToken };
-}
-function parseInviteUrl(input) {
-  var _a, _b, _c;
-  try {
-    const url = new URL(input);
-    return {
-      serverUrl: (_a = url.searchParams.get("server")) != null ? _a : void 0,
-      inviteToken: (_c = (_b = url.searchParams.get("token")) != null ? _b : url.searchParams.get("inviteToken")) != null ? _c : void 0
-    };
-  } catch (e) {
-    return {};
-  }
-}
-
-// src/modals/RoomSettingsModal.ts
-var import_obsidian6 = require("obsidian");
-var PERMISSIONS = ["room:read", "room:write", "room:delete", "file:read", "file:write", "file:create", "file:delete", "sync:subscribe", "sync:push"];
-var RoomSettingsModal = class extends import_obsidian6.Modal {
-  constructor(plugin, room) {
-    var _a;
-    super(plugin.app);
-    this.plugin = plugin;
-    this.room = room;
-    __publicField(this, "name");
-    /** Rooms are always folder rooms now - see CreateRoomModal.ts's matching note. Kept as a literal
-     *  "folder" purely because updateRoomSettings' input type still carries a type field the server
-     *  stores for back-compat with rooms created before this change. */
-    __publicField(this, "type", "folder");
-    __publicField(this, "sourcePath");
-    __publicField(this, "mountName");
-    __publicField(this, "localMountPath");
-    /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
-    __publicField(this, "mountNameTouched", false);
-    __publicField(this, "conflictPolicy");
-    __publicField(this, "capabilities");
-    __publicField(this, "aclRules", []);
-    __publicField(this, "subjectType", "team");
-    __publicField(this, "subjectId", "");
-    __publicField(this, "effect", "allow");
-    __publicField(this, "preset", "reader");
-    __publicField(this, "pathPattern", "**/*");
-    __publicField(this, "customPermissions", /* @__PURE__ */ new Set(["room:read", "file:read", "sync:subscribe"]));
-    this.name = room.name;
-    this.sourcePath = room.sourcePath;
-    this.mountName = room.mountName;
-    this.conflictPolicy = room.conflictPolicy;
-    this.localMountPath = (_a = plugin.settings.roomMountPaths[room.id]) != null ? _a : plugin.roomMountPathFor(room);
-    this.capabilities = room.capabilities.map((capability) => ({
-      pluginId: capability.pluginId,
-      displayName: capability.displayName,
-      mode: capability.mode,
-      minVersion: capability.minVersion
-    }));
-  }
-  onOpen() {
-    this.render();
-    void this.loadAccessData();
-  }
-  async loadAccessData() {
-    try {
-      await this.plugin.refreshTeams({ notify: false });
-      this.subjectId = this.subjectId || this.defaultSubjectId();
-      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
-      this.render();
-    } catch (error) {
-      new import_obsidian6.Notice(error instanceof Error ? error.message : "Failed to load room settings");
-    }
-  }
-  render() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass("vault-rooms-settings-modal");
-    this.setTitle(`Room settings: ${this.room.name}`);
-    this.renderRoomFields(contentEl);
-    this.renderCapabilities(contentEl);
-    this.renderAccess(contentEl);
-    this.renderDangerZone(contentEl);
-  }
-  renderRoomFields(parent) {
-    new import_obsidian6.Setting(parent).setName("Room").setHeading();
-    new import_obsidian6.Setting(parent).setName("Name").addText(
-      (text) => text.setValue(this.name).onChange((value) => {
-        this.name = value.trim();
-        if (!this.mountNameTouched) {
-          this.mountName = sanitizeMountName2(this.name);
-        }
-      })
-    );
-    const isOwner = this.isOwnRoom();
-    if (isOwner) {
-      new import_obsidian6.Setting(parent).setName("Room folder").setDesc("The folder in your vault that this room shares - this is the content that actually gets synced to every member.").addText(
-        (text) => text.setValue(this.sourcePath).onChange((value) => {
-          this.sourcePath = value.trim();
-        })
-      ).addButton(
-        (button) => button.setButtonText("Choose folder").onClick(() => {
-          new VaultPathSuggestModal(this.app, "folder", (path) => this.applyChosenPath(path)).open();
-        })
-      );
-    } else {
-      new import_obsidian6.Setting(parent).setName("Source path").setDesc("The folder in the owner's vault that this room shares - this is the content that actually gets synced to every member. Only the owner can change this.").addText((text) => text.setValue(this.sourcePath).setDisabled(true));
-    }
-    new import_obsidian6.Setting(parent).setName("Mount name").setDesc("The folder name teammates' copies sync into (auto-follows Name above; edit here for a different, filesystem-safe folder name).").addText(
-      (text) => text.setValue(this.mountName).onChange((value) => {
-        this.mountName = value.trim();
-        this.mountNameTouched = true;
-      })
-    );
-    if (!isOwner) {
-      new import_obsidian6.Setting(parent).setName("Local mount path").setDesc(
-        "Where this device keeps its local copy of the room's files (a folder under Settings \u2192 Vault Rooms \u2192 Sync \u2192 Mount root by default). Leave blank to use that default." + (this.plugin.isRoomMounted(this.room.id) ? " Changing this takes effect after the next unmount/mount." : "")
-      ).addText((text) => text.setValue(this.localMountPath).onChange((value) => this.localMountPath = value.trim()));
-    }
-    new import_obsidian6.Setting(parent).setName("When edits conflict").setDesc(
-      "Keep both: a losing write is never lost - it's saved as a local-only conflict copy on whichever device pushed second. Owner's version always wins: your writes always become the room's canonical version, even if someone else's edit landed a moment earlier - good for files you autosave frequently (e.g. a drawing) so they don't keep forking."
-    ).addDropdown(
-      (dropdown) => dropdown.addOption("keep_both", "Keep both (default)").addOption("owner_wins", "Owner's version always wins").setValue(this.conflictPolicy).onChange((value) => {
-        this.conflictPolicy = value;
-      })
-    );
-  }
-  isOwnRoom() {
-    var _a;
-    return this.room.ownerUserId === ((_a = this.plugin.getActiveServer()) == null ? void 0 : _a.userId);
-  }
-  applyChosenPath(path) {
-    this.sourcePath = path;
-    if (!this.name) {
-      this.name = basename2(path);
-    }
-    if (!this.mountNameTouched) {
-      this.mountName = sanitizeMountName2(this.name || basename2(path));
-    }
-    this.render();
-  }
-  renderCapabilities(parent) {
-    new import_obsidian6.Setting(parent).setName("Plugin capabilities").setHeading();
-    parent.createEl("p", {
-      cls: "vault-rooms-setting-hint",
-      text: "Optional hints shown to members about which plugin works best with this room's files - nothing is enforced. Anyone can edit the plain Markdown directly, or use a different plugin, with or without these installed."
-    });
-    const options = pluginOptions(this.app, this.capabilities);
-    for (const capability of this.capabilities) {
-      new import_obsidian6.Setting(parent).setName("Plugin").addDropdown((dropdown) => {
-        for (const option of options) {
-          dropdown.addOption(option.pluginId, option.displayName);
-        }
-        dropdown.setValue(capability.pluginId).onChange((pluginId) => {
-          var _a;
-          const selected = options.find((option) => option.pluginId === pluginId);
-          capability.pluginId = pluginId;
-          capability.displayName = (_a = selected == null ? void 0 : selected.displayName) != null ? _a : pluginId;
-          this.render();
-        });
-      }).addDropdown(
-        (dropdown) => dropdown.addOption("optional", "Optional").addOption("recommended", "Recommended").addOption("required", "Required").setValue(capability.mode).onChange((value) => capability.mode = value)
-      ).addText((text) => {
-        var _a;
-        return text.setPlaceholder("min version").setValue((_a = capability.minVersion) != null ? _a : "").onChange((value) => capability.minVersion = value.trim() || void 0);
-      }).addButton(
-        (button) => button.setButtonText("Remove").onClick(() => {
-          this.capabilities = this.capabilities.filter((item) => item !== capability);
-          this.render();
-        })
-      );
-    }
-    new import_obsidian6.Setting(parent).addButton(
-      (button) => button.setButtonText("Add plugin").onClick(() => {
-        var _a;
-        const existing = new Set(this.capabilities.map((capability) => capability.pluginId));
-        const option = (_a = options.find((candidate) => !existing.has(candidate.pluginId))) != null ? _a : options[0];
-        if (!option) {
-          new import_obsidian6.Notice("No plugins found.");
-          return;
-        }
-        this.capabilities.push({ pluginId: option.pluginId, displayName: option.displayName, mode: "optional" });
-        this.render();
-      })
-    );
-    new import_obsidian6.Setting(parent).addButton(
-      (button) => button.setCta().setButtonText("Save room settings").onClick(async () => {
-        var _a;
-        try {
-          await this.plugin.updateRoomSettings(
-            this.room.id,
-            {
-              name: this.name,
-              type: this.type,
-              sourcePath: this.sourcePath,
-              mountName: this.mountName,
-              conflictPolicy: this.conflictPolicy,
-              capabilities: this.capabilities
-            },
-            this.localMountPath
-          );
-          this.room = (_a = this.plugin.visibleRooms.find((room) => room.id === this.room.id)) != null ? _a : this.room;
-          this.render();
-        } catch (error) {
-          new import_obsidian6.Notice(error instanceof Error ? error.message : "Room update failed");
-        }
-      })
-    );
-  }
-  renderAccess(parent) {
-    new import_obsidian6.Setting(parent).setName("Room access").setHeading();
-    parent.createEl("p", {
-      cls: "vault-rooms-setting-hint",
-      text: "Grant a whole team or a specific friend access to this room."
-    });
-    new import_obsidian6.Setting(parent).setName("Grant access to").addDropdown(
-      (dropdown) => dropdown.addOption("team", "Team").addOption("user", "Specific friend").setValue(this.subjectType).onChange((value) => {
-        this.subjectType = value;
-        this.subjectId = this.defaultSubjectId();
-        this.render();
-      })
-    );
-    if (this.subjectType === "team") {
-      if (this.plugin.teamDirectory.length === 0) {
-        new import_obsidian6.Setting(parent).setDesc("No teams yet - create one from the Vault Rooms panel first.");
-      } else {
-        new import_obsidian6.Setting(parent).setName("Team").addDropdown((dropdown) => {
-          for (const team of this.plugin.teamDirectory) {
-            dropdown.addOption(team.id, team.name);
-          }
-          dropdown.setValue(this.subjectId).onChange((value) => this.subjectId = value);
-        });
-      }
-    } else {
-      const activeFriends = this.plugin.friends.filter((friend) => !friend.revokedAt);
-      if (activeFriends.length === 0) {
-        new import_obsidian6.Setting(parent).setDesc("No friends yet - invite someone first.");
-      } else {
-        new import_obsidian6.Setting(parent).setName("Friend").addDropdown((dropdown) => {
-          for (const friend of activeFriends) {
-            dropdown.addOption(friend.id, friend.displayName);
-          }
-          dropdown.setValue(this.subjectId).onChange((value) => this.subjectId = value);
-        });
-      }
-    }
-    new import_obsidian6.Setting(parent).setName("Access").addDropdown(
-      (dropdown) => dropdown.addOption("allow", "Allow").addOption("deny", "Deny").setValue(this.effect).onChange((value) => this.effect = value)
-    ).addDropdown(
-      (dropdown) => dropdown.addOption("reader", "Reader").addOption("editor", "Editor").addOption("custom", "Custom").setValue(this.preset).onChange((value) => {
-        this.preset = value;
-        this.render();
-      })
-    );
-    new import_obsidian6.Setting(parent).setName("Path pattern").addText((text) => text.setValue(this.pathPattern).onChange((value) => this.pathPattern = value.trim() || "**/*"));
-    if (this.preset === "custom") {
-      const permissions = parent.createDiv({ cls: "vault-rooms-permission-grid" });
-      for (const permission of PERMISSIONS) {
-        const label = permissions.createEl("label");
-        const checkbox = label.createEl("input", { type: "checkbox" });
-        checkbox.checked = this.customPermissions.has(permission);
-        checkbox.onchange = () => {
-          if (checkbox.checked) {
-            this.customPermissions.add(permission);
-          } else {
-            this.customPermissions.delete(permission);
-          }
-        };
-        label.createSpan({ text: permission });
-      }
-    }
-    const applyRow = new import_obsidian6.Setting(parent);
-    if (this.subjectType === "team") {
-      applyRow.addButton(
-        (button) => button.setButtonText("Add team as editor").onClick(async () => {
-          if (!this.subjectId) {
-            new import_obsidian6.Notice("Pick a team first.");
-            return;
-          }
-          await this.grantAccess({ subjectType: "team", subjectId: this.subjectId, effect: "allow", preset: "editor", pathPattern: "**/*" });
-        })
-      );
-    }
-    applyRow.addButton(
-      (button) => button.setCta().setButtonText("Apply access").onClick(async () => {
-        await this.grantAccess({
-          subjectType: this.subjectType,
-          subjectId: this.subjectId,
-          effect: this.effect,
-          ...this.preset === "custom" ? { permissions: [...this.customPermissions] } : { preset: this.preset },
-          pathPattern: this.pathPattern
-        });
-      })
-    );
-    const acl = parent.createDiv({ cls: "vault-rooms-acl-list" });
-    if (this.aclRules.length === 0) {
-      acl.createDiv({ cls: "vault-rooms-empty", text: "No explicit room access rules." });
-      return;
-    }
-    for (const rule of this.aclRules) {
-      const row = new import_obsidian6.Setting(acl).setName(`${rule.effect} - ${this.subjectLabel(rule)}`).setDesc(`${rule.permissions.join(", ")} / ${rule.pathPattern}`);
-      row.addButton(
-        (button) => button.setButtonText("Remove").setWarning().onClick(async () => {
-          try {
-            await this.plugin.removeRoomAccess(this.room.id, rule.id);
-            this.aclRules = await this.plugin.listRoomAcl(this.room.id);
-            this.render();
-          } catch (error) {
-            new import_obsidian6.Notice(error instanceof Error ? error.message : "Failed to remove access rule");
-          }
-        })
-      );
-    }
-  }
-  renderDangerZone(parent) {
-    if (!this.room.permissions.includes("room:delete")) {
-      return;
-    }
-    new import_obsidian6.Setting(parent).setName("Danger zone").setHeading();
-    new import_obsidian6.Setting(parent).setName("Delete room").setDesc("Permanently deletes this room and all of its files/history on the server for every member. This cannot be undone.").addButton(
-      (button) => button.setButtonText("Delete room").setWarning().onClick(async () => {
-        if (!window.confirm(`Delete room "${this.room.name}"? This removes it and all of its files for every member. This cannot be undone.`)) {
-          return;
-        }
-        try {
-          await this.plugin.deleteRoom(this.room);
-          this.close();
-        } catch (error) {
-          new import_obsidian6.Notice(error instanceof Error ? error.message : "Failed to delete room");
-        }
-      })
-    );
-  }
-  async grantAccess(input) {
-    if (!input.subjectId) {
-      new import_obsidian6.Notice("Subject id is required.");
-      return;
-    }
-    if (input.permissions && input.permissions.length === 0) {
-      new import_obsidian6.Notice("Pick at least one permission.");
-      return;
-    }
-    try {
-      await this.plugin.grantRoomAccess(this.room.id, input);
-      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
-      this.render();
-    } catch (error) {
-      new import_obsidian6.Notice(error instanceof Error ? error.message : "Room access update failed");
-    }
-  }
-  defaultSubjectId() {
-    var _a, _b, _c, _d;
-    if (this.subjectType === "team") {
-      return (_b = (_a = this.plugin.teamDirectory[0]) == null ? void 0 : _a.id) != null ? _b : "";
-    }
-    if (this.subjectType === "user") {
-      return (_d = (_c = this.plugin.friends.find((friend) => !friend.revokedAt)) == null ? void 0 : _c.id) != null ? _d : "";
-    }
-    return "";
-  }
-  subjectLabel(rule) {
-    if (rule.subjectType === "user") {
-      const friend = this.plugin.friends.find((candidate) => candidate.id === rule.subjectId);
-      return friend ? friend.displayName : rule.subjectId;
-    }
-    if (rule.subjectType === "team") {
-      const team = this.plugin.teamDirectory.find((candidate) => candidate.id === rule.subjectId);
-      return team ? team.name : rule.subjectId;
-    }
-    return `${rule.subjectType}:${rule.subjectId}`;
-  }
-};
-function basename2(path) {
-  var _a;
-  return (_a = path.split("/").filter(Boolean).pop()) != null ? _a : path;
-}
-function sanitizeMountName2(name) {
-  const cleaned = name.trim().replace(/[/\\]+/g, "-").replace(/^\.+/, "");
-  return cleaned || "Room";
-}
-
-// src/modals/SetupTeamModal.ts
-var import_obsidian7 = require("obsidian");
-var SetupTeamModal = class extends import_obsidian7.Modal {
-  constructor(plugin) {
-    super(plugin.app);
-    this.plugin = plugin;
-    __publicField(this, "teamName", "");
-    __publicField(this, "displayName", "");
-    __publicField(this, "deviceName", "");
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    this.setTitle("Set up server");
-    contentEl.createEl("p", {
-      cls: "setting-item-description",
-      text: `Creates your account and device identity on this device's relay server (starting it first if it isn't running yet - no separate address to enter). Do this once per server - after that, use "Create team" and "Invite" from the Vault Rooms panel.`
-    });
-    new import_obsidian7.Setting(contentEl).setName("Display name").setDesc("This is what teammates will see you as.").addText((text) => {
-      window.setTimeout(() => text.inputEl.focus(), 0);
-      text.setValue(this.displayName).onChange((value) => this.displayName = value.trim());
-    });
-    new import_obsidian7.Setting(contentEl).setName("Device name").setDesc("Identifies this specific device (shown in conflict-copy filenames, and lets a lost/stolen device be revoked separately from your account later).").addText((text) => text.setValue(this.deviceName || navigator.platform || "Obsidian desktop").onChange((value) => this.deviceName = value.trim()));
-    new import_obsidian7.Setting(contentEl).setName("First team name").setDesc("Optional - creates a team you own right away. You can create more teams later.").addText((text) => text.setValue(this.teamName).onChange((value) => this.teamName = value.trim()));
-    new import_obsidian7.Setting(contentEl).addButton(
-      (button) => button.setCta().setButtonText("Set up server").onClick(async () => {
-        if (!this.displayName) {
-          new import_obsidian7.Notice("Display name is required.");
-          return;
-        }
-        try {
-          await this.plugin.setupServer(this.displayName, this.deviceName || "Obsidian desktop", this.teamName || void 0);
-          this.close();
-        } catch (error) {
-          new import_obsidian7.Notice(error instanceof Error ? error.message : "Server setup failed");
-        }
-      })
-    );
-  }
-};
-
-// src/pushCoordinator.ts
-var TERMINAL_ERROR_CODES = /* @__PURE__ */ new Set(["FILE_TOO_LARGE", "INVALID_PATH", "VALIDATION_ERROR"]);
-function isTerminalSyncError(error) {
-  const code = error == null ? void 0 : error.code;
-  return typeof code === "string" && TERMINAL_ERROR_CODES.has(code);
-}
-var RoomPushCoordinator = class {
-  constructor(deps) {
-    this.deps = deps;
-    __publicField(this, "pendingTimers", /* @__PURE__ */ new Map());
-    __publicField(this, "pushChains", /* @__PURE__ */ new Map());
-    __publicField(this, "schedule");
-    __publicField(this, "cancel");
+  getServerStatus() {
     var _a, _b;
-    this.schedule = (_a = deps.schedule) != null ? _a : ((fn, ms) => setTimeout(fn, ms));
-    this.cancel = (_b = deps.cancel) != null ? _b : ((id) => clearTimeout(id));
+    return (_b = (_a = this.embeddedServer) == null ? void 0 : _a.getStatus()) != null ? _b : { running: false };
   }
-  /** Handles one already-classified local vault event for this room. */
-  handleLocalChange(type, relativePath) {
-    if (isConflictCopyPath(relativePath)) {
-      return;
-    }
-    if (type === "delete") {
-      this.handleLocalDelete(relativePath);
-      return;
-    }
-    this.handleLocalEdit(relativePath);
-  }
-  /** Re-enqueues every file currently marked dirty or pending-delete (and not terminally failed)
-   *  through the exact same debounced/serialized push machinery - call this when connectivity is
-   *  restored (e.g. the sync socket reaches "connected") instead of maintaining a second queue. */
-  retryPending() {
-    if (!this.deps.isStillMounted()) {
-      return;
-    }
-    for (const [relativePath, state] of Object.entries(this.deps.room.files)) {
-      if (state.syncError) {
-        continue;
+  async startEmbeddedServer() {
+    const server = this.getOrCreateEmbeddedServer();
+    const previousPinnedPort = this.ctx.settings.server.pinnedPort;
+    const status = await server.start(this.ctx.settings.server);
+    this.ctx.renderOpenRoomsViews();
+    if (status.running) {
+      if (!this.ctx.settings.server.port && status.port !== this.ctx.settings.server.pinnedPort) {
+        this.ctx.settings.server.pinnedPort = status.port;
+        await this.ctx.saveSettings();
       }
-      if (state.localDeleted) {
-        this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalDelete(this.deps.room, relativePath));
-      } else if (state.dirty) {
-        this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalChange(this.deps.room, relativePath, this.deps.deviceName));
-      }
-    }
-  }
-  /** Cancels all pending debounce timers - call on unmount/dispose so nothing fires after teardown. */
-  dispose() {
-    for (const timer of this.pendingTimers.values()) {
-      this.cancel(timer);
-    }
-    this.pendingTimers.clear();
-  }
-  handleLocalEdit(relativePath) {
-    const { room } = this.deps;
-    const existing = room.files[relativePath];
-    room.files[relativePath] = existing ? { ...existing, dirty: true, localDeleted: false, syncError: void 0 } : { serverVersion: 0, serverSha256: null, localSha256: null, dirty: true };
-    this.deps.onPersist();
-    this.debounce(relativePath, () => this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalChange(room, relativePath, this.deps.deviceName)));
-  }
-  handleLocalDelete(relativePath) {
-    const { room } = this.deps;
-    const current = room.files[relativePath];
-    if (!current || current.serverSha256 === null) {
-      const existingTimer = this.pendingTimers.get(relativePath);
-      if (existingTimer !== void 0) {
-        this.cancel(existingTimer);
-        this.pendingTimers.delete(relativePath);
-      }
-      delete room.files[relativePath];
-      this.deps.onPersist();
-      return;
-    }
-    room.files[relativePath] = { ...current, localDeleted: true, syncError: void 0 };
-    this.deps.onPersist();
-    this.debounce(relativePath, () => this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalDelete(room, relativePath)));
-  }
-  debounce(relativePath, run) {
-    const existingTimer = this.pendingTimers.get(relativePath);
-    if (existingTimer !== void 0) {
-      this.cancel(existingTimer);
-    }
-    const timer = this.schedule(() => {
-      this.pendingTimers.delete(relativePath);
-      if (!this.deps.isStillMounted()) {
-        return;
-      }
-      run();
-    }, this.deps.debounceMs);
-    this.pendingTimers.set(relativePath, timer);
-  }
-  /** Chains onto any push already in flight for this path, so overlapping pushes for the same
-   *  path never race each other (see the class doc comment). */
-  enqueue(relativePath, push) {
-    var _a;
-    if (!this.deps.isStillMounted()) {
-      return;
-    }
-    const previous = (_a = this.pushChains.get(relativePath)) != null ? _a : Promise.resolve();
-    const next = previous.catch(() => void 0).then(() => {
-      if (!this.deps.isStillMounted()) {
-        return;
-      }
-      return push();
-    }).then(() => {
-      if (this.deps.isStillMounted()) {
-        this.deps.onPersist();
-      }
-    }).catch((error) => {
-      if (!this.deps.isStillMounted()) {
-        return;
-      }
-      if (isTerminalSyncError(error)) {
-        const state = this.deps.room.files[relativePath];
-        if (state) {
-          this.deps.room.files[relativePath] = { ...state, syncError: error instanceof Error ? error.message : String(error) };
-        }
-        this.deps.onPersist();
-      }
-      this.deps.onError(relativePath, error);
-    });
-    this.pushChains.set(relativePath, next);
-  }
-};
-
-// src/syncWsClient.ts
-var MIN_RECONNECT_DELAY_MS = 1e3;
-var MAX_RECONNECT_DELAY_MS = 3e4;
-var RoomSyncSocket = class {
-  constructor(server, deps) {
-    this.server = server;
-    this.deps = deps;
-    __publicField(this, "socket", null);
-    __publicField(this, "helloAcked", false);
-    __publicField(this, "closedByUser", true);
-    __publicField(this, "reconnectTimer", null);
-    __publicField(this, "reconnectDelayMs", MIN_RECONNECT_DELAY_MS);
-    __publicField(this, "pendingSubscriptions", /* @__PURE__ */ new Set());
-    __publicField(this, "subscribedRooms", /* @__PURE__ */ new Set());
-    __publicField(this, "state", "offline");
-  }
-  getState() {
-    return this.state;
-  }
-  setState(state) {
-    var _a, _b;
-    if (this.state === state) {
-      return;
-    }
-    this.state = state;
-    (_b = (_a = this.deps).onStateChange) == null ? void 0 : _b.call(_a, state);
-  }
-  connect() {
-    this.closedByUser = false;
-    this.setState("connecting");
-    this.open();
-  }
-  disconnect() {
-    var _a;
-    this.closedByUser = true;
-    if (this.reconnectTimer !== null) {
-      window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    (_a = this.socket) == null ? void 0 : _a.close();
-    this.socket = null;
-    this.helloAcked = false;
-    this.setState("offline");
-  }
-  subscribe(roomId) {
-    if (this.subscribedRooms.has(roomId)) {
-      return;
-    }
-    if (this.helloAcked) {
-      this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
-    } else {
-      this.pendingSubscriptions.add(roomId);
-    }
-  }
-  open() {
-    let socket;
-    try {
-      socket = new WebSocket(toWsUrl(this.server.baseUrl));
-    } catch (e) {
-      this.scheduleReconnect();
-      return;
-    }
-    this.socket = socket;
-    socket.addEventListener("open", () => {
-      this.send({
-        type: "hello",
-        requestId: createRequestId(),
-        token: this.server.deviceToken,
-        client: { kind: "obsidian-plugin", version: "0.1.0", deviceName: this.server.deviceName }
-      });
-    });
-    socket.addEventListener("message", (event) => {
-      void this.handleMessage(String(event.data));
-    });
-    socket.addEventListener("close", () => {
-      this.helloAcked = false;
-      for (const roomId of this.subscribedRooms) {
-        this.pendingSubscriptions.add(roomId);
-      }
-      this.subscribedRooms.clear();
-      if (!this.closedByUser) {
-        this.setState("connecting");
-        this.scheduleReconnect();
-      } else {
-        this.setState("offline");
-      }
-    });
-    socket.addEventListener("error", () => {
-    });
-  }
-  scheduleReconnect() {
-    if (this.closedByUser || this.reconnectTimer !== null) {
-      return;
-    }
-    this.reconnectTimer = window.setTimeout(() => {
-      this.reconnectTimer = null;
-      this.open();
-    }, this.reconnectDelayMs);
-    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
-  }
-  send(message) {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(message));
-    }
-  }
-  async handleMessage(raw) {
-    let message;
-    try {
-      message = JSON.parse(raw);
-    } catch (e) {
-      return;
-    }
-    switch (message.type) {
-      case "hello_ok": {
-        this.helloAcked = true;
-        this.reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
-        this.setState("connected");
-        for (const roomId of this.pendingSubscriptions) {
-          this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
-        }
-        this.pendingSubscriptions.clear();
-        return;
-      }
-      case "hello_error":
-      case "revoked": {
-        this.setState("offline");
-        this.deps.onRevoked();
-        this.disconnect();
-        return;
-      }
-      case "room_snapshot": {
-        this.subscribedRooms.add(message.roomId);
-        await this.reconcileSnapshot(message.roomId, message.files);
-        return;
-      }
-      case "remote_file_change": {
-        const room = this.deps.getMountedRoom(message.roomId);
-        if (!room) {
-          return;
-        }
-        await this.deps.syncEngine.applyRemoteChange(
-          room,
-          { relativePath: message.relativePath, version: message.version, sha256: message.sha256, content: message.content },
-          message.updatedBy.displayName
+      if (status.portPinChanged) {
+        const reason = status.portPinFallbackReason === "zombie" ? "The old port still looks like a previous Vault Rooms server instance." : status.portPinFallbackReason === "occupied" ? "The old port is occupied by another app." : "The old port is occupied.";
+        new import_obsidian10.Notice(
+          `Vault Rooms server moved from port ${previousPinnedPort} to ${status.port}. ${reason} Invite links and saved logins that reference the old port may need regenerating.`,
+          0
         );
-        this.deps.onApplied();
-        return;
       }
-      case "remote_file_delete": {
-        const room = this.deps.getMountedRoom(message.roomId);
-        if (!room) {
-          return;
-        }
-        await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: message.relativePath, version: message.version }, message.deletedBy.displayName);
-        this.deps.onApplied();
-        return;
+      new import_obsidian10.Notice(`Vault Rooms server running at ${status.localUrl}`);
+    }
+    return status;
+  }
+  async stopEmbeddedServer() {
+    var _a;
+    await ((_a = this.embeddedServer) == null ? void 0 : _a.stop());
+    this.ctx.renderOpenRoomsViews();
+    new import_obsidian10.Notice("Vault Rooms server stopped.");
+  }
+  /** Best-effort teardown for plugin unload - unlike stopEmbeddedServer(), does not render views or show a Notice (see VaultRoomsPlugin.onunload's doc comment). */
+  async stopSilently() {
+    var _a;
+    await ((_a = this.embeddedServer) == null ? void 0 : _a.stop());
+  }
+  getOrCreateEmbeddedServer() {
+    var _a;
+    if (!this.embeddedServer) {
+      const adapter = this.ctx.app.vault.adapter;
+      if (!(adapter instanceof import_obsidian10.FileSystemAdapter)) {
+        throw new Error("Vault Rooms requires the desktop app (filesystem access).");
       }
-      case "room_deleted": {
-        this.subscribedRooms.delete(message.roomId);
-        this.deps.onRoomDeleted(message.roomId);
-        return;
-      }
-      case "room_access_revoked": {
-        this.subscribedRooms.delete(message.roomId);
-        this.deps.onAccessRevoked(message.roomId);
-        return;
-      }
-      default:
-        return;
+      const pluginDir = (0, import_node_path3.join)(adapter.getBasePath(), (_a = this.ctx.manifest.dir) != null ? _a : `.obsidian/plugins/${this.ctx.manifest.id}`);
+      const dataDir = (0, import_node_path3.join)(pluginDir, "server-data");
+      this.embeddedServer = new EmbeddedRelayServer(dataDir);
     }
+    return this.embeddedServer;
   }
-  async reconcileSnapshot(roomId, files) {
-    const room = this.deps.getMountedRoom(roomId);
-    if (!room) {
-      return;
-    }
-    const api = this.deps.getApi();
-    let changed = false;
-    for (const file of files) {
-      const local = room.files[file.relativePath];
-      if ((local == null ? void 0 : local.dirty) || (local == null ? void 0 : local.localDeleted)) {
-        continue;
-      }
-      if (file.deleted) {
-        if (local && local.serverSha256 !== null) {
-          await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync");
-          changed = true;
-        }
-        continue;
-      }
-      if (!local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {
-        const content = await api.readFile(roomId, file.relativePath);
-        await this.deps.syncEngine.applyRemoteChange(room, content, "sync");
-        changed = true;
-      }
-    }
-    if (changed) {
-      this.deps.onApplied();
-    }
+  getActiveServer() {
+    return activeServer(this.ctx.settings);
   }
-};
-function toWsUrl(baseUrl) {
-  return `${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}/sync`;
-}
-function createRequestId() {
-  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-}
-
-// src/vaultAdapter.ts
-var import_obsidian8 = require("obsidian");
-var ObsidianVaultAdapter = class {
-  constructor(plugin) {
-    this.plugin = plugin;
-  }
-  get app() {
-    return this.plugin.app;
-  }
-  async read(path) {
-    const file = this.getFile((0, import_obsidian8.normalizePath)(path));
-    return this.app.vault.read(file);
-  }
-  async write(path, content) {
-    const normalized = (0, import_obsidian8.normalizePath)(path);
-    const existing = this.app.vault.getAbstractFileByPath(normalized);
-    if (existing && isFile(existing)) {
-      await this.app.vault.process(existing, () => content);
-      return;
-    }
-    await this.ensureFolder(normalized);
-    await this.app.vault.create(normalized, content);
-  }
-  async readBinary(path) {
-    return this.app.vault.readBinary(this.getFile((0, import_obsidian8.normalizePath)(path)));
-  }
-  async writeBinary(path, data) {
-    const normalized = (0, import_obsidian8.normalizePath)(path);
-    const existing = this.app.vault.getAbstractFileByPath(normalized);
-    if (existing && isFile(existing)) {
-      await this.app.vault.modifyBinary(existing, data);
-      return;
-    }
-    await this.ensureFolder(normalized);
-    await this.app.vault.createBinary(normalized, data);
-  }
-  async delete(path) {
-    const existing = this.app.vault.getAbstractFileByPath((0, import_obsidian8.normalizePath)(path));
-    if (existing) {
-      await this.app.vault.trash(existing, true);
-    }
-  }
-  async exists(path) {
-    return this.app.vault.getAbstractFileByPath((0, import_obsidian8.normalizePath)(path)) !== null;
-  }
-  async list(prefix) {
-    const normalizedPrefix = (0, import_obsidian8.normalizePath)(prefix).replace(/\/+$/, "");
-    return this.app.vault.getFiles().map((file) => file.path).filter((path) => path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`));
-  }
-  onChange(cb) {
-    const vault = this.app.vault;
-    const refs = [
-      vault.on("create", (file) => cb({ type: "create", path: file.path })),
-      vault.on("modify", (file) => cb({ type: "modify", path: file.path })),
-      vault.on("delete", (file) => cb({ type: "delete", path: file.path })),
-      // Obsidian fires exactly one "rename" event per moved/renamed file (folder renames are
-      // reported as one "rename" per file inside the folder, each with its own old/new path) -
-      // confirmed against Obsidian's own core "file explorer" rename handling, not directly
-      // tested here since it requires the real Obsidian runtime; see classifyRenameEvent for how
-      // this is turned into delete-old/create-new relative to a mounted room.
-      vault.on("rename", (file, oldPath) => cb({ type: "rename", path: file.path, oldPath }))
-    ];
-    for (const ref of refs) {
-      this.plugin.registerEvent(ref);
-    }
-    return () => {
-      for (const ref of refs) {
-        vault.offref(ref);
-      }
-    };
-  }
-  getFile(path) {
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!file || !isFile(file)) {
-      throw new Error(`File not found: ${path}`);
-    }
-    return file;
-  }
-  async ensureFolder(path) {
-    const slash = path.lastIndexOf("/");
-    if (slash <= 0) {
-      return;
-    }
-    const folder = path.slice(0, slash);
-    if (!this.app.vault.getAbstractFileByPath(folder)) {
-      await this.app.vault.createFolder(folder);
-    }
-  }
-};
-function isFile(file) {
-  return "extension" in file;
-}
-
-// src/views/VaultRoomsView.ts
-var import_obsidian9 = require("obsidian");
-var VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
-var VaultRoomsView = class extends import_obsidian9.ItemView {
-  constructor(leaf, plugin) {
-    super(leaf);
-    this.plugin = plugin;
-    /** Which collapsible sections are currently collapsed, by key. Not persisted to disk - it's a
-     *  transient display preference, not data, so it resets (all expanded) when the view is closed
-     *  and reopened or Obsidian restarts; that's an acceptable, simple default. */
-    __publicField(this, "collapsedSections", /* @__PURE__ */ new Set());
-  }
-  getViewType() {
-    return VAULT_ROOMS_VIEW_TYPE;
-  }
-  getDisplayText() {
-    return "Vault Rooms";
-  }
-  getIcon() {
-    return "box";
-  }
-  async onOpen() {
-    if (this.plugin.getActiveServer()) {
-      await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
-        new import_obsidian9.Notice(error instanceof Error ? error.message : "Failed to load rooms");
-      });
-    }
-    this.render();
-  }
-  render() {
-    const container = this.containerEl.children[1];
-    container.empty();
-    container.addClass("vault-rooms-view");
-    const header = container.createDiv({ cls: "vault-rooms-header" });
-    new import_obsidian9.Setting(header).setName("Vault Rooms").setHeading();
-    this.renderHostingSection(container);
-    this.renderActiveConnectionSection(container);
-    this.renderOtherServersSection(container);
-    const server = this.plugin.getActiveServer();
-    if (!server) {
-      container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a server above to load teams and rooms." });
-      return;
-    }
-    this.renderFriendsSection(container);
-    this.renderTeamsSection(container);
-    this.renderRoomsSection(container);
-  }
-  /** A collapsible block: a clickable header (title + optional count badge + chevron) that toggles
-   *  whether renderBody() runs. Collapse state is keyed and remembered across re-renders (but not
-   *  across closing/reopening the view - see the collapsedSections field doc comment). Use this for
-   *  anything that can grow long (lists of friends/teams/rooms/servers); leave short, always-useful
-   *  controls (hosting toggle, current connection status) as plain, non-collapsible sections so
-   *  they're never accidentally hidden. */
-  renderCollapsibleSection(parent, key, title, count, renderBody) {
-    const section = parent.createDiv({ cls: "vault-rooms-section" });
-    const collapsed = this.collapsedSections.has(key);
-    const headerEl = section.createDiv({ cls: "vault-rooms-section-header" });
-    headerEl.createDiv({ cls: "vault-rooms-section-title", text: title });
-    if (count !== void 0) {
-      headerEl.createSpan({ cls: "vault-rooms-section-count", text: String(count) });
-    }
-    headerEl.createSpan({ cls: "vault-rooms-section-chevron", text: collapsed ? "\u25B8" : "\u25BE" });
-    headerEl.onClickEvent(() => {
-      if (collapsed) {
-        this.collapsedSections.delete(key);
-      } else {
-        this.collapsedSections.add(key);
-      }
-      this.render();
-    });
-    if (!collapsed) {
-      renderBody(section.createDiv({ cls: "vault-rooms-section-body" }));
-    }
-  }
-  /** Whether this device hosts a relay server at all - orthogonal to which server this device is
-   *  currently *using* as a client (see renderActiveConnectionSection): a host is also a client of
-   *  its own server, and a joining member never sees this section do anything but sit stopped. */
-  renderHostingSection(parent) {
-    const section = parent.createDiv({ cls: "vault-rooms-section" });
-    new import_obsidian9.Setting(section).setName("This device's server").setHeading();
-    const status = this.plugin.getServerStatus();
-    const card = section.createDiv({ cls: "vault-rooms-server-card" });
-    const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
-    badgeRow.createSpan({ cls: status.running ? "vault-rooms-badge is-running" : "vault-rooms-badge is-stopped", text: status.running ? "Running" : "Stopped" });
-    if (status.running) {
-      if (status.lanUrl) {
-        const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
-        lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
-        this.addPanelButton(lanRow, "Copy LAN URL", async () => {
-          var _a;
-          await navigator.clipboard.writeText((_a = status.lanUrl) != null ? _a : "");
-          new import_obsidian9.Notice("LAN URL copied.");
-        });
-      } else {
-        card.createEl("div", {
-          cls: "vault-rooms-error",
-          text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings \u2192 Vault Rooms \u2192 Relay server, then restart the server."
-        });
-      }
-    } else if (!status.running && status.error) {
-      card.createEl("div", { cls: "vault-rooms-error", text: status.error });
-    } else {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Only start this if you want to host a room for others - joining someone else's server doesn't need it." });
-    }
-    const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    if (status.running) {
-      this.addPanelButton(actions, "Stop server", () => this.plugin.stopEmbeddedServer());
-    } else {
-      this.addPanelButton(actions, "Start server", async () => {
-        await this.plugin.startEmbeddedServer();
-      });
-    }
-  }
-  /** The one server this device is currently using as a client (whether that's its own hosted
-   *  server or someone else's) - always visible, never collapsed, since "am I actually synced right
-   *  now" is exactly the kind of thing you glance at, not something to hide behind a click. Only
-   *  this server's mounted rooms are live: see "Other servers" below for what that means. */
-  renderActiveConnectionSection(parent) {
-    const section = parent.createDiv({ cls: "vault-rooms-section" });
-    new import_obsidian9.Setting(section).setName("Active connection").setHeading();
-    const server = this.plugin.getActiveServer();
-    const hasOwnServer = this.plugin.hasOwnServer();
-    if (!server) {
-      section.createDiv({
-        cls: "vault-rooms-empty",
-        text: this.plugin.settings.servers.length > 0 ? 'No server selected - pick one under "Other servers" below, or join/set up a new one.' : "Not connected to any server yet."
-      });
-      const actions2 = section.createDiv({ cls: "vault-rooms-actions" });
-      if (!hasOwnServer) {
-        this.addPanelButton(actions2, "Set up server", () => this.plugin.openSetupServerModal(), true);
-      }
-      this.addPanelButton(actions2, "Join server", () => this.plugin.openJoinTeamModal(), hasOwnServer);
-      return;
-    }
-    const card = section.createDiv({ cls: "vault-rooms-server-card" });
-    card.createEl("div", { text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
-    const syncState = this.plugin.getSyncState();
-    const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
-    const label = syncState === "connected" ? "Live sync: connected" : syncState === "connecting" ? "Live sync: reconnecting\u2026" : "Live sync: offline";
-    const cls = syncState === "connected" ? "is-running" : syncState === "connecting" ? "is-connecting" : "is-stopped";
-    badgeRow.createSpan({ cls: `vault-rooms-badge ${cls}`, text: label });
-    if (!hasOwnServer) {
-      return;
-    }
-    const actions = section.createDiv({ cls: "vault-rooms-actions" });
-    this.addPanelButton(actions, "Join another server", () => this.plugin.openJoinTeamModal());
+  /** Same-process read, no network round-trip - see EmbeddedRelayServer.getBootstrapPin(). */
+  getBootstrapPin() {
+    return this.getOrCreateEmbeddedServer().getBootstrapPin();
   }
   /**
-   * Every *other* saved server (logins this device remembers but isn't currently using) - a plain
-   * list, not an action menu. "Set up/Join another server" already lives in Active connection
-   * above regardless of whether anything is saved here yet, so this section only ever needs to
-   * render when there's something to actually list.
-   *
-   * Only one server is ever live at a time: switching (or setting up/joining another) makes that
-   * one active instead. Rooms mounted under a server that isn't active are simply paused - their
-   * local files stay put and nothing is lost, but neither pushes nor live updates happen until you
-   * switch back to that server (see the note under Rooms below). There's no background multi-server
-   * sync in v0.1; this is a deliberate simplification, not a bug you're missing a setting for.
+   * Whether this device has already bootstrapped its own hosted server. Bootstrap is a one-time
+   * action per device install (the embedded server is a singleton - one process, one database, one
+   * owner identity - so there is no such thing as "another" server to set up on top of it), and the
+   * created owner identity is permanent: the underlying database keeps its owner forever, even
+   * across Stop/Start, so re-running setup against it always fails ("Bootstrap has already been
+   * completed"). The panel uses this to stop offering "Set up server" once it would only ever fail.
    */
-  renderOtherServersSection(parent) {
-    const active = this.plugin.getActiveServer();
-    const others = this.plugin.settings.servers.filter((server) => server.id !== (active == null ? void 0 : active.id));
-    if (others.length === 0) {
+  hasOwnServer() {
+    return this.ctx.settings.servers.some((server) => server.isServerOwner);
+  }
+  async testConnection(baseUrl) {
+    await new RelayApiClient(baseUrl).testConnection();
+    new import_obsidian10.Notice(`Connected to Vault Rooms`);
+  }
+  apiFor(server) {
+    return new RelayApiClient(server.baseUrl, server.deviceToken, () => this.markServerRevoked(server));
+  }
+  /**
+   * A 401 from a server means the saved device token no longer resolves to anything there - most
+   * commonly because that server's data was reset/recreated since the token was issued (fresh
+   * install, wiped data dir, or switching between embedded/standalone with different data files).
+   * Reflect that in the UI (Settings → Vault Rooms → Servers already shows `status`) instead of
+   * leaving it as a one-off error toast with no lasting trace, so it's clear this server needs to
+   * be removed and set up/joined again rather than retried.
+   */
+  markServerRevoked(server) {
+    if (server.status === "revoked") {
       return;
     }
-    this.renderCollapsibleSection(parent, "other-servers", "Other servers", others.length, (body) => {
-      body.createEl("p", {
-        cls: "vault-rooms-setting-hint",
-        text: "Only the active connection above syncs live. Switching here pauses sync for rooms mounted under the server you're leaving, and resumes it for rooms under this one."
-      });
-      const list = body.createDiv({ cls: "vault-rooms-team-list" });
-      for (const server of others) {
-        const item = list.createDiv({ cls: "vault-rooms-team" });
-        const title = item.createDiv({ cls: "vault-rooms-team-title" });
-        title.createEl("strong", { text: server.baseUrl });
-        title.createEl("span", { text: server.status });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
-        const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-        this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
-        this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl));
-      }
-    });
+    server.status = "revoked";
+    void this.ctx.saveSettings();
+    this.ctx.renderOpenRoomsViews();
+    new import_obsidian10.Notice(`"${server.baseUrl}" - saved login is no longer valid on this server. Remove it and set up/join again from Settings \u2192 Vault Rooms \u2192 Servers.`);
   }
-  renderFriendsSection(parent) {
-    const server = this.plugin.getActiveServer();
-    const others = this.plugin.friends.filter((friend) => friend.id !== (server == null ? void 0 : server.userId));
-    this.renderCollapsibleSection(parent, "friends", "Friends", others.length, (body) => {
-      const list = body.createDiv({ cls: "vault-rooms-friend-list" });
-      if (others.length === 0) {
-        list.createDiv({ cls: "vault-rooms-empty", text: "No friends yet - share an invite link to add one." });
-        return;
-      }
-      for (const friend of others) {
-        const item = list.createDiv({ cls: friend.revokedAt ? "vault-rooms-friend is-revoked" : "vault-rooms-friend" });
-        item.createEl("strong", { text: friend.displayName });
-        item.createSpan({ text: friend.revokedAt ? " / revoked" : "" });
-        if (server == null ? void 0 : server.isServerOwner) {
-          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-          const revoke = this.addPanelButton(rowActions, "Revoke", () => this.plugin.revokeFriend(friend.id));
-          revoke.disabled = Boolean(friend.revokedAt);
-        }
-      }
-    });
+  requireActiveServer() {
+    const server = this.getActiveServer();
+    if (!server) {
+      throw new Error("No active Vault Rooms server.");
+    }
+    return server;
   }
-  renderTeamsSection(parent) {
-    const server = this.plugin.getActiveServer();
-    this.renderCollapsibleSection(parent, "teams", "Teams", this.plugin.teams.length, (body) => {
-      if (server == null ? void 0 : server.isServerOwner) {
-        const actions = body.createDiv({ cls: "vault-rooms-actions" });
-        let newTeamName = "";
-        const nameInput = actions.createEl("input", { type: "text", attr: { placeholder: "New team name" } });
-        nameInput.oninput = () => newTeamName = nameInput.value.trim();
-        this.addPanelButton(actions, "Create team", async () => {
-          if (!newTeamName) {
-            new import_obsidian9.Notice("Team name is required.");
-            return;
-          }
-          await this.plugin.createTeam(newTeamName);
-          this.render();
-        });
-      }
-      if (this.plugin.teams.length === 0) {
-        body.createDiv({ cls: "vault-rooms-empty", text: "No teams yet." });
-        return;
-      }
-      const list = body.createDiv({ cls: "vault-rooms-team-card-list" });
-      for (const team of this.plugin.teams) {
-        this.renderTeamCard(list, team);
-      }
-    });
-  }
-  renderTeamCard(parent, team) {
-    const canManage = this.plugin.canManageTeam(team);
-    const canDelete = this.plugin.canDeleteTeam(team);
-    const members = this.plugin.teamMembersByTeam[team.id];
-    const card = parent.createDiv({ cls: "vault-rooms-team-card" });
-    const title = card.createDiv({ cls: "vault-rooms-team-title" });
-    title.createEl("strong", { text: team.name });
-    const role = this.plugin.myTeamRoles[team.id];
-    if (role) {
-      title.createEl("span", { text: role });
-    }
-    const memberList = card.createDiv({ cls: "vault-rooms-team-member-list" });
-    if (!members) {
-      memberList.createDiv({ cls: "vault-rooms-empty", text: "You are not a member of this team." });
-    } else if (members.length === 0) {
-      memberList.createDiv({ cls: "vault-rooms-empty", text: "No members." });
-    } else {
-      for (const member of members) {
-        const item = memberList.createDiv({ cls: member.revokedAt ? "vault-rooms-team-member is-revoked" : "vault-rooms-team-member" });
-        item.createEl("strong", { text: member.displayName });
-        item.createSpan({ text: ` ${member.role}${member.revokedAt ? " / revoked" : ""}` });
-        if (canManage) {
-          const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-          const remove = this.addPanelButton(rowActions, "Remove", () => this.plugin.removeTeamMember(team.id, member.userId));
-          remove.disabled = Boolean(member.revokedAt);
-        }
-      }
-    }
-    const cardActions = card.createDiv({ cls: "vault-rooms-room-actions" });
-    if (canManage) {
-      const candidateFriends = this.plugin.friends.filter((friend) => !friend.revokedAt && !(members == null ? void 0 : members.some((member) => member.userId === friend.id)));
-      if (candidateFriends.length > 0) {
-        const addFriendRow = card.createDiv({ cls: "vault-rooms-add-friend-row" });
-        const select = addFriendRow.createEl("select");
-        for (const friend of candidateFriends) {
-          select.createEl("option", { text: friend.displayName, value: friend.id });
-        }
-        this.addPanelButton(addFriendRow, "Add friend", async () => {
-          if (!select.value) {
-            return;
-          }
-          await this.plugin.addFriendToTeam(team.id, select.value);
-          this.render();
-        });
-      }
-      this.addPanelButton(cardActions, "Invite link", () => this.plugin.createInvite(team.id));
-    }
-    if (canDelete) {
-      const deleteButton = this.addPanelButton(cardActions, "Delete team", () => this.deleteTeamWithConfirm(team));
-      deleteButton.addClass("mod-warning");
-    }
-  }
-  async deleteTeamWithConfirm(team) {
-    if (!window.confirm(`Delete team "${team.name}"? This removes its members, invites, and room access grants for everyone. Rooms are not deleted. This cannot be undone.`)) {
-      return;
-    }
-    await this.plugin.deleteTeam(team.id);
-    this.render();
-  }
-  renderRoomsSection(parent) {
-    this.renderCollapsibleSection(parent, "rooms", "Rooms", this.plugin.visibleRooms.length, (body) => {
-      var _a, _b;
-      const actions = body.createDiv({ cls: "vault-rooms-actions" });
-      this.addPanelButton(actions, "Create room", () => this.plugin.openCreateRoomModal());
-      this.addPanelButton(actions, "Refresh", async () => {
-        await Promise.all([this.plugin.refreshRooms(), this.plugin.refreshTeams()]);
-      });
-      if (this.plugin.visibleRooms.length === 0) {
-        body.createDiv({ cls: "vault-rooms-empty", text: "No rooms loaded." });
-        return;
-      }
-      const activeServerId = (_a = this.plugin.getActiveServer()) == null ? void 0 : _a.id;
-      for (const room of this.plugin.visibleRooms) {
-        const item = body.createDiv({ cls: "vault-rooms-room" });
-        const title = item.createDiv({ cls: "vault-rooms-room-title" });
-        title.createEl("strong", { text: room.name });
-        title.createEl("span", { text: room.type });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Folder: ${room.mountName}` });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Source: ${room.sourcePath}` });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Permissions: ${room.permissions.join(", ") || "none"}` });
-        item.createEl("div", {
-          cls: "vault-rooms-room-meta",
-          text: `Capabilities: ${room.capabilities.map((cap) => `${cap.displayName}: ${cap.installed ? "installed" : "missing"}`).join(", ") || "none"}`
-        });
-        const mounted = this.plugin.isRoomMounted(room.id);
-        item.createEl("div", {
-          cls: mounted ? "vault-rooms-mounted" : "vault-rooms-unmounted",
-          text: mounted ? `Mounted: ${(_b = this.plugin.mountedPathFor(room.id)) != null ? _b : room.mountName}` : "Not mounted"
-        });
-        if (mounted && this.plugin.mountedRoomServerId(room.id) !== void 0 && this.plugin.mountedRoomServerId(room.id) !== activeServerId) {
-          item.createEl("div", {
-            cls: "vault-rooms-error",
-            text: "Not syncing right now - this room was mounted under a different server. Switch to that server (Other servers, above) to resume."
-          });
-        }
-        const roomActions = item.createDiv({ cls: "vault-rooms-room-actions" });
-        this.addPanelButton(roomActions, "Settings", () => this.plugin.openRoomSettingsModal(room));
-        this.addPanelButton(
-          roomActions,
-          mounted ? "Unmount" : "Mount",
-          async () => {
-            if (mounted) {
-              await this.plugin.unmountRoom(room.id);
-            } else {
-              await this.plugin.mountRoom(room);
-            }
-            this.render();
-          },
-          !mounted
-        );
-        if (mounted) {
-          this.renderRoomConflicts(item, room.id);
-        }
-      }
-    });
-  }
-  renderRoomConflicts(parent, roomId) {
-    const conflicts = this.plugin.listRoomConflicts(roomId);
-    if (conflicts.length === 0) {
-      return;
-    }
-    const section = parent.createDiv({ cls: "vault-rooms-conflict-list" });
-    section.createEl("div", {
-      cls: "vault-rooms-error",
-      text: `${conflicts.length} unresolved conflict${conflicts.length > 1 ? "s" : ""} - a teammate's edit and yours landed at the same time:`
-    });
-    for (const conflict of conflicts) {
-      const row = section.createDiv({ cls: "vault-rooms-conflict-row" });
-      row.createEl("div", { cls: "vault-rooms-room-meta", text: conflict.relativePath });
-      const rowActions = row.createDiv({ cls: "vault-rooms-room-actions" });
-      this.addPanelButton(rowActions, "Keep mine", async () => {
-        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "mine");
-        this.render();
-      });
-      this.addPanelButton(rowActions, "Keep synced version", async () => {
-        await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "theirs");
-        this.render();
-      });
-    }
-  }
-  addPanelButton(parent, label, action, cta = false) {
-    const button = parent.createEl("button", { text: label });
-    if (cta) {
-      button.addClass("mod-cta");
-    }
-    button.onClickEvent(async () => {
-      button.disabled = true;
-      try {
-        await action();
-      } catch (error) {
-        new import_obsidian9.Notice(error instanceof Error ? error.message : "Vault Rooms action failed");
-      } finally {
-        button.disabled = false;
-      }
-    });
-    return button;
+  upsertServer(baseUrl, response) {
+    const config = {
+      id: response.device.id,
+      baseUrl,
+      userId: response.user.id,
+      userDisplayName: response.user.displayName,
+      deviceId: response.device.id,
+      deviceName: response.device.displayName,
+      deviceToken: response.deviceToken,
+      isServerOwner: response.isServerOwner,
+      status: "active"
+    };
+    this.ctx.settings.servers = [...this.ctx.settings.servers.filter((server) => server.id !== config.id), config];
+    this.ctx.settings.activeServerId = config.id;
   }
 };
 
-// src/pluginCapabilities.ts
-function withInstalledCapabilities(app, room) {
-  const plugins = app.plugins;
-  return {
-    ...room,
-    capabilities: room.capabilities.map((capability) => {
-      var _a, _b;
-      return {
-        ...capability,
-        installed: (_b = (_a = plugins == null ? void 0 : plugins.enabledPlugins) == null ? void 0 : _a.has(capability.pluginId)) != null ? _b : false
-      };
-    })
-  };
-}
+// src/controllers/RoomMountController.ts
+var import_obsidian11 = require("obsidian");
+var RoomMountController = class {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  async mountFirstVisibleRoom() {
+    const rooms = this.deps.visibleRooms;
+    const room = rooms[0];
+    if (!room) {
+      new import_obsidian11.Notice("No visible rooms to mount.");
+      return;
+    }
+    await this.mountRoom(room);
+  }
+  /**
+   * (Re)mounts a room locally. The relay server's file listing is always treated as the
+   * authoritative source of truth (the owner/host is where files actually live) - this matters
+   * most when a member is removed from a room and later re-added: any files that were deleted on
+   * the server in the meantime carry a tombstone (`deleted: true`) in the listing and must be
+   * removed locally rather than left behind as stale copies. Files whose server version already
+   * matches what we last synced are left untouched so we don't clobber unpushed local edits;
+   * everything else is routed through VaultSyncEngine so dirty local edits get a conflict copy
+   * instead of being silently overwritten.
+   */
+  async mountRoom(room) {
+    var _a;
+    if (room.type === "file") {
+      new import_obsidian11.Notice(`"${room.name}" is a single-file room, which is no longer supported - recreate it as a folder room.`);
+      return;
+    }
+    const server = this.deps.requireActiveServer();
+    const settings = this.deps.settings;
+    const mountPath = this.roomMountPathFor(room);
+    const state = settings.mountedRooms[room.id] = (_a = settings.mountedRooms[room.id]) != null ? _a : {
+      roomId: room.id,
+      serverId: server.id,
+      mountPath,
+      files: {}
+    };
+    state.mountPath = mountPath;
+    state.serverId = server.id;
+    state.unmounted = false;
+    const syncEngine = this.deps.getSyncEngine();
+    await syncEngine.reconcileLocalEdits(state);
+    const api = this.deps.apiFor(server);
+    const files = await api.listFiles(room.id);
+    const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
+    for (const file of files.files) {
+      const tracked = state.files[file.relativePath];
+      if (file.deleted) {
+        if (tracked) {
+          await syncEngine.applyRemoteDelete(state, { relativePath: file.relativePath, version: file.version }, server.deviceName);
+        }
+        continue;
+      }
+      if (tracked && !tracked.dirty && tracked.serverVersion === file.version) {
+        continue;
+      }
+      const content = await api.readFile(room.id, file.relativePath);
+      await syncEngine.applyRemoteChange(state, content, server.deviceName);
+    }
+    const localPaths = await this.deps.vaultAdapter.list(mountPath);
+    for (const localPath of localPaths) {
+      const relativePath = localPath.slice(mountPath.length + 1);
+      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
+        continue;
+      }
+      try {
+        await syncEngine.pushLocalChange(state, relativePath, server.deviceName);
+      } catch (error) {
+        console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
+      }
+    }
+    this.deps.watchMountedRoom(room.id);
+    this.deps.subscribeRoom(room.id);
+    await this.deps.saveSettings();
+    this.deps.renderOpenRoomsViews();
+    new import_obsidian11.Notice(`Mounted ${room.name}`);
+  }
+  /**
+   * Non-destructively unmounts a room: stops the local watcher and live-sync subscription for it,
+   * but leaves local files and tracking (settings.mountedRooms[roomId]) in place - see
+   * MountedRoomState.unmounted. This matters most for re-mounting later: without kept tracking,
+   * mountRoom() would see no tracked state for any file and download the server's copy over
+   * whatever is on disk, with no conflict copy, silently discarding any local edits made in the
+   * meantime. Use forgetRoom() for the old fully-destructive "drop everything" behavior.
+   */
+  async unmountRoom(roomId) {
+    var _a;
+    const room = this.deps.visibleRooms.find((candidate) => candidate.id === roomId);
+    const roomState = this.deps.settings.mountedRooms[roomId];
+    this.deps.stopWatchingRoom(roomId);
+    if (roomState) {
+      roomState.unmounted = true;
+    }
+    await this.deps.saveSettings();
+    this.deps.renderOpenRoomsViews();
+    new import_obsidian11.Notice(`Unmounted ${(_a = room == null ? void 0 : room.name) != null ? _a : "room"}`);
+  }
+  /** Destructively forgets a room's local tracking (the old unmountRoom() behavior) - local files
+   *  on disk are left alone (same as unmountRoom), but this device's sync tracking for the room is
+   *  dropped entirely, so a later mount starts over as if the room were never mounted here. */
+  async forgetRoom(roomId) {
+    var _a;
+    const room = this.deps.visibleRooms.find((candidate) => candidate.id === roomId);
+    this.dropRoomTracking(roomId);
+    await this.deps.saveSettings();
+    this.deps.renderOpenRoomsViews();
+    new import_obsidian11.Notice(`Forgot ${(_a = room == null ? void 0 : room.name) != null ? _a : "room"} on this device`);
+  }
+  dropRoomTracking(roomId) {
+    this.deps.stopWatchingRoom(roomId);
+    delete this.deps.settings.mountedRooms[roomId];
+    delete this.deps.settings.roomMountPaths[roomId];
+  }
+  isRoomMounted(roomId) {
+    const state = this.deps.settings.mountedRooms[roomId];
+    return Boolean(state) && !(state == null ? void 0 : state.unmounted);
+  }
+  mountedPathFor(roomId) {
+    var _a;
+    return (_a = this.deps.settings.mountedRooms[roomId]) == null ? void 0 : _a.mountPath;
+  }
+  /** Which server (settings.servers[].id) a mounted room belongs to - see the serverId note on
+   *  MountedRoomState. Used by the panel to tell whether a mounted room is under the currently
+   *  active server (syncing) or a different, currently-inactive one (paused). */
+  mountedRoomServerId(roomId) {
+    var _a;
+    return (_a = this.deps.settings.mountedRooms[roomId]) == null ? void 0 : _a.serverId;
+  }
+  /**
+   * Conflict copies are local-only files (see isConflictCopyPath - they're never pushed or
+   * synced), so finding them is a plain local file-listing scan, not a server call. Used to
+   * render a "Resolve" list per mounted room instead of leaving people to sort them out by hand
+   * in the file explorer.
+   */
+  listRoomConflicts(roomId) {
+    const mountPath = this.mountedPathFor(roomId);
+    if (!mountPath) {
+      return [];
+    }
+    const prefix = mountPath.replace(/\/+$/, "");
+    const conflicts = [];
+    for (const file of this.deps.app.vault.getFiles()) {
+      const path = file.path;
+      if (path !== prefix && !path.startsWith(`${prefix}/`)) {
+        continue;
+      }
+      if (!isConflictCopyPath(path)) {
+        continue;
+      }
+      const canonical = canonicalPathForConflictCopy(path);
+      if (!canonical) {
+        continue;
+      }
+      conflicts.push({
+        relativePath: canonical.slice(prefix.length + 1),
+        conflictRelativePath: path.slice(prefix.length + 1)
+      });
+    }
+    return conflicts;
+  }
+  async resolveRoomConflict(roomId, relativePath, conflictRelativePath, keep) {
+    const server = this.deps.requireActiveServer();
+    const roomState = this.deps.settings.mountedRooms[roomId];
+    if (!roomState) {
+      throw new Error("Room is not mounted.");
+    }
+    await this.deps.getSyncEngine().resolveConflict(roomState, relativePath, conflictRelativePath, keep, server.deviceName);
+    await this.deps.saveSettings();
+    this.deps.renderOpenRoomsViews();
+    new import_obsidian11.Notice(keep === "mine" ? "Kept your version and re-synced it." : "Kept the synced version and removed your local copy.");
+  }
+  /**
+   * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
+   * folder) - there's nothing to "download," their files already live there, so a separate copy
+   * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
+   * folder under the configured mount root, since they have no pre-existing copy of the room.
+   */
+  roomMountPathFor(room) {
+    const server = this.deps.requireActiveServer();
+    const isOwner = room.ownerUserId === server.userId;
+    return resolveRoomMountPath({
+      owner: isOwner,
+      configuredOverride: this.deps.settings.roomMountPaths[room.id],
+      mountRoot: this.deps.settings.mountRoot,
+      mountName: room.mountName,
+      sourcePath: room.sourcePath
+    });
+  }
+};
 
 // src/main.ts
-var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
+var VaultRoomsPlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "settings", DEFAULT_SETTINGS);
@@ -48255,14 +48641,41 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     /** One RoomPushCoordinator per currently-watched mounted room - used by connectSyncSocket()'s
      *  onStateChange to retry any dirty/pending-delete files once the live-sync socket reconnects. */
     __publicField(this, "roomCoordinators", /* @__PURE__ */ new Map());
-    __publicField(this, "embeddedServer", null);
     __publicField(this, "syncSocket", null);
     __publicField(this, "syncState", "offline");
+    __publicField(this, "roomMountController");
+    /** Getter-backed facade passed to controllers so state reads stay live without exposing the plugin's full surface. */
+    __publicField(this, "ctx", ((self2) => ({
+      app: self2.app,
+      manifest: self2.manifest,
+      get settings() {
+        return self2.settings;
+      },
+      get visibleRooms() {
+        return self2.visibleRooms;
+      },
+      apiFor: (server) => self2.apiFor(server),
+      requireActiveServer: () => self2.requireActiveServer(),
+      saveSettings: () => self2.saveSettings(),
+      renderOpenRoomsViews: () => self2.renderOpenRoomsViews(),
+      get vaultAdapter() {
+        return self2.vaultAdapter;
+      },
+      getSyncEngine: () => self2.syncEngine,
+      stopWatchingRoom: (roomId) => self2.stopWatchingRoom(roomId),
+      watchMountedRoom: (roomId) => self2.watchMountedRoom(roomId),
+      subscribeRoom: (roomId) => {
+        var _a;
+        (_a = self2.syncSocket) == null ? void 0 : _a.subscribe(roomId);
+      }
+    }))(this));
+    __publicField(this, "serverConnectionManager", new ServerConnectionManager(this.ctx));
   }
   async onload() {
     await this.loadSettings();
     this.vaultAdapter = new ObsidianVaultAdapter(this);
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, new RelayApiClient("http://127.0.0.1:8787"));
+    this.roomMountController = new RoomMountController(this.ctx);
     this.addSettingTab(new VaultRoomsSettingTab(this));
     this.registerView(VAULT_ROOMS_VIEW_TYPE, (leaf) => new VaultRoomsView(leaf, this));
     this.addRibbonIcon("box", "Vault Rooms", () => this.openRoomsPanel());
@@ -48278,7 +48691,7 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     });
     if (this.settings.server.autoStart) {
       this.startEmbeddedServer().catch((error) => {
-        new import_obsidian10.Notice(error instanceof Error ? `Vault Rooms server failed to start: ${error.message}` : "Vault Rooms server failed to start.");
+        new import_obsidian12.Notice(error instanceof Error ? `Vault Rooms server failed to start: ${error.message}` : "Vault Rooms server failed to start.");
       });
     }
     this.addCommand({
@@ -48343,20 +48756,18 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
       id: "disconnect",
       name: "Disconnect",
       callback: async () => {
-        var _a;
-        (_a = this.syncSocket) == null ? void 0 : _a.disconnect();
-        this.syncSocket = null;
+        this.disconnectSyncSocket();
         this.settings.activeServerId = void 0;
         await this.saveSettings();
         this.renderOpenRoomsViews();
-        new import_obsidian10.Notice("Disconnected from active Vault Rooms server.");
+        new import_obsidian12.Notice("Disconnected from active Vault Rooms server.");
       }
     });
     const handleJoinLink = (params) => {
       var _a, _b;
       const mode = (_b = (_a = params.mode) != null ? _a : params.op) != null ? _b : "join";
       if (mode !== "join" || !params.server || !params.token) {
-        new import_obsidian10.Notice("Vault Rooms invite link is missing server/token parameters.");
+        new import_obsidian12.Notice("Vault Rooms invite link is missing server/token parameters.");
         return;
       }
       const existing = this.settings.servers.find(
@@ -48364,7 +48775,7 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
       );
       if (existing) {
         this.acceptInviteForServer(existing, params.token).catch((error) => {
-          new import_obsidian10.Notice(error instanceof Error ? error.message : "Failed to accept invite");
+          new import_obsidian12.Notice(error instanceof Error ? error.message : "Failed to accept invite");
         });
         return;
       }
@@ -48373,17 +48784,19 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     this.registerObsidianProtocolHandler("vault-rooms", handleJoinLink);
     this.registerObsidianProtocolHandler("vault-rooms/join", (params) => handleJoinLink({ ...params, mode: "join" }));
     this.app.workspace.onLayoutReady(() => {
+      if (this.activeServerIsOwnStoppedServer()) {
+        return;
+      }
       this.connectSyncSocket();
     });
   }
   async onunload() {
-    var _a, _b;
-    for (const unsubscribe of this.roomWatchers.values()) {
-      unsubscribe();
+    var _a;
+    for (const roomId of Array.from(this.roomWatchers.keys())) {
+      this.stopWatchingRoom(roomId);
     }
-    this.roomWatchers.clear();
     (_a = this.syncSocket) == null ? void 0 : _a.disconnect();
-    await ((_b = this.embeddedServer) == null ? void 0 : _b.stop());
+    await this.serverConnectionManager.stopSilently();
   }
   async loadSettings() {
     var _a, _b, _c, _d, _e, _f;
@@ -48400,62 +48813,55 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     };
     if (isLegacy) {
       await this.saveSettings();
-      new import_obsidian10.Notice("Vault Rooms was upgraded \u2014 set up or join your server again.");
+      new import_obsidian12.Notice("Vault Rooms was upgraded \u2014 set up or join your server again.");
     }
   }
   getServerStatus() {
-    var _a, _b;
-    return (_b = (_a = this.embeddedServer) == null ? void 0 : _a.getStatus()) != null ? _b : { running: false };
+    return this.serverConnectionManager.getServerStatus();
   }
   /** Live-sync WebSocket state - separate from getServerStatus(), which is about *hosting* the embedded server. */
   getSyncState() {
     return this.syncState;
   }
   async startEmbeddedServer() {
-    const server = this.getOrCreateEmbeddedServer();
-    const previousPinnedPort = this.settings.server.pinnedPort;
-    const status = await server.start(this.settings.server);
-    this.renderOpenRoomsViews();
-    if (status.running) {
-      if (!this.settings.server.port && status.port !== this.settings.server.pinnedPort) {
-        this.settings.server.pinnedPort = status.port;
-        await this.saveSettings();
-      }
-      if (status.portPinChanged) {
-        const reason = status.portPinFallbackReason === "zombie" ? "The old port still looks like a previous Vault Rooms server instance." : status.portPinFallbackReason === "occupied" ? "The old port is occupied by another app." : "The old port is occupied.";
-        new import_obsidian10.Notice(
-          `Vault Rooms server moved from port ${previousPinnedPort} to ${status.port}. ${reason} Invite links and saved logins that reference the old port may need regenerating.`,
-          0
-        );
-      }
-      new import_obsidian10.Notice(`Vault Rooms server running at ${status.localUrl}`);
+    const status = await this.serverConnectionManager.startEmbeddedServer();
+    const server = this.getActiveServer();
+    if (status.running && server && this.isOwnEmbeddedServerConnection(server)) {
+      this.connectSyncSocket();
+      await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
+      this.renderOpenRoomsViews();
     }
     return status;
   }
+  /** Disconnects live sync when this device's own server is intentionally stopped, so the socket
+   *  cannot fall into reconnect backoff against a relay we just shut down on purpose. */
   async stopEmbeddedServer() {
-    var _a;
-    await ((_a = this.embeddedServer) == null ? void 0 : _a.stop());
-    this.renderOpenRoomsViews();
-    new import_obsidian10.Notice("Vault Rooms server stopped.");
-  }
-  getOrCreateEmbeddedServer() {
-    var _a;
-    if (!this.embeddedServer) {
-      const adapter = this.app.vault.adapter;
-      if (!(adapter instanceof import_obsidian10.FileSystemAdapter)) {
-        throw new Error("Vault Rooms requires the desktop app (filesystem access).");
-      }
-      const pluginDir = (0, import_node_path3.join)(adapter.getBasePath(), (_a = this.manifest.dir) != null ? _a : `.obsidian/plugins/${this.manifest.id}`);
-      const dataDir = (0, import_node_path3.join)(pluginDir, "server-data");
-      this.embeddedServer = new EmbeddedRelayServer(dataDir);
+    const server = this.getActiveServer();
+    const wasOwnEmbeddedServerConnection = Boolean(server && this.isOwnEmbeddedServerConnection(server));
+    await this.serverConnectionManager.stopEmbeddedServer();
+    if (wasOwnEmbeddedServerConnection) {
+      this.disconnectSyncSocket();
     }
-    return this.embeddedServer;
   }
   async saveSettings() {
     await this.saveData(this.settings);
   }
   getActiveServer() {
-    return activeServer(this.settings);
+    return this.serverConnectionManager.getActiveServer();
+  }
+  /** True only for this plugin's own embedded relay connection. isServerOwner alone is too broad:
+   *  this account can own a standalone vault-rooms-relay deployment running elsewhere. Bootstrap
+   *  through this plugin's UI always stores the embedded server's loopback localUrl (see
+   *  setupServer() and serverManager.ts), so pairing owner identity with a loopback baseUrl pins it
+   *  to this device's embedded server. */
+  isOwnEmbeddedServerConnection(server) {
+    return server.isServerOwner && isLoopbackUrl(server.baseUrl);
+  }
+  /** Used to skip live-sync WebSocket creation and REST refreshes when there is genuinely nothing
+   *  listening yet. This is never true for a remote server, even one this account owns. */
+  activeServerIsOwnStoppedServer() {
+    const server = this.getActiveServer();
+    return Boolean(server && this.isOwnEmbeddedServerConnection(server) && !this.getServerStatus().running);
   }
   /**
    * Whether this device has already bootstrapped its own hosted server. Bootstrap is a one-time
@@ -48466,11 +48872,10 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
    * completed"). The panel uses this to stop offering "Set up server" once it would only ever fail.
    */
   hasOwnServer() {
-    return this.settings.servers.some((server) => server.isServerOwner);
+    return this.serverConnectionManager.hasOwnServer();
   }
   async testConnection(baseUrl) {
-    await new RelayApiClient(baseUrl).testConnection();
-    new import_obsidian10.Notice(`Connected to Vault Rooms`);
+    return this.serverConnectionManager.testConnection(baseUrl);
   }
   async setupServer(displayName, deviceName, teamName) {
     var _a;
@@ -48482,7 +48887,7 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
       throw new Error((_a = status.error) != null ? _a : "Could not start the relay server.");
     }
     const baseUrl = status.localUrl;
-    const bootstrapPin = this.getOrCreateEmbeddedServer().getBootstrapPin();
+    const bootstrapPin = this.serverConnectionManager.getBootstrapPin();
     if (!bootstrapPin) {
       throw new Error("Could not read the relay server's bootstrap PIN.");
     }
@@ -48493,7 +48898,7 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
     await this.openRoomsPanel();
     this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(response.team ? `Set up server and team ${response.team.name}` : "Set up server");
+    new import_obsidian12.Notice(response.team ? `Set up server and team ${response.team.name}` : "Set up server");
   }
   async joinServer(baseUrl, inviteToken, displayName, deviceName) {
     const response = await new RelayApiClient(baseUrl).join(inviteToken, displayName, deviceName);
@@ -48502,7 +48907,7 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
     this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
     this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Joined ${response.team.name}`);
+    new import_obsidian12.Notice(`Joined ${response.team.name}`);
   }
   /** Accepts an invite onto an already-connected server, adding the caller's existing account to that invite's team. */
   async acceptInviteForServer(server, inviteToken) {
@@ -48512,13 +48917,13 @@ var VaultRoomsPlugin = class extends import_obsidian10.Plugin {
       await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => void 0);
       this.renderOpenRoomsViews();
     }
-    new import_obsidian10.Notice(`Joined team ${result.team.name}`);
+    new import_obsidian12.Notice(`Joined team ${result.team.name}`);
   }
   async createInvite(teamId, role = "member") {
     const server = this.requireActiveServer();
     const status = this.getServerStatus();
     if (status.running && status.lanDetectionFailed) {
-      new import_obsidian10.Notice(
+      new import_obsidian12.Notice(
         "Warning: could not auto-detect this device's LAN IP, so this invite link still points at 127.0.0.1 and will NOT work for teammates. Set a Public URL override in Settings \u2192 Vault Rooms \u2192 Relay server, then create a new invite.",
         12e3
       );
@@ -48554,7 +48959,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     );
     this.teamMembersByTeam = Object.fromEntries(memberEntries);
     if ((_a = options.notify) != null ? _a : true) {
-      new import_obsidian10.Notice(`Loaded ${this.teams.length} team(s).`);
+      new import_obsidian12.Notice(`Loaded ${this.teams.length} team(s).`);
     }
     this.renderOpenRoomsViews();
   }
@@ -48579,21 +48984,21 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const server = this.requireActiveServer();
     const result = await this.apiFor(server).createTeam(name);
     await this.refreshTeams({ notify: false });
-    new import_obsidian10.Notice(`Created team ${result.team.name}`);
+    new import_obsidian12.Notice(`Created team ${result.team.name}`);
   }
   /** Owner/team-admin only. Adds an existing friend to a team directly - no invite link needed. */
   async addFriendToTeam(teamId, userId, role = "member") {
     const server = this.requireActiveServer();
     await this.apiFor(server).addTeamMember(teamId, userId, role);
     await this.refreshTeams({ notify: false });
-    new import_obsidian10.Notice("Added to team.");
+    new import_obsidian12.Notice("Added to team.");
   }
   /** Owner/team-admin only. Removes a member from a team (their user account and other teams are untouched). */
   async removeTeamMember(teamId, userId) {
     const server = this.requireActiveServer();
     await this.apiFor(server).revokeMember(teamId, userId);
     await this.refreshTeams({ notify: false });
-    new import_obsidian10.Notice("Removed from team.");
+    new import_obsidian12.Notice("Removed from team.");
     await this.offerToDeleteEmptyTeams([teamId]);
   }
   /** Server owner only. Revokes a friend's user account and all of their devices on this server. */
@@ -48602,7 +49007,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const affectedTeamIds = Object.entries(this.teamMembersByTeam).filter(([, members]) => members.some((member) => member.userId === userId && !member.revokedAt)).map(([teamId]) => teamId);
     await this.apiFor(server).revokeFriend(userId);
     await this.refreshTeams({ notify: false });
-    new import_obsidian10.Notice("Friend revoked.");
+    new import_obsidian12.Notice("Friend revoked.");
     await this.offerToDeleteEmptyTeams(affectedTeamIds);
   }
   /** After removing someone from a team (or revoking them entirely), offer to clean up any team that's now left with no active members. */
@@ -48622,7 +49027,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const server = this.requireActiveServer();
     await this.apiFor(server).createRoom(input);
     await this.refreshRooms();
-    new import_obsidian10.Notice(`Created room ${input.name}`);
+    new import_obsidian12.Notice(`Created room ${input.name}`);
   }
   async updateRoomSettings(roomId, input, localMountPath) {
     const server = this.requireActiveServer();
@@ -48636,13 +49041,13 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     }
     await this.saveSettings();
     await this.refreshRooms({ notify: false });
-    new import_obsidian10.Notice(`Updated room ${input.name}`);
+    new import_obsidian12.Notice(`Updated room ${input.name}`);
   }
   async grantRoomAccess(roomId, input) {
     const server = this.requireActiveServer();
     await this.apiFor(server).grantAcl(roomId, input);
     await this.refreshRooms({ notify: false });
-    new import_obsidian10.Notice("Room access updated.");
+    new import_obsidian12.Notice("Room access updated.");
   }
   async listRoomAcl(roomId) {
     const server = this.requireActiveServer();
@@ -48652,7 +49057,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
   async removeRoomAccess(roomId, aclId) {
     const server = this.requireActiveServer();
     await this.apiFor(server).removeAcl(roomId, aclId);
-    new import_obsidian10.Notice("Access removed.");
+    new import_obsidian12.Notice("Access removed.");
   }
   /** Owners/admins only (enforced server-side). Deletes the room and all of its files/history on the server. */
   async deleteRoom(room) {
@@ -48663,7 +49068,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     delete this.settings.roomMountPaths[room.id];
     await this.saveSettings();
     this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Deleted room ${room.name}`);
+    new import_obsidian12.Notice(`Deleted room ${room.name}`);
   }
   /** Server owner or team creator only (enforced server-side). Deletes the team's memberships, invites, and ACL grants - NOT rooms, which are independently owned and outlive the team. */
   async deleteTeam(teamId) {
@@ -48672,7 +49077,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const team = this.teams.find((candidate) => candidate.id === teamId);
     await this.apiFor(server).deleteTeam(teamId);
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]);
-    new import_obsidian10.Notice(`Deleted team ${(_a = team == null ? void 0 : team.name) != null ? _a : teamId}`);
+    new import_obsidian12.Notice(`Deleted team ${(_a = team == null ? void 0 : team.name) != null ? _a : teamId}`);
   }
   /**
    * Purely local cleanup - removes a saved server entry without calling the server at all. This
@@ -48681,7 +49086,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
    * local entry, then set up or join that server again to get a fresh, working identity.
    */
   async forgetServer(serverId) {
-    var _a, _b, _c;
+    var _a;
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
     if (!server) {
       return;
@@ -48693,28 +49098,21 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     }
     for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
       if (roomState.serverId === server.id) {
-        (_b = this.roomWatchers.get(roomId)) == null ? void 0 : _b();
-        this.roomWatchers.delete(roomId);
+        this.stopWatchingRoom(roomId);
         delete this.settings.mountedRooms[roomId];
         delete this.settings.roomMountPaths[roomId];
       }
     }
     if (isActive) {
-      (_c = this.syncSocket) == null ? void 0 : _c.disconnect();
-      this.syncSocket = null;
-      this.visibleRooms = [];
-      this.teams = [];
-      this.teamDirectory = [];
-      this.friends = [];
-      this.myTeamRoles = {};
-      this.teamMembersByTeam = {};
+      this.disconnectSyncSocket();
+      this.resetSessionState();
     }
     await this.saveSettings();
     if (isActive) {
       this.connectSyncSocket();
     }
     this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Removed ${server.baseUrl} from this device.`);
+    new import_obsidian12.Notice(`Removed ${server.baseUrl} from this device.`);
   }
   async activateServer(serverId) {
     const server = this.settings.servers.find((candidate) => candidate.id === serverId);
@@ -48722,19 +49120,14 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       throw new Error("Server not found.");
     }
     this.settings.activeServerId = serverId;
-    this.visibleRooms = [];
-    this.teams = [];
-    this.teamDirectory = [];
-    this.friends = [];
-    this.myTeamRoles = {};
-    this.teamMembersByTeam = {};
+    this.resetSessionState();
     await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
-      new import_obsidian10.Notice(error instanceof Error ? error.message : "Failed to load server");
+      new import_obsidian12.Notice(error instanceof Error ? error.message : "Failed to load server");
     });
     this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Using ${server.baseUrl}`);
+    new import_obsidian12.Notice(`Using ${server.baseUrl}`);
   }
   async refreshRooms(options = {}) {
     var _a;
@@ -48742,7 +49135,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     const result = await this.apiFor(server).listRooms();
     this.visibleRooms = result.rooms.map((room) => withInstalledCapabilities(this.app, room));
     if ((_a = options.notify) != null ? _a : true) {
-      new import_obsidian10.Notice(`Loaded ${this.visibleRooms.length} room(s).`);
+      new import_obsidian12.Notice(`Loaded ${this.visibleRooms.length} room(s).`);
     }
     this.renderOpenRoomsViews();
   }
@@ -48750,185 +49143,34 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     if (this.visibleRooms.length === 0) {
       await this.refreshRooms();
     }
-    const room = this.visibleRooms[0];
-    if (!room) {
-      new import_obsidian10.Notice("No visible rooms to mount.");
-      return;
-    }
-    await this.mountRoom(room);
+    await this.roomMountController.mountFirstVisibleRoom();
   }
-  /**
-   * (Re)mounts a room locally. The relay server's file listing is always treated as the
-   * authoritative source of truth (the owner/host is where files actually live) - this matters
-   * most when a member is removed from a room and later re-added: any files that were deleted on
-   * the server in the meantime carry a tombstone (`deleted: true`) in the listing and must be
-   * removed locally rather than left behind as stale copies. Files whose server version already
-   * matches what we last synced are left untouched so we don't clobber unpushed local edits;
-   * everything else is routed through VaultSyncEngine so dirty local edits get a conflict copy
-   * instead of being silently overwritten.
-   */
   async mountRoom(room) {
-    var _a, _b;
-    if (room.type === "file") {
-      new import_obsidian10.Notice(`"${room.name}" is a single-file room, which is no longer supported - recreate it as a folder room.`);
-      return;
-    }
-    const server = this.requireActiveServer();
-    const mountPath = this.roomMountPathFor(room);
-    const state = this.settings.mountedRooms[room.id] = (_a = this.settings.mountedRooms[room.id]) != null ? _a : {
-      roomId: room.id,
-      serverId: server.id,
-      mountPath,
-      files: {}
-    };
-    state.mountPath = mountPath;
-    state.serverId = server.id;
-    state.unmounted = false;
-    await this.syncEngine.reconcileLocalEdits(state);
-    const api = this.apiFor(server);
-    const files = await api.listFiles(room.id);
-    const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
-    for (const file of files.files) {
-      const tracked = state.files[file.relativePath];
-      if (file.deleted) {
-        if (tracked) {
-          await this.syncEngine.applyRemoteDelete(state, { relativePath: file.relativePath, version: file.version }, server.deviceName);
-        }
-        continue;
-      }
-      if (tracked && !tracked.dirty && tracked.serverVersion === file.version) {
-        continue;
-      }
-      const content = await api.readFile(room.id, file.relativePath);
-      await this.syncEngine.applyRemoteChange(state, content, server.deviceName);
-    }
-    const localPaths = await this.vaultAdapter.list(mountPath);
-    for (const localPath of localPaths) {
-      const relativePath = localPath.slice(mountPath.length + 1);
-      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
-        continue;
-      }
-      try {
-        await this.syncEngine.pushLocalChange(state, relativePath, server.deviceName);
-      } catch (error) {
-        console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
-      }
-    }
-    this.watchMountedRoom(room.id);
-    (_b = this.syncSocket) == null ? void 0 : _b.subscribe(room.id);
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Mounted ${room.name}`);
+    await this.roomMountController.mountRoom(room);
   }
-  /**
-   * Non-destructively unmounts a room: stops the local watcher and live-sync subscription for it,
-   * but leaves local files and tracking (settings.mountedRooms[roomId]) in place - see
-   * MountedRoomState.unmounted. This matters most for re-mounting later: without kept tracking,
-   * mountRoom() would see no tracked state for any file and download the server's copy over
-   * whatever is on disk, with no conflict copy, silently discarding any local edits made in the
-   * meantime. Use forgetRoom() for the old fully-destructive "drop everything" behavior.
-   */
   async unmountRoom(roomId) {
-    var _a, _b;
-    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
-    const roomState = this.settings.mountedRooms[roomId];
-    (_a = this.roomWatchers.get(roomId)) == null ? void 0 : _a();
-    this.roomWatchers.delete(roomId);
-    if (roomState) {
-      roomState.unmounted = true;
-    }
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Unmounted ${(_b = room == null ? void 0 : room.name) != null ? _b : "room"}`);
+    await this.roomMountController.unmountRoom(roomId);
   }
-  /** Destructively forgets a room's local tracking (the old unmountRoom() behavior) - local files
-   *  on disk are left alone (same as unmountRoom), but this device's sync tracking for the room is
-   *  dropped entirely, so a later mount starts over as if the room were never mounted here. */
   async forgetRoom(roomId) {
-    var _a, _b;
-    const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
-    (_a = this.roomWatchers.get(roomId)) == null ? void 0 : _a();
-    this.roomWatchers.delete(roomId);
-    delete this.settings.mountedRooms[roomId];
-    delete this.settings.roomMountPaths[roomId];
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`Forgot ${(_b = room == null ? void 0 : room.name) != null ? _b : "room"} on this device`);
+    await this.roomMountController.forgetRoom(roomId);
   }
   isRoomMounted(roomId) {
-    const state = this.settings.mountedRooms[roomId];
-    return Boolean(state) && !(state == null ? void 0 : state.unmounted);
+    return this.roomMountController.isRoomMounted(roomId);
   }
   mountedPathFor(roomId) {
-    var _a;
-    return (_a = this.settings.mountedRooms[roomId]) == null ? void 0 : _a.mountPath;
+    return this.roomMountController.mountedPathFor(roomId);
   }
-  /** Which server (settings.servers[].id) a mounted room belongs to - see the serverId note on
-   *  MountedRoomState. Used by the panel to tell whether a mounted room is under the currently
-   *  active server (syncing) or a different, currently-inactive one (paused). */
   mountedRoomServerId(roomId) {
-    var _a;
-    return (_a = this.settings.mountedRooms[roomId]) == null ? void 0 : _a.serverId;
+    return this.roomMountController.mountedRoomServerId(roomId);
   }
-  /**
-   * Conflict copies are local-only files (see isConflictCopyPath - they're never pushed or
-   * synced), so finding them is a plain local file-listing scan, not a server call. Used to
-   * render a "Resolve" list per mounted room instead of leaving people to sort them out by hand
-   * in the file explorer.
-   */
   listRoomConflicts(roomId) {
-    const mountPath = this.mountedPathFor(roomId);
-    if (!mountPath) {
-      return [];
-    }
-    const prefix = mountPath.replace(/\/+$/, "");
-    const conflicts = [];
-    for (const file of this.app.vault.getFiles()) {
-      const path = file.path;
-      if (path !== prefix && !path.startsWith(`${prefix}/`)) {
-        continue;
-      }
-      if (!isConflictCopyPath(path)) {
-        continue;
-      }
-      const canonical = canonicalPathForConflictCopy(path);
-      if (!canonical) {
-        continue;
-      }
-      conflicts.push({
-        relativePath: canonical.slice(prefix.length + 1),
-        conflictRelativePath: path.slice(prefix.length + 1)
-      });
-    }
-    return conflicts;
+    return this.roomMountController.listRoomConflicts(roomId);
   }
   async resolveRoomConflict(roomId, relativePath, conflictRelativePath, keep) {
-    const server = this.requireActiveServer();
-    const roomState = this.settings.mountedRooms[roomId];
-    if (!roomState) {
-      throw new Error("Room is not mounted.");
-    }
-    await this.syncEngine.resolveConflict(roomState, relativePath, conflictRelativePath, keep, server.deviceName);
-    await this.saveSettings();
-    this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(keep === "mine" ? "Kept your version and re-synced it." : "Kept the synced version and removed your local copy.");
+    await this.roomMountController.resolveRoomConflict(roomId, relativePath, conflictRelativePath, keep);
   }
-  /**
-   * The room owner's device mounts in place at the room's real `sourcePath` (their existing vault
-   * folder) - there's nothing to "download," their files already live there, so a separate copy
-   * would just be an empty shadow folder that never gets used. Everyone else mounts into a fresh
-   * folder under the configured mount root, since they have no pre-existing copy of the room.
-   */
   roomMountPathFor(room) {
-    const server = this.requireActiveServer();
-    const isOwner = room.ownerUserId === server.userId;
-    return resolveRoomMountPath({
-      owner: isOwner,
-      configuredOverride: this.settings.roomMountPaths[room.id],
-      mountRoot: this.settings.mountRoot,
-      mountName: room.mountName,
-      sourcePath: room.sourcePath
-    });
+    return this.roomMountController.roomMountPathFor(room);
   }
   openSetupServerModal() {
     new SetupTeamModal(this).open();
@@ -48949,13 +49191,34 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       }
     }
   }
+  stopWatchingRoom(roomId) {
+    var _a;
+    (_a = this.roomWatchers.get(roomId)) == null ? void 0 : _a();
+    this.roomWatchers.delete(roomId);
+  }
+  disconnectSyncSocket() {
+    var _a;
+    (_a = this.syncSocket) == null ? void 0 : _a.disconnect();
+    this.syncSocket = null;
+  }
+  resetSessionState() {
+    this.visibleRooms = [];
+    this.teams = [];
+    this.teamDirectory = [];
+    this.friends = [];
+    this.myTeamRoles = {};
+    this.teamMembersByTeam = {};
+  }
+  roomIsLiveUnder(serverId, roomState) {
+    return roomState.serverId === serverId;
+  }
   watchMountedRoom(roomId) {
     const roomState = this.settings.mountedRooms[roomId];
     const server = this.getActiveServer();
     if (!roomState || roomState.unmounted || !server) {
       return;
     }
-    if (roomState.serverId !== server.id) {
+    if (!this.roomIsLiveUnder(server.id, roomState)) {
       return;
     }
     if (this.roomWatchers.has(roomId)) {
@@ -48970,7 +49233,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
       },
       onError: (relativePath, error) => {
         console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
-        new import_obsidian10.Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
+        new import_obsidian12.Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
       },
       debounceMs: this.settings.debounceMs,
       isStillMounted: () => this.settings.mountedRooms[roomId] === roomState && !roomState.unmounted
@@ -49003,9 +49266,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
    * switch back to a server to resume syncing whatever's mounted under it.
    */
   connectSyncSocket() {
-    var _a;
-    (_a = this.syncSocket) == null ? void 0 : _a.disconnect();
-    this.syncSocket = null;
+    this.disconnectSyncSocket();
     this.syncState = "offline";
     for (const unsubscribe of this.roomWatchers.values()) {
       unsubscribe();
@@ -49019,6 +49280,10 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     }
     for (const roomId of Object.keys(this.settings.mountedRooms)) {
       this.watchMountedRoom(roomId);
+    }
+    if (this.activeServerIsOwnStoppedServer()) {
+      this.renderOpenRoomsViews();
+      return;
     }
     const socket = new RoomSyncSocket(server, {
       // Unmounted rooms (see unmountRoom()/MountedRoomState.unmounted) keep their tracking so a
@@ -49046,7 +49311,7 @@ ${invite.joinUrl}`, invite.joinUrl).open();
         this.renderOpenRoomsViews();
       },
       onRevoked: () => {
-        new import_obsidian10.Notice(`Your access to ${server.baseUrl} was revoked.`);
+        new import_obsidian12.Notice(`Your access to ${server.baseUrl} was revoked.`);
         if (this.settings.activeServerId === server.id) {
           this.settings.activeServerId = void 0;
         }
@@ -49054,29 +49319,27 @@ ${invite.joinUrl}`, invite.joinUrl).open();
         this.renderOpenRoomsViews();
       },
       onRoomDeleted: (roomId) => {
-        var _a2;
+        var _a;
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
-        delete this.settings.mountedRooms[roomId];
-        delete this.settings.roomMountPaths[roomId];
+        this.roomMountController.dropRoomTracking(roomId);
         void this.saveSettings();
         this.renderOpenRoomsViews();
-        new import_obsidian10.Notice(`${(_a2 = room == null ? void 0 : room.name) != null ? _a2 : "A room"} was deleted by the owner/admin.`);
+        new import_obsidian12.Notice(`${(_a = room == null ? void 0 : room.name) != null ? _a : "A room"} was deleted by the owner/admin.`);
       },
       onAccessRevoked: (roomId) => {
-        var _a2;
+        var _a;
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
-        delete this.settings.mountedRooms[roomId];
-        delete this.settings.roomMountPaths[roomId];
+        this.roomMountController.dropRoomTracking(roomId);
         void this.saveSettings();
         this.renderOpenRoomsViews();
-        new import_obsidian10.Notice(`Your access to ${(_a2 = room == null ? void 0 : room.name) != null ? _a2 : "a room"} was revoked.`);
+        new import_obsidian12.Notice(`Your access to ${(_a = room == null ? void 0 : room.name) != null ? _a : "a room"} was revoked.`);
       }
     });
     socket.connect();
     for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
-      if (roomState.serverId === server.id) {
+      if (this.roomIsLiveUnder(server.id, roomState)) {
         socket.subscribe(roomId);
       }
     }
@@ -49086,50 +49349,25 @@ ${invite.joinUrl}`, invite.joinUrl).open();
     await this.app.workspace.getLeaf(true).setViewState({ type: VAULT_ROOMS_VIEW_TYPE, active: true });
   }
   apiFor(server) {
-    return new RelayApiClient(server.baseUrl, server.deviceToken, () => this.markServerRevoked(server));
-  }
-  /**
-   * A 401 from a server means the saved device token no longer resolves to anything there - most
-   * commonly because that server's data was reset/recreated since the token was issued (fresh
-   * install, wiped data dir, or switching between embedded/standalone with different data files).
-   * Reflect that in the UI (Settings → Vault Rooms → Servers already shows `status`) instead of
-   * leaving it as a one-off error toast with no lasting trace, so it's clear this server needs to
-   * be removed and set up/joined again rather than retried.
-   */
-  markServerRevoked(server) {
-    if (server.status === "revoked") {
-      return;
-    }
-    server.status = "revoked";
-    void this.saveSettings();
-    this.renderOpenRoomsViews();
-    new import_obsidian10.Notice(`"${server.baseUrl}" - saved login is no longer valid on this server. Remove it and set up/join again from Settings \u2192 Vault Rooms \u2192 Servers.`);
+    return this.serverConnectionManager.apiFor(server);
   }
   requireActiveServer() {
-    const server = this.getActiveServer();
-    if (!server) {
-      throw new Error("No active Vault Rooms server.");
-    }
-    return server;
+    return this.serverConnectionManager.requireActiveServer();
   }
   upsertServer(baseUrl, response) {
-    const config = {
-      id: response.device.id,
-      baseUrl,
-      userId: response.user.id,
-      userDisplayName: response.user.displayName,
-      deviceId: response.device.id,
-      deviceName: response.device.displayName,
-      deviceToken: response.deviceToken,
-      isServerOwner: response.isServerOwner,
-      status: "active"
-    };
-    this.settings.servers = [...this.settings.servers.filter((server) => server.id !== config.id), config];
-    this.settings.activeServerId = config.id;
+    this.serverConnectionManager.upsertServer(baseUrl, response);
   }
 };
 function normalizeBaseUrl(url) {
   return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+function isLoopbackUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]" || parsed.hostname === "::1";
+  } catch (e) {
+    return false;
+  }
 }
 /*! Bundled license information:
 
