@@ -6537,11 +6537,11 @@ var VaultRoomsSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Public URL override").setDesc(
-      "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. http://192.168.1.42 - the actual port is filled in automatically if you leave it off. Leave this field blank entirely to use loopback for this device only."
+      "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.42 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
     ).addText(
       (text) => {
         var _a;
-        return text.setPlaceholder("http://192.168.1.42:8787").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
+        return text.setPlaceholder("192.168.1.42").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
           const trimmed = value.trim();
           this.plugin.settings.server.publicUrlOverride = trimmed || void 0;
           await this.plugin.saveSettings();
@@ -12498,9 +12498,10 @@ async function ensureParentFolder(adapter, path) {
 
 // src/publicUrl.ts
 function withPort(urlString, port) {
+  const withScheme = urlString.includes("://") ? urlString : `http://${urlString}`;
   let url;
   try {
-    url = new URL(urlString);
+    url = new URL(withScheme);
   } catch (e) {
     return urlString;
   }

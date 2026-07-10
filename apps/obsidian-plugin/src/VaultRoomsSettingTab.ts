@@ -81,11 +81,11 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. http://192.168.1.42 - the actual port is filled in automatically if you leave it off. Leave this field blank entirely to use loopback for this device only."
+        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.42 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
       )
       .addText((text) =>
         text
-          .setPlaceholder("http://192.168.1.42:8787")
+          .setPlaceholder("192.168.1.42")
           .setValue(this.plugin.settings.server.publicUrlOverride ?? "")
           .onChange(async (value) => {
             const trimmed = value.trim();

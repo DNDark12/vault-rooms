@@ -18,7 +18,20 @@ describe("withPort", () => {
     expect(withPort("http://192.168.1.42", 8787).endsWith("/")).toBe(false);
   });
 
-  it("returns the input unchanged if it isn't a valid URL at all", () => {
-    expect(withPort("192.168.1.42", 8787)).toBe("192.168.1.42");
+  it("adds both the scheme and the port when the user typed a bare IP", () => {
+    expect(withPort("192.168.1.42", 8787)).toBe("http://192.168.1.42:8787");
+  });
+
+  it("adds the scheme but keeps an explicit port when the user typed a bare IP:port", () => {
+    expect(withPort("192.168.1.42:9000", 8787)).toBe("http://192.168.1.42:9000");
+  });
+
+  it("never invents a scheme other than http", () => {
+    expect(withPort("https://192.168.1.42", 8787)).toBe("https://192.168.1.42:8787");
+  });
+
+  it("returns the input unchanged if it still isn't a valid URL with a scheme prepended", () => {
+    expect(withPort("", 8787)).toBe("");
+    expect(withPort("not a url", 8787)).toBe("not a url");
   });
 });
