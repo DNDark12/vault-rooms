@@ -16,6 +16,30 @@ Identity is per-server: each device you join gets one device token for that serv
 
 This is not cloud sync, NAT traversal, mobile sync, character-level co-editing, or a sandbox for arbitrary Obsidian community plugins. v0.1 syncs Markdown/text and a limited set of common file types (see "Known limitations" below for the exact list), up to the configured size limit.
 
+## Quick start
+
+The full walkthrough, one device at a time. Every step names the exact command/button so you can follow along in the plugin.
+
+**On the hosting device ("A"):**
+
+1. Install the plugin (see "Installing the Obsidian plugin manually" below).
+2. Command palette → **Vault Rooms: Start server** (or Settings → Vault Rooms → Relay server → **Start**). No terminal, no config file.
+3. Find this device's LAN IP - `ipconfig getifaddr en0` (macOS), `hostname -I` (Linux), or `ipconfig` (Windows, look for the active adapter's IPv4 address), typically something like `192.168.x.x` or `10.x.x.x`.
+4. Settings → Vault Rooms → Relay server → **Public URL override** → enter `http://<that-LAN-IP>:8787` (adjust the port if you changed it), then **Stop**/**Start** the server again so it takes effect. This step is mandatory for the embedded server - see "Security model" below for why it doesn't detect this automatically.
+5. Vault Rooms panel → **Set up server** - this makes you the server owner (creates your account/device identity) and optionally creates your first team in the same step.
+6. Vault Rooms panel → **Rooms** section → **Create room** - pick a folder from your vault to share.
+7. Open the room's Settings → grant access to a user or a team (a permission preset like reader/editor, or a custom path pattern and permission set).
+8. Vault Rooms panel → **Teams** section → your team's card → **Invite link** - this opens a modal with the link (click **Select invite link** to copy it), the full invite details, and a QR code encoding the same link for a nearby teammate to scan with their phone and forward to their own computer.
+
+**On the teammate's device ("B"):**
+
+9. Install the plugin.
+10. Before doing anything else, open `http://<A's-LAN-IP>:<port>/health` in a browser. If that doesn't load, the invite link won't work either - see "Troubleshooting" below before going further.
+11. Click the invite link A sent (it opens Obsidian and pre-fills the join form), or Vault Rooms panel → **Join server** to enter the server URL and invite token by hand. Add a display name and join.
+12. The shared room now appears under **Rooms** in B's panel - mount it to start syncing.
+
+That's the whole loop. Team size, ACL granularity, and revocation are their own sections below - read those before inviting more than a couple of people.
+
 ## Network use
 
 Vault Rooms makes network connections, but only ever between devices on your own local network (LAN) that are running this same plugin - there is no cloud service, third-party server, telemetry, analytics, or update-check call of any kind:
