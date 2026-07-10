@@ -165,6 +165,8 @@ obsidian://vault-rooms?mode=join&server=http%3A%2F%2F<host-LAN-IP>%3A8787&token=
 
 Clicking it opens Obsidian, and if the Vault Rooms plugin is installed there, it pre-fills the Join form with the server URL and token - the recipient only has to add a display name and click Join. The plugin also accepts the older `obsidian://vault-rooms/join?...` path-style link for compatibility.
 
+The invite modal also shows a QR code encoding the same link - useful for a teammate sitting nearby: they scan it with their phone, then forward the link to their own computer (Obsidian is desktop-only, so the phone itself can't join). This is generated entirely client-side and encodes nothing beyond the plaintext link already shown as text above it.
+
 The link only works if:
 
 1. The recipient already has the Vault Rooms plugin installed (the link cannot install it).
@@ -196,7 +198,7 @@ What doesn't scale, and matters more as the team grows toward 20-50 people:
 
 - **The host's laptop is a single point of failure.** If whoever is hosting closes Obsidian, sleeps their laptop, or goes offline, sync stops for the whole team until they're back. For a team that size, prefer running the relay as a **standalone** process (`pnpm dev:server`, or a small always-on machine/NAS on the LAN) rather than embedded in one person's personal Obsidian - the protocol is identical either way, so this is purely a deployment choice, not a code change.
 - **No horizontal scaling / no clustering.** There's one process, one SQLite file (via `sql.js`). This is fine for the write volume a few dozen humans generate, but it's not designed to be load-balanced across multiple relay instances.
-- **No TLS yet (v0.1).** At 20-50 people, "trusted LAN" is a bigger assumption to lean on than for a pair. Treat this as an internal-network tool until v0.3 TLS/e2e lands (see Roadmap), and don't run it on a network you don't trust.
+- **No TLS yet (v0.1).** At 20-50 people, "trusted LAN" is a bigger assumption to lean on than for a pair. Treat this as an internal-network tool until TLS/WSS lands (see [ROADMAP.md](ROADMAP.md)), and don't run it on a network you don't trust.
 - **ACLs are per-room, not automatic.** Every room's access still has to be granted (to the whole team or specific members/roles) after creation - there's no team size at which this becomes automatic, so plan for a bit of upfront admin work rounding up 50 people into the right room grants.
 
 ## Development
@@ -240,7 +242,7 @@ To cut a release:
 - Plugin settings store the device token in Obsidian plugin data JSON; this is acceptable for v0.1 but not hardened. A leaked device can be revoked individually (see "Deleting rooms/teams and removing access").
 - No rate-limit tuning UI: the relay applies a strict per-IP limit on the unauthenticated bootstrap endpoint and a WebSocket connection cap to protect the host (the server runs inside Obsidian's process). There is intentionally no general per-request limiter on authenticated traffic - it legitimately scales with vault size (mounting/reconciling an existing room can fire well over a hundred requests in a burst), and an earlier general limiter was removed after it broke sync on established rooms.
 - Single-host star topology: whoever hosts the relay (embedded or standalone) must stay running for the team to sync; see "Team size and scaling."
-- If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one. mDNS/QR discovery to avoid this is on the v0.2 roadmap.
+- If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one - the invite modal's QR code (see "Invite links" below) makes resending less error-prone than retyping the URL. Automatic mDNS-based discovery to avoid regenerating entirely is a research item, not a scheduled feature - see [ROADMAP.md](ROADMAP.md).
 - The **embedded** relay never auto-detects your LAN IP (see "Security model" above) - you must set a Public URL override before creating an invite, every time your LAN IP changes. The standalone relay still auto-detects.
 
 ## Troubleshooting
