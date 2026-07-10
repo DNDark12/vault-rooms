@@ -6037,7 +6037,7 @@ function requestUrlWithTimeout(request, timeoutMs) {
       },
       (error) => {
         window.clearTimeout(timeout);
-        reject(error);
+        reject(error instanceof Error ? error : new Error(String(error)));
       }
     );
   });
@@ -10363,12 +10363,9 @@ function requireRoom3(repo, roomId) {
   return room;
 }
 
-// src/embeddedRelayApp.ts
-var MIN_WEBSOCKET_PAYLOAD_BYTES = 5 * 1024 * 1024;
-var SOCKET_CLOSE_GRACE_MS = 500;
-var timerHost2 = typeof window !== "undefined" ? window : globalThis;
-async function createEmbeddedRelayApp(db, options = {}) {
-  var _a, _b, _c, _d, _e, _f, _g, _h;
+// ../relay-server/src/relayCore.ts
+function createRelayCore(db, options = {}) {
+  var _a, _b, _c, _d, _e, _f;
   db.pragma("foreign_keys = ON");
   runMigrations(db);
   const maxFileBytes = (_a = options.maxFileBytes) != null ? _a : 5 * 1024 * 1024;
@@ -10377,6 +10374,22 @@ async function createEmbeddedRelayApp(db, options = {}) {
   const connectionRegistry = new ConnectionRegistry();
   const bootstrapPin = generateBootstrapPin();
   const bootstrapRateLimiter = new FixedWindowRateLimiter((_d = (_c = options.rateLimit) == null ? void 0 : _c.bootstrapMax) != null ? _d : 5, (_f = (_e = options.rateLimit) == null ? void 0 : _e.bootstrapWindowMs) != null ? _f : 6e4);
+  return {
+    repo,
+    connectionRegistry,
+    bootstrapPin,
+    bootstrapRateLimiter,
+    maxFileBytes,
+    maxConnections
+  };
+}
+
+// src/embeddedRelayApp.ts
+var MIN_WEBSOCKET_PAYLOAD_BYTES = 5 * 1024 * 1024;
+var SOCKET_CLOSE_GRACE_MS = 500;
+async function createEmbeddedRelayApp(db, options = {}) {
+  var _a, _b;
+  const { repo, connectionRegistry, bootstrapPin, bootstrapRateLimiter, maxFileBytes, maxConnections } = createRelayCore(db, options);
   const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket) => {
     handleSyncSocket(socket, repo, connectionRegistry, { maxFileBytes, maxConnections });
   });
@@ -10393,8 +10406,8 @@ async function createEmbeddedRelayApp(db, options = {}) {
   const routeApp = app;
   registerAuthRoutes(routeApp, repo);
   registerTeamRoutes(routeApp, repo, {
-    publicUrl: (_g = options.publicUrl) != null ? _g : "http://127.0.0.1:8787",
-    allowRemoteBootstrap: (_h = options.allowRemoteBootstrap) != null ? _h : false,
+    publicUrl: (_a = options.publicUrl) != null ? _a : "http://127.0.0.1:8787",
+    allowRemoteBootstrap: (_b = options.allowRemoteBootstrap) != null ? _b : false,
     bootstrapPin,
     connectionRegistry
   });
@@ -10568,7 +10581,7 @@ async function closeSocketWithGrace(socket) {
     return;
   }
   await new Promise((resolve) => {
-    const timeout = timerHost2.setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       cleanup();
       if (socket.readyState !== wrapper_default.CLOSED) {
         socket.terminate();
@@ -10580,7 +10593,7 @@ async function closeSocketWithGrace(socket) {
       resolve();
     };
     const cleanup = () => {
-      timerHost2.clearTimeout(timeout);
+      window.clearTimeout(timeout);
       socket.off("close", onClose);
     };
     socket.once("close", onClose);
@@ -10599,7 +10612,8 @@ async function readJsonBody(request, maxFileBytes) {
   }
   const chunks = [];
   let total = 0;
-  for await (const chunk of request) {
+  const requestBody = request;
+  for await (const chunk of requestBody) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.byteLength;
     if (total > Math.max(maxFileBytes * 2, 5 * 1024 * 1024)) {
@@ -10660,8 +10674,7 @@ function normalizeParams(params) {
 async function openObsidianSqlJsDb(adapter, dbPath, locator) {
   const normalizedPath = (0, import_obsidian13.normalizePath)(dbPath);
   const SQL = await loadSqlJs(locator);
-  await archiveLegacyDbIfNeeded(adapter, normalizedPath, SQL);
-  const initialBytes = await adapter.exists(normalizedPath) ? new Uint8Array(await adapter.readBinary(normalizedPath)) : void 0;
+  const initialBytes = await archiveLegacyDbIfNeeded(adapter, normalizedPath, SQL);
   const sqlDb = new SQL.Database(initialBytes);
   const flushPath = normalizedPath;
   let closed = false;
@@ -10784,7 +10797,7 @@ async function openObsidianSqlJsDb(adapter, dbPath, locator) {
 }
 async function archiveLegacyDbIfNeeded(adapter, dbPath, SQL) {
   if (!await adapter.exists(dbPath)) {
-    return;
+    return void 0;
   }
   const bytes = new Uint8Array(await adapter.readBinary(dbPath));
   const probeDb = new SQL.Database(bytes);
@@ -10800,7 +10813,7 @@ async function archiveLegacyDbIfNeeded(adapter, dbPath, SQL) {
     probeDb.close();
   }
   if (!legacy) {
-    return;
+    return bytes;
   }
   const archivePath = `${dbPath}.bak-v1`;
   if (await adapter.exists(archivePath)) {
@@ -10808,6 +10821,7 @@ async function archiveLegacyDbIfNeeded(adapter, dbPath, SQL) {
   }
   await ensureParentFolder(adapter, archivePath);
   await adapter.rename(dbPath, archivePath);
+  return void 0;
 }
 async function ensureParentFolder(adapter, path) {
   const slash = path.lastIndexOf("/");

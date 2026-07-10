@@ -1,5 +1,5 @@
 import { normalizePath } from "obsidian";
-import type { Plugin, TAbstractFile, TFile } from "obsidian";
+import type { Plugin, TFile } from "obsidian";
 import type { VaultAdapter, VaultChangeEvent } from "./syncClient.js";
 import { isFile, listFiles } from "./vaultTraversal.js";
 
@@ -113,4 +113,3 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     }
   }
 }
-

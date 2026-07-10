@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestUrl } from "obsidian";
-import { RelayApiClient } from "./apiClient.js";
+import { RelayApiClient, requestUrlWithTimeout } from "./apiClient.js";
+
+vi.stubGlobal("window", { setTimeout: global.setTimeout, clearTimeout: global.clearTimeout });
 
 describe("RelayApiClient.request", () => {
   afterEach(() => {
@@ -50,5 +52,12 @@ describe("RelayApiClient.request", () => {
 
     const client = new RelayApiClient("https://relay.example", "token");
     await expect(client.listRooms()).resolves.toEqual({ rooms: [] });
+  });
+
+  it("wraps non-Error requestUrl rejections in an Error", async () => {
+    vi.mocked(requestUrl).mockRejectedValue("network failed");
+
+    await expect(requestUrlWithTimeout({ url: "https://relay.example/health", throw: false }, 3_000)).rejects.toThrow("network failed");
+    await expect(requestUrlWithTimeout({ url: "https://relay.example/health", throw: false }, 3_000)).rejects.toBeInstanceOf(Error);
   });
 });

@@ -24,7 +24,7 @@ async function archiveLegacyDbIfNeeded(dbPath: string, locator?: SqlJsLocator): 
   try {
     isLegacy = Boolean(probeDb.prepare("select 1 from pragma_table_info('devices') where name = 'team_id'").get());
   } finally {
-    probeDb.close();
+    void probeDb.close();
   }
   if (!isLegacy) {
     return;

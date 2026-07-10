@@ -2,51 +2,33 @@ import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
 import type { RelayDb } from "./db/sqlJsAdapter.js";
-import { runMigrations } from "./db/migrations.js";
-import { RelayRepository } from "./db/repositories/relayRepository.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
 import { registerFileRoutes } from "./routes/file.routes.js";
 import { registerFriendRoutes } from "./routes/friend.routes.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
-import { generateBootstrapPin } from "./security/bootstrapPin.js";
-import { FixedWindowRateLimiter } from "./security/rateLimiter.js";
-import { ConnectionRegistry } from "./sync/connectionRegistry.js";
+import { createRelayCore, type RelayCoreOptions } from "./relayCore.js";
 import { registerSyncRoutes } from "./sync/syncServer.js";
 
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
 
-export type CreateAppCoreOptions = {
+export type CreateAppCoreOptions = RelayCoreOptions & {
   publicUrl?: string;
-  maxFileBytes?: number;
-  maxConnections?: number;
   allowRemoteBootstrap?: boolean;
-  rateLimit?: {
-    bootstrapMax?: number;
-    bootstrapWindowMs?: number;
-  };
 };
 
 export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions = {}) {
-  db.pragma("foreign_keys = ON");
-  runMigrations(db);
-
-  const maxFileBytes = options.maxFileBytes ?? 5 * 1024 * 1024;
-  const maxConnections = options.maxConnections ?? 100;
-  const bootstrapRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.bootstrapMax ?? 5, options.rateLimit?.bootstrapWindowMs ?? 60_000);
+  const { repo, connectionRegistry, bootstrapPin, bootstrapRateLimiter, maxFileBytes, maxConnections } = createRelayCore(db, options);
   // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
   // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
   // maxFileBytes - otherwise a file just under the configured limit can still be rejected at the
   // HTTP layer before the friendlier FILE_TOO_LARGE check even runs.
   const app = Fastify({ logger: false, bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) });
-  const repo = new RelayRepository(db);
-  const connectionRegistry = new ConnectionRegistry();
   // Bootstrap PIN (see security/bootstrapPin.ts): required by POST /api/bootstrap in addition to
   // the existing localhost-only check, so a DNS-rebound "local-looking" request from a malicious
   // web page still can't provision a server owner. Exposed in-process only (decorated below, plus
   // printed to the console by the standalone CLI in index.ts) - the embedded plugin reads it
   // directly off this same object instead of ever sending it over the network unprompted.
-  const bootstrapPin = generateBootstrapPin();
 
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("access-control-allow-origin", "*");

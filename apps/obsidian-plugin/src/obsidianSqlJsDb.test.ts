@@ -19,6 +19,7 @@ type AdapterMethod = "exists" | "readBinary" | "writeBinary" | "mkdir" | "remove
 class FakeDataAdapter implements Pick<DataAdapter, AdapterMethod> {
   readonly store = new Map<string, ArrayBuffer>();
   readonly folders = new Set<string>();
+  readBinaryCalls = 0;
   /** Per-call artificial delay (ms) for writeBinary, consumed FIFO - lets a test make one write
    *  slower than another to deterministically reproduce/verify flush ordering. */
   writeDelaysMs: number[] = [];
@@ -28,6 +29,7 @@ class FakeDataAdapter implements Pick<DataAdapter, AdapterMethod> {
   }
 
   async readBinary(path: string): Promise<ArrayBuffer> {
+    this.readBinaryCalls += 1;
     const data = this.store.get(path);
     if (!data) {
       throw new Error(`Missing file: ${path}`);
@@ -114,6 +116,26 @@ describe("openObsidianSqlJsDb - legacy archive detection (A1)", () => {
     const reopened = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
     try {
       expect(adapter.store.has(`${dbPath}.bak-v1`)).toBe(false);
+      expect(reopened.prepare("select name from devices where id = 1").get()).toEqual({ name: "device-a" });
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("reuses the startup probe bytes instead of reading a current database twice", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    db.exec("create table devices (id integer primary key, name text not null)");
+    db.prepare("insert into devices (id, name) values (1, ?)").run("device-a");
+    await db.close();
+
+    adapter.readBinaryCalls = 0;
+    const reopened = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    try {
+      expect(adapter.readBinaryCalls).toBe(1);
       expect(reopened.prepare("select name from devices where id = 1").get()).toEqual({ name: "device-a" });
     } finally {
       await reopened.close();

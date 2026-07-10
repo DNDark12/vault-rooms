@@ -89,7 +89,7 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
     flushTimer = timerHost.setTimeout(() => {
       flushTimer = null;
       flush();
-    }, 25) as FlushTimer;
+    }, 25);
     flushTimer.unref?.();
   }
 

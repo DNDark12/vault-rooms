@@ -7,6 +7,8 @@ import WebSocket from "ws";
 import type { PreparedStatement, RelayDb, SqlRow } from "vault-rooms-relay/embedded-core";
 import { createEmbeddedRelayApp, EmbeddedRelayApp } from "../src/embeddedRelayApp.js";
 
+(globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
+
 const apps: EmbeddedRelayApp[] = [];
 const sockets: WebSocket[] = [];
 const rawSockets: Socket[] = [];

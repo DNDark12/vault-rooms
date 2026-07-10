@@ -3,17 +3,13 @@ import type { Socket } from "node:net";
 import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
 import WebSocket, { WebSocketServer } from "ws";
 import {
-  ConnectionRegistry,
-  FixedWindowRateLimiter,
-  RelayRepository,
-  generateBootstrapPin,
+  createRelayCore,
   handleSyncSocket,
   registerAuthRoutes,
   registerFileRoutes,
   registerFriendRoutes,
   registerRoomRoutes,
   registerTeamRoutes,
-  runMigrations,
   type RelayDb
 } from "vault-rooms-relay/embedded-core";
 
@@ -43,7 +39,7 @@ type EmbeddedRequest = {
   ip: string;
 };
 
-type RouteHandler = (request: EmbeddedRequest) => unknown | Promise<unknown>;
+type RouteHandler = (request: EmbeddedRequest) => unknown;
 
 type Route = {
   method: RouteMethod;
@@ -54,18 +50,9 @@ type Route = {
 
 const MIN_WEBSOCKET_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const SOCKET_CLOSE_GRACE_MS = 500;
-const timerHost = typeof window !== "undefined" ? window : globalThis;
 
 export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelayAppOptions = {}): Promise<EmbeddedRelayApp> {
-  db.pragma("foreign_keys = ON");
-  runMigrations(db);
-
-  const maxFileBytes = options.maxFileBytes ?? 5 * 1024 * 1024;
-  const maxConnections = options.maxConnections ?? 100;
-  const repo = new RelayRepository(db);
-  const connectionRegistry = new ConnectionRegistry();
-  const bootstrapPin = generateBootstrapPin();
-  const bootstrapRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.bootstrapMax ?? 5, options.rateLimit?.bootstrapWindowMs ?? 60_000);
+  const { repo, connectionRegistry, bootstrapPin, bootstrapRateLimiter, maxFileBytes, maxConnections } = createRelayCore(db, options);
   const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket) => {
     handleSyncSocket(socket, repo, connectionRegistry, { maxFileBytes, maxConnections });
   });
@@ -126,7 +113,7 @@ export class EmbeddedRelayApp {
       webSocket.on("error", () => {
         // ws emits protocol errors (for example maxPayload violations) before closing.
       });
-      this.handleSyncSocket(webSocket as SyncSocketLike);
+      this.handleSyncSocket(webSocket);
     });
   }
 
@@ -284,7 +271,7 @@ async function closeSocketWithGrace(socket: WebSocket): Promise<void> {
     return;
   }
   await new Promise<void>((resolve) => {
-    const timeout = timerHost.setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       cleanup();
       if (socket.readyState !== WebSocket.CLOSED) {
         socket.terminate();
@@ -296,7 +283,7 @@ async function closeSocketWithGrace(socket: WebSocket): Promise<void> {
       resolve();
     };
     const cleanup = () => {
-      timerHost.clearTimeout(timeout);
+      window.clearTimeout(timeout);
       socket.off("close", onClose);
     };
     socket.once("close", onClose);
@@ -318,7 +305,8 @@ async function readJsonBody(request: IncomingMessage, maxFileBytes: number): Pro
 
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of request) {
+  const requestBody = request as AsyncIterable<Buffer | Uint8Array | string>;
+  for await (const chunk of requestBody) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.byteLength;
     if (total > Math.max(maxFileBytes * 2, 5 * 1024 * 1024)) {

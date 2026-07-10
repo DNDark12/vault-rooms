@@ -18,9 +18,7 @@ function normalizeParams(params: unknown[]): (number | string | Uint8Array | nul
 export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, locator?: SqlJsLocator): Promise<RelayDb> {
   const normalizedPath = normalizePath(dbPath);
   const SQL = await loadSqlJs(locator);
-  await archiveLegacyDbIfNeeded(adapter, normalizedPath, SQL);
-
-  const initialBytes = (await adapter.exists(normalizedPath)) ? new Uint8Array(await adapter.readBinary(normalizedPath)) : undefined;
+  const initialBytes = await archiveLegacyDbIfNeeded(adapter, normalizedPath, SQL);
   const sqlDb: SqlJsDatabase = new SQL.Database(initialBytes);
   const flushPath = normalizedPath;
 
@@ -152,9 +150,9 @@ export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, 
   };
 }
 
-async function archiveLegacyDbIfNeeded(adapter: DataAdapter, dbPath: string, SQL: SqlJsStatic): Promise<void> {
+async function archiveLegacyDbIfNeeded(adapter: DataAdapter, dbPath: string, SQL: SqlJsStatic): Promise<Uint8Array | undefined> {
   if (!(await adapter.exists(dbPath))) {
-    return;
+    return undefined;
   }
   const bytes = new Uint8Array(await adapter.readBinary(dbPath));
   const probeDb = new SQL.Database(bytes);
@@ -173,7 +171,7 @@ async function archiveLegacyDbIfNeeded(adapter: DataAdapter, dbPath: string, SQL
     probeDb.close();
   }
   if (!legacy) {
-    return;
+    return bytes;
   }
   const archivePath = `${dbPath}.bak-v1`;
   if (await adapter.exists(archivePath)) {
@@ -181,6 +179,7 @@ async function archiveLegacyDbIfNeeded(adapter: DataAdapter, dbPath: string, SQL
   }
   await ensureParentFolder(adapter, archivePath);
   await adapter.rename(dbPath, archivePath);
+  return undefined;
 }
 
 async function ensureParentFolder(adapter: DataAdapter, path: string): Promise<void> {

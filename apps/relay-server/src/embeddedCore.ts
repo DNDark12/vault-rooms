@@ -9,4 +9,6 @@ export { generateBootstrapPin } from "./security/bootstrapPin.js";
 export { FixedWindowRateLimiter } from "./security/rateLimiter.js";
 export { ConnectionRegistry } from "./sync/connectionRegistry.js";
 export { handleSyncSocket } from "./sync/syncServer.js";
+export { createRelayCore } from "./relayCore.js";
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
+export type { RelayCoreOptions } from "./relayCore.js";
