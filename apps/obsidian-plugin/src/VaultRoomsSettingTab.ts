@@ -2,6 +2,7 @@ import { Notice, PluginSettingTab, Setting } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
+import { isRestrictedPort } from "./restrictedPorts.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
   constructor(private readonly plugin: VaultRoomsPlugin) {
@@ -81,7 +82,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
+        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - just the address, no http:// or port needed (both are filled in automatically, and any port you do include is ignored in favor of the server's real one). Leave this field blank entirely to use loopback for this device only."
       )
       .addText((text) =>
         text
@@ -108,6 +109,10 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             const trimmed = value.trim();
             const parsed = trimmed ? Number.parseInt(trimmed, 10) : undefined;
             if (trimmed && (!Number.isInteger(parsed) || (parsed as number) <= 0 || (parsed as number) > 65535)) {
+              return;
+            }
+            if (parsed !== undefined && isRestrictedPort(parsed)) {
+              new Notice(`Port ${parsed} is blocked by Obsidian's Electron runtime and can never be reached - choose a different port.`);
               return;
             }
             this.plugin.settings.server.port = parsed;

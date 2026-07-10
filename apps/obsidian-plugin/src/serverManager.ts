@@ -5,6 +5,7 @@ import { requestUrlWithTimeout } from "./apiClient.js";
 import { createEmbeddedRelayApp, type EmbeddedRelayApp } from "./embeddedRelayApp.js";
 import { openObsidianSqlJsDb } from "./obsidianSqlJsDb.js";
 import { withPort } from "./publicUrl.js";
+import { isRestrictedPort } from "./restrictedPorts.js";
 // Bundled directly into main.js by esbuild's "binary" loader - see esbuild.config.mjs. This
 // avoids depending on a separately-shipped sql-wasm.wasm file, which the community-plugin
 // installer would never actually deliver (it only downloads main.js/manifest.json/styles.css).
@@ -147,6 +148,12 @@ async function describeBusyPort(port: number): Promise<string> {
 }
 
 async function requireAvailablePort(port: number): Promise<number> {
+  // Binding a restricted port can succeed at the OS/Node level - the failure only shows up later,
+  // as every client request to it (including the plugin's own requestUrl/WebSocket calls) getting
+  // rejected with net::ERR_UNSAFE_PORT, with no indication of why. Reject it up front instead.
+  if (isRestrictedPort(port)) {
+    throw new Error(`PORT=${port} is blocked by Obsidian's Electron runtime (a Chromium-restricted port). Choose a different port.`);
+  }
   if (!(await isPortAvailable(port))) {
     throw new Error(`PORT=${port} is already in use`);
   }
@@ -154,7 +161,9 @@ async function requireAvailablePort(port: number): Promise<number> {
 }
 
 async function chooseAvailablePort(preferredPort?: number): Promise<number> {
-  if (preferredPort !== undefined && (await isPortAvailable(preferredPort))) {
+  // A previously-pinned port could itself be restricted if it was saved before this check
+  // existed - fall through to the normal auto-pick range instead of trying to reuse it.
+  if (preferredPort !== undefined && !isRestrictedPort(preferredPort) && (await isPortAvailable(preferredPort))) {
     return preferredPort;
   }
   for (let port = 8787; port <= 8797; port += 1) {

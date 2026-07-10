@@ -6,8 +6,8 @@ describe("withPort", () => {
     expect(withPort("http://192.168.1.100", 8787)).toBe("http://192.168.1.100:8787");
   });
 
-  it("leaves an explicit port untouched", () => {
-    expect(withPort("http://192.168.1.100:9000", 8787)).toBe("http://192.168.1.100:9000");
+  it("overrides an explicit port with the real one - a typed port is never authoritative", () => {
+    expect(withPort("http://192.168.1.100:9000", 8787)).toBe("http://192.168.1.100:8787");
   });
 
   it("drops any path/query the user typed by mistake, keeping only the origin", () => {
@@ -22,8 +22,8 @@ describe("withPort", () => {
     expect(withPort("192.168.1.100", 8787)).toBe("http://192.168.1.100:8787");
   });
 
-  it("adds the scheme but keeps an explicit port when the user typed a bare IP:port", () => {
-    expect(withPort("192.168.1.100:9000", 8787)).toBe("http://192.168.1.100:9000");
+  it("adds the scheme and overrides an explicit port when the user typed a bare IP:port", () => {
+    expect(withPort("192.168.1.100:9000", 8787)).toBe("http://192.168.1.100:8787");
   });
 
   it("never invents a scheme other than http", () => {
