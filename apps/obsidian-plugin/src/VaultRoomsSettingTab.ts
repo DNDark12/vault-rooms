@@ -211,7 +211,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       setting.addButton((button) =>
         button
           .setButtonText("Forget")
-          .setDestructive()
+          .setWarning()
           .onClick(async () => {
             if (!(await confirmModal(this.app, "Forget server", `Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`, "Forget"))) {
               return;

@@ -35,9 +35,6 @@ importers:
       obsidian:
         specifier: ^1.8.7
         version: 1.13.1(@codemirror/state@6.5.0)(@codemirror/view@6.38.6)
-      qrcode-generator:
-        specifier: ^2.0.4
-        version: 2.0.4
       sql.js:
         specifier: ^1.14.1
         version: 1.14.1
@@ -846,9 +843,6 @@ packages:
 
   process-warning@5.0.0:
     resolution: {integrity: sha512-a39t9ApHNx2L4+HBnQKqxxHNs1r7KF+Intd8Q/g1bUh6q0WIp9voPXJ/x0j+ZL45KF1pJd9+q2jLIRMfvEshkA==}
-
-  qrcode-generator@2.0.4:
-    resolution: {integrity: sha512-mZSiP6RnbHl4xL2Ap5HfkjLnmxfKcPWpWe/c+5XxCuetEenqmNFf1FH/ftXPCtFG5/TDobjsjz6sSNL0Sr8Z9g==}
 
   quick-format-unescaped@4.0.4:
     resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
@@ -1696,8 +1690,6 @@ snapshots:
   process-warning@4.0.1: {}
 
   process-warning@5.0.0: {}
-
-  qrcode-generator@2.0.4: {}
 
   quick-format-unescaped@4.0.4: {}
 

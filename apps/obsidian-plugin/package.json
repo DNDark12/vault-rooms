@@ -11,7 +11,6 @@
     "@vault-rooms/protocol": "workspace:*",
     "esbuild": "^0.25.8",
     "obsidian": "^1.8.7",
-    "qrcode-generator": "^2.0.4",
     "sql.js": "^1.14.1",
     "vault-rooms-relay": "workspace:*",
     "ws": "^8.18.3"

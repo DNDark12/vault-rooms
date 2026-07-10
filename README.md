@@ -29,7 +29,7 @@ The full walkthrough, one device at a time. Every step names the exact command/b
 5. Vault Rooms panel → **Set up server** - this makes you the server owner (creates your account/device identity) and optionally creates your first team in the same step.
 6. Vault Rooms panel → **Rooms** section → **Create room** - pick a folder from your vault to share.
 7. Open the room's Settings → grant access to a user or a team (a permission preset like reader/editor, or a custom path pattern and permission set).
-8. Vault Rooms panel → **Teams** section → your team's card → **Invite link** - this opens a modal with the link (click **Select invite link** to copy it), the full invite details, and a QR code encoding the same link for a nearby teammate to scan with their phone and forward to their own computer.
+8. Vault Rooms panel → **Invite** (top of the panel) - choose what the invite grants (a specific room, a team, or just add them as a friend with no access yet), then **Create invite**. This opens a modal with the link - click **Copy** to copy it.
 
 **On the teammate's device ("B"):**
 
@@ -165,8 +165,6 @@ obsidian://vault-rooms?mode=join&server=http%3A%2F%2F<host-LAN-IP>%3A8787&token=
 
 Clicking it opens Obsidian, and if the Vault Rooms plugin is installed there, it pre-fills the Join form with the server URL and token - the recipient only has to add a display name and click Join. The plugin also accepts the older `obsidian://vault-rooms/join?...` path-style link for compatibility.
 
-The invite modal also shows a QR code encoding the same link - useful for a teammate sitting nearby: they scan it with their phone, then forward the link to their own computer (Obsidian is desktop-only, so the phone itself can't join). This is generated entirely client-side and encodes nothing beyond the plaintext link already shown as text above it.
-
 The link only works if:
 
 1. The recipient already has the Vault Rooms plugin installed (the link cannot install it).
@@ -242,7 +240,7 @@ To cut a release:
 - Plugin settings store the device token in Obsidian plugin data JSON; this is acceptable for v0.1 but not hardened. A leaked device can be revoked individually (see "Deleting rooms/teams and removing access").
 - No rate-limit tuning UI: the relay applies a strict per-IP limit on the unauthenticated bootstrap endpoint and a WebSocket connection cap to protect the host (the server runs inside Obsidian's process). There is intentionally no general per-request limiter on authenticated traffic - it legitimately scales with vault size (mounting/reconciling an existing room can fire well over a hundred requests in a burst), and an earlier general limiter was removed after it broke sync on established rooms.
 - Single-host star topology: whoever hosts the relay (embedded or standalone) must stay running for the team to sync; see "Team size and scaling."
-- If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one - the invite modal's QR code (see "Invite links" below) makes resending less error-prone than retyping the URL. Automatic mDNS-based discovery to avoid regenerating entirely is a research item, not a scheduled feature - see [ROADMAP.md](ROADMAP.md).
+- If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one. Automatic mDNS-based discovery to avoid regenerating entirely is a research item, not a scheduled feature - see [ROADMAP.md](ROADMAP.md).
 - The **embedded** relay never auto-detects your LAN IP (see "Security model" above) - you must set a Public URL override before creating an invite, every time your LAN IP changes. The standalone relay still auto-detects.
 
 ## Troubleshooting

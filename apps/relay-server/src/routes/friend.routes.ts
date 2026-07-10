@@ -3,12 +3,28 @@ import { AppError } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { getActivePrincipal } from "../services/authService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import { toInviteResponse } from "./inviteResponse.js";
 
 export type FriendRoutesOptions = {
+  publicUrl: string;
   connectionRegistry?: ConnectionRegistry;
 };
 
-export function registerFriendRoutes(app: FastifyInstance, repo: RelayRepository, options: FriendRoutesOptions = {}): void {
+export function registerFriendRoutes(app: FastifyInstance, repo: RelayRepository, options: FriendRoutesOptions): void {
+  app.post("/api/invites", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    if (!principal.isServerOwner) {
+      throw new AppError("PERMISSION_DENIED", "Only the server owner can create friend invites.", 403);
+    }
+    const body = request.body as Partial<{ expiresInMinutes: number; maxUses: number }>;
+    const invite = repo.createInvite({
+      createdByUserId: principal.userId,
+      expiresInMinutes: body.expiresInMinutes ?? 60,
+      maxUses: body.maxUses ?? 1
+    });
+    return toInviteResponse(invite, options.publicUrl);
+  });
+
   app.get("/api/friends", async (request) => {
     const principal = getActivePrincipal(repo, request);
     if (principal.isServerOwner) {

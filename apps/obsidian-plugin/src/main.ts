@@ -14,6 +14,7 @@ import { DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type ServerConnection, type 
 import type { EmbeddedServerStatus } from "./serverManager.js";
 import { VaultRoomsSettingTab } from "./VaultRoomsSettingTab.js";
 import { CreateRoomModal } from "./modals/CreateRoomModal.js";
+import { CreateInviteModal } from "./modals/CreateInviteModal.js";
 import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
@@ -24,6 +25,7 @@ import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
 import { VAULT_ROOMS_VIEW_TYPE, VaultRoomsView } from "./views/VaultRoomsView.js";
 import { withInstalledCapabilities } from "./pluginCapabilities.js";
+import { inviteAcceptanceNotice, inviteJoinNotice } from "./inviteNotices.js";
 import type { PluginContext } from "./controllers/PluginContext.js";
 import { ServerConnectionManager } from "./controllers/ServerConnectionManager.js";
 import { RoomMountController, type RoomMountControllerDeps } from "./controllers/RoomMountController.js";
@@ -183,9 +185,8 @@ export default class VaultRoomsPlugin extends Plugin {
         new Notice("Vault Rooms invite link is missing server/token parameters.");
         return;
       }
-      // If we already have an active identity on this exact server, this is a "join another
-      // team" invite for someone who already has an account there - accept it directly onto the
-      // caller's existing user/device instead of running through the (new account) join modal.
+      // If this device already has an active identity on the exact server, accept the Team/Room/
+      // Friend invite against that existing user instead of trying to create a second identity.
       const existing = this.settings.servers.find(
         (server) => server.status === "active" && normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(inviteServer)
       );
@@ -369,21 +370,41 @@ export default class VaultRoomsPlugin extends Plugin {
     this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     this.renderOpenRoomsViews();
-    new Notice(`Joined ${response.team.name}`);
+    new Notice(inviteJoinNotice(response, baseUrl));
   }
 
-  /** Accepts an invite onto an already-connected server, adding the caller's existing account to that invite's team. */
+  /** Accepts a Team/Room/Friend invite for an identity already active on this exact server. */
   private async acceptInviteForServer(server: ServerConnection, inviteToken: string): Promise<void> {
     const result = await this.apiFor(server).acceptInvite(inviteToken);
-    if (this.getActiveServer()?.id === server.id) {
+    if (result.inviteType !== "friend" && this.getActiveServer()?.id === server.id) {
       await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
       this.renderOpenRoomsViews();
     }
-    new Notice(`Joined team ${result.team.name}`);
+    new Notice(inviteAcceptanceNotice(result));
   }
 
   async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<void> {
     const server = this.requireActiveServer();
+    this.warnIfInviteIsLoopback();
+    const invite = await this.apiFor(server).createInvite(teamId, role);
+    new InviteMemberModal(this, invite.joinUrl).open();
+  }
+
+  async createRoomInvite(roomId: string, preset: "reader" | "editor"): Promise<void> {
+    const server = this.requireActiveServer();
+    this.warnIfInviteIsLoopback();
+    const invite = await this.apiFor(server).createRoomInvite(roomId, preset);
+    new InviteMemberModal(this, invite.joinUrl).open();
+  }
+
+  async createFriendInvite(): Promise<void> {
+    const server = this.requireActiveServer();
+    this.warnIfInviteIsLoopback();
+    const invite = await this.apiFor(server).createFriendInvite();
+    new InviteMemberModal(this, invite.joinUrl).open();
+  }
+
+  private warnIfInviteIsLoopback(): void {
     const status = this.getServerStatus();
     if (status.running && status.lanDetectionFailed) {
       new Notice(
@@ -391,8 +412,6 @@ export default class VaultRoomsPlugin extends Plugin {
         12_000
       );
     }
-    const invite = await this.apiFor(server).createInvite(teamId, role);
-    new InviteMemberModal(this, invite.joinUrl).open();
   }
 
   /**
@@ -434,6 +453,19 @@ export default class VaultRoomsPlugin extends Plugin {
       return false;
     }
     return server.isServerOwner || team.ownerUserId === server.userId || this.myTeamRoles[team.id] === "admin";
+  }
+
+  canManageRoom(room: RoomSummary): boolean {
+    const server = this.getActiveServer();
+    return Boolean(server && (server.isServerOwner || room.ownerUserId === server.userId));
+  }
+
+  canCreateAnyInvite(): boolean {
+    const server = this.getActiveServer();
+    return Boolean(
+      server &&
+        (server.isServerOwner || this.visibleRooms.some((room) => this.canManageRoom(room)) || this.teams.some((team) => this.canManageTeam(team)))
+    );
   }
 
   /** Only the server owner or the team's creator can delete it (stricter than canManageTeam). */
@@ -702,6 +734,10 @@ export default class VaultRoomsPlugin extends Plugin {
 
   openCreateRoomModal(): void {
     new CreateRoomModal(this).open();
+  }
+
+  openCreateInviteModal(): void {
+    new CreateInviteModal(this).open();
   }
 
   openJoinTeamModal(): void {

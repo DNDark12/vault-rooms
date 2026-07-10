@@ -354,7 +354,7 @@ export class RoomSettingsModal extends Modal {
       row.addButton((button) =>
         button
           .setButtonText("Remove")
-          .setDestructive()
+          .setWarning()
           .onClick(async () => {
             try {
               await this.plugin.removeRoomAccess(this.room.id, rule.id);
@@ -379,7 +379,7 @@ export class RoomSettingsModal extends Modal {
       .addButton((button) =>
         button
           .setButtonText("Delete room")
-          .setDestructive()
+          .setWarning()
           .onClick(async () => {
             if (!(await confirmModal(this.app, "Delete room", `Delete room "${this.room.name}"? This removes it and all of its files for every member. This cannot be undone.`, "Delete room"))) {
               return;

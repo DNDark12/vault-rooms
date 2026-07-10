@@ -293,3 +293,27 @@
 .vault-rooms-section-body {
   margin-top: 4px;
 }
+
+.vault-rooms-invite-modal .vault-rooms-setting-hint {
+  margin-bottom: 6px;
+}
+
+.vault-rooms-invite-link {
+  box-sizing: border-box;
+  min-height: 64px;
+  resize: vertical;
+  width: 100%;
+}
+
+.vault-rooms-invite-actions {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+
+.vault-rooms-invite-actions.is-footer {
+  border-top: 1px solid var(--background-modifier-border);
+  justify-content: flex-end;
+  margin-bottom: 0;
+  padding-top: 10px;
+}

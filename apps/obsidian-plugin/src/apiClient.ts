@@ -57,6 +57,16 @@ export type BootstrapResponse = {
   team?: { id: string; slug: string; name: string };
 };
 
+export type InviteLinkResponse = { inviteId: string; inviteToken: string; serverUrl: string; joinUrl: string };
+
+export type InviteGrantResult =
+  | { inviteType: "team"; team: { id: string; slug: string; name: string } }
+  | { inviteType: "room"; room: { id: string; name: string } }
+  | { inviteType: "friend" };
+
+export type InviteJoinResponse = BootstrapResponse & InviteGrantResult;
+export type InviteAcceptanceResponse = InviteGrantResult | { inviteType: "friend"; alreadyConnected: true };
+
 export type AclRuleSummary = {
   id: string;
   roomId: string;
@@ -115,7 +125,7 @@ export class RelayApiClient implements RelayFileApi {
     return this.request("/api/me");
   }
 
-  async acceptInvite(inviteToken: string): Promise<{ team: { id: string; slug: string; name: string } }> {
+  async acceptInvite(inviteToken: string): Promise<InviteAcceptanceResponse> {
     return this.request("/api/invites/accept", {
       method: "POST",
       body: { inviteToken }
@@ -154,10 +164,24 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<{ inviteId: string; inviteToken: string; serverUrl: string; joinUrl: string }> {
+  async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<InviteLinkResponse> {
     return this.request(`/api/teams/${teamId}/invites`, {
       method: "POST",
       body: { role, expiresInMinutes: 60, maxUses: 1 }
+    });
+  }
+
+  async createRoomInvite(roomId: string, preset: "reader" | "editor"): Promise<InviteLinkResponse> {
+    return this.request(`/api/rooms/${roomId}/invites`, {
+      method: "POST",
+      body: { preset, expiresInMinutes: 60, maxUses: 1 }
+    });
+  }
+
+  async createFriendInvite(): Promise<InviteLinkResponse> {
+    return this.request("/api/invites", {
+      method: "POST",
+      body: { expiresInMinutes: 60, maxUses: 1 }
     });
   }
 
@@ -172,7 +196,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async join(inviteToken: string, displayName: string, deviceName: string): Promise<BootstrapResponse & { team: { id: string; slug: string; name: string } }> {
+  async join(inviteToken: string, displayName: string, deviceName: string): Promise<InviteJoinResponse> {
     return this.request("/api/join", {
       method: "POST",
       body: { inviteToken, displayName, deviceName }

@@ -16,7 +16,7 @@ export function confirmModal(app: App, title: string, message: string, ctaText: 
           .addButton((button) =>
             button
               .setButtonText(ctaText)
-              .setDestructive()
+              .setWarning()
               .onClick(() => {
                 this.confirmed = true;
                 this.close();

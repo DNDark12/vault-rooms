@@ -6,6 +6,7 @@ import type { TeamRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import { toInviteResponse } from "./inviteResponse.js";
 
 export type TeamRoutesOptions = {
   publicUrl: string;
@@ -111,14 +112,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
       expiresInMinutes: body.expiresInMinutes ?? 60,
       maxUses: body.maxUses ?? 1
     });
-    const joinUrl = `obsidian://vault-rooms?mode=join&server=${encodeURIComponent(options.publicUrl)}&token=${encodeURIComponent(invite.inviteToken)}`;
-
-    return {
-      inviteId: invite.inviteId,
-      inviteToken: invite.inviteToken,
-      serverUrl: options.publicUrl,
-      joinUrl
-    };
+    return toInviteResponse(invite, options.publicUrl);
   });
 
   app.get("/api/teams/:teamId/members", async (request: FastifyRequest) => {

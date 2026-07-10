@@ -2,12 +2,9 @@
 
 This tracks what's next after v0.1, ordered by priority within each tier. See [README](README.md) for what v0.1 already does and [SECURITY.md](SECURITY.md) for the current threat model - nothing below changes either until it actually ships.
 
-## Shipped
-
-- **QR invite code** (0.1.5) - the invite modal now renders a QR code alongside the plaintext link, for a nearby teammate to scan with their phone and forward to their own desktop. Encodes the same link already shown as text, so it adds no new fingerprinting surface - this is why it shipped ahead of everything else below instead of waiting on the P1 items.
-
 ## Explicitly dropped - do not pick back up without a fresh decision
 
+- **QR invite code** (shipped in 0.1.5, reverted the same cycle). The invite modal briefly rendered a QR code alongside the plaintext link, framed as "scan with your phone and forward to your computer." Dropped after review: this plugin is `isDesktopOnly`, so a phone can never run it, and "scan, then manually get the link from your phone to your desktop anyway" is strictly more steps than just copying the link into whatever chat app you're already using to reach the recipient. Don't re-add without a concrete scenario where a camera-to-desktop hop is actually faster than copy/paste.
 - **MCP/AI agent access.** Considered (competitors like EVC Team Relay and Fast Note Sync have it), but rejected for now: giving an AI agent read/write access to shared rooms is a meaningfully larger security surface than anything else in this plugin (a compromised or over-permissioned agent could exfiltrate or corrupt everything it can reach), and this repo doesn't have anything close to that today. If this comes back, it needs its own dedicated security-integrity review and threat-model write-up *before* any code, not just a normal feature PR - don't scope-creep it into a "quick MCP endpoint."
 
 ## P1 - next up, in priority order
@@ -49,13 +46,13 @@ Ordered roughly by how much they depend on each other (CRDT is a prerequisite fo
 ## Needs dedicated research before it becomes a real roadmap item
 
 ### mDNS/zeroconf LAN discovery
-The original v0.1 plan (see README's "If the host's LAN IP changes... mDNS/QR discovery is on the roadmap") assumed this was a straightforward addition. **It is not**, given what 0.1.4/0.1.5 just went through: the embedded server's `os.networkInterfaces()`-based LAN IP auto-detection was *removed* specifically because Obsidian's plugin-review scanner flags reading network interfaces as machine fingerprinting (see CLAUDE.md rule 3, SECURITY.md, and the 0.1.4 release notes).
+The original v0.1 plan (see README's "If the host's LAN IP changes... mDNS-based discovery is a research item") assumed this was a straightforward addition. **It is not**, given what 0.1.4/0.1.5 just went through: the embedded server's `os.networkInterfaces()`-based LAN IP auto-detection was *removed* specifically because Obsidian's plugin-review scanner flags reading network interfaces as machine fingerprinting (see CLAUDE.md rule 3, SECURITY.md, and the 0.1.4 release notes).
 
 mDNS discovery fundamentally requires binding a UDP socket and listening/broadcasting on the local network's interfaces - which is architecturally the same category of "read/use network interface info" the scanner already flagged once. Before this goes back on the roadmap as a real, scheduled item:
 
 1. **Research whether an mDNS implementation can avoid the specific APIs/patterns the scanner flags** (e.g. does the scanner key off literally calling `os.networkInterfaces()`, or does it do broader capability analysis that would also catch a UDP multicast socket bound to `0.0.0.0`/`224.0.0.251`?). This needs an actual test submission or a close reading of what Obsidian's review tooling actually inspects, not just an assumption either way.
 2. If it turns out to be flaggable, decide whether an **opt-in setting** (default off, clearly disclosed in Settings and SECURITY.md, framed as "this reads network info to discover peers automatically instead of you copying an IP") is an acceptable trade - Obsidian's review process may treat opt-in differently, but that itself needs confirming, not assuming.
-3. Only after 1-2 are actually answered should this get a version number and a place in the P1/P2 list above. Until then, treat the README's existing "mDNS/QR discovery... on the roadmap" line as QR-only (already shipped, see "Shipped" above) - the mDNS half of that sentence is aspirational, not scheduled.
+3. Only after 1-2 are actually answered should this get a version number and a place in the P1/P2 list above. Until then, treat the README's existing "mDNS-based discovery is a research item" line as aspirational, not scheduled.
 
 ## Positioning guardrails - don't do these regardless of feature progress
 

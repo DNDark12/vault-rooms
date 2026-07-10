@@ -10,6 +10,7 @@ import {
   type SubjectType,
   type TeamRole
 } from "@vault-rooms/protocol";
+import { expandPreset } from "@vault-rooms/policy";
 import type {
   AclRuleRow,
   DevicePrincipalRow,
@@ -52,6 +53,19 @@ export type BootstrapResult = {
   isServerOwner: boolean;
   team?: { id: string; slug: string; name: string };
 };
+
+type InviteCreateTarget =
+  | { teamId: string; role: TeamRole; roomId?: undefined; permissionPreset?: undefined }
+  | { roomId: string; permissionPreset: "reader" | "editor"; teamId?: undefined; role?: undefined }
+  | { teamId?: undefined; roomId?: undefined; role?: undefined; permissionPreset?: undefined };
+
+type InviteGrantResult =
+  | { inviteType: "team"; team: { id: string; slug: string; name: string } }
+  | { inviteType: "room"; room: { id: string; name: string } }
+  | { inviteType: "friend" };
+
+export type InviteAcceptanceResult = InviteGrantResult | { inviteType: "friend"; alreadyConnected: true };
+export type JoinInviteResult = BootstrapResult & InviteGrantResult;
 
 export class RelayRepository {
   private readonly files: RelayFileRepository;
@@ -175,10 +189,8 @@ export class RelayRepository {
       });
   }
 
-  createInvite(input: {
-    teamId: string;
+  createInvite(input: InviteCreateTarget & {
     createdByUserId: string;
-    role: TeamRole;
     expiresInMinutes: number;
     maxUses: number;
   }): { inviteId: string; inviteToken: string } {
@@ -188,27 +200,41 @@ export class RelayRepository {
     const expiresAt = new Date(now.getTime() + input.expiresInMinutes * 60_000).toISOString();
     this.db
       .prepare(
-        "insert into invites(id, team_id, created_by_user_id, token_hash, role, expires_at, max_uses, use_count, revoked_at, created_at) values (?, ?, ?, ?, ?, ?, ?, 0, null, ?)"
+        "insert into invites(id, team_id, room_id, permission_preset, created_by_user_id, token_hash, role, expires_at, max_uses, use_count, revoked_at, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, null, ?)"
       )
-      .run(inviteId, input.teamId, input.createdByUserId, hashToken(inviteToken), input.role, expiresAt, input.maxUses, now.toISOString());
+      .run(
+        inviteId,
+        input.teamId ?? null,
+        input.roomId ?? null,
+        input.permissionPreset ?? null,
+        input.createdByUserId,
+        hashToken(inviteToken),
+        input.role ?? null,
+        expiresAt,
+        input.maxUses,
+        now.toISOString()
+      );
     this.audit({
-      teamId: input.teamId,
+      teamId: input.teamId ?? null,
       actorType: "user",
       actorId: input.createdByUserId,
       action: "invite.created",
       resourceType: "invite",
       resourceId: inviteId,
-      metadata: { role: input.role, maxUses: input.maxUses }
+      metadata: {
+        inviteType: input.teamId ? "team" : input.roomId ? "room" : "friend",
+        role: input.role,
+        roomId: input.roomId,
+        permissionPreset: input.permissionPreset,
+        maxUses: input.maxUses
+      }
     });
     return { inviteId, inviteToken };
   }
 
-  joinInvite(input: { inviteToken: string; displayName: string; deviceName: string }): BootstrapResult & { team: { id: string; slug: string; name: string } } {
+  joinInvite(input: { inviteToken: string; displayName: string; deviceName: string }): JoinInviteResult {
     const invite = this.requireValidInvite(input.inviteToken);
-    const team = this.getTeam(invite.team_id);
-    if (!team) {
-      throw new Error("Team not found");
-    }
+    const target = this.resolveInviteTarget(invite);
 
     const now = new Date().toISOString();
     const userId = createId("usr");
@@ -219,19 +245,27 @@ export class RelayRepository {
       this.db
         .prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values (?, ?, null, ?, ?)")
         .run(userId, input.displayName, now, now);
-      this.db
-        .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
-        .run(team.id, userId, invite.role, now);
+      if (target.inviteType === "team") {
+        this.db
+          .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
+          .run(target.team.id, userId, invite.role, now);
+      } else if (target.inviteType === "room") {
+        this.upsertRoomInviteGrant(target.room.id, userId, invite.permission_preset!, invite.created_by_user_id);
+      }
       this.db
         .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
         .run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
       this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
-      this.auditMemberJoined(team.id, userId, invite.id, input.displayName);
+      if (target.inviteType === "team") {
+        this.auditMemberJoined(target.team.id, userId, invite.id, input.displayName);
+      } else {
+        this.auditInviteUsed(invite, userId, input.displayName);
+      }
     });
     join();
 
     return {
-      team: { id: team.id, slug: team.slug, name: team.name },
+      ...target,
       user: { id: userId, displayName: input.displayName },
       device: { id: deviceId, displayName: input.deviceName },
       deviceToken,
@@ -239,37 +273,42 @@ export class RelayRepository {
     };
   }
 
-  acceptInvite(input: { inviteToken: string; userId: string }): { team: { id: string; slug: string; name: string } } {
+  acceptInvite(input: { inviteToken: string; userId: string }): InviteAcceptanceResult {
     const invite = this.requireValidInvite(input.inviteToken);
-    const team = this.getTeam(invite.team_id);
-    if (!team) {
-      throw new Error("Team not found");
-    }
-    const existing = this.getTeamMembership(team.id, input.userId);
-    if (existing && !existing.revoked_at) {
-      return { team: { id: team.id, slug: team.slug, name: team.name } };
-    }
-
+    const target = this.resolveInviteTarget(invite);
     const user = this.getUser(input.userId);
     if (!user || user.revoked_at) {
       throw new Error("User not found");
     }
 
+    if (target.inviteType === "friend") {
+      return { inviteType: "friend", alreadyConnected: true };
+    }
+
     const now = new Date().toISOString();
     const accept = this.db.transaction(() => {
-      if (existing) {
-        this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(invite.role, team.id, input.userId);
+      if (target.inviteType === "team") {
+        const existing = this.getTeamMembership(target.team.id, input.userId);
+        if (existing) {
+          this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(invite.role, target.team.id, input.userId);
+        } else {
+          this.db
+            .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
+            .run(target.team.id, input.userId, invite.role, now);
+        }
       } else {
-        this.db
-          .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
-          .run(team.id, input.userId, invite.role, now);
+        this.upsertRoomInviteGrant(target.room.id, input.userId, invite.permission_preset!, invite.created_by_user_id);
       }
       this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
-      this.auditMemberJoined(team.id, input.userId, invite.id, user.display_name);
+      if (target.inviteType === "team") {
+        this.auditMemberJoined(target.team.id, input.userId, invite.id, user.display_name);
+      } else {
+        this.auditInviteUsed(invite, input.userId, user.display_name);
+      }
     });
     accept();
 
-    return { team: { id: team.id, slug: team.slug, name: team.name } };
+    return target;
   }
 
   listMembers(teamId: string, includeRevoked: boolean): MemberRow[] {
@@ -559,6 +598,7 @@ export class RelayRepository {
       this.db.prepare("delete from files where room_id = ?").run(input.roomId);
       this.db.prepare("delete from room_capabilities where room_id = ?").run(input.roomId);
       this.db.prepare("delete from acl_rules where room_id = ?").run(input.roomId);
+      this.db.prepare("delete from invites where room_id = ?").run(input.roomId);
       this.db.prepare("delete from rooms where id = ?").run(input.roomId);
       this.audit({
         teamId: null,
@@ -726,6 +766,79 @@ export class RelayRepository {
       throw new Error("Invalid or expired invite");
     }
     return invite;
+  }
+
+  private resolveInviteTarget(invite: InviteRow): InviteGrantResult {
+    if (invite.team_id && invite.room_id) {
+      throw new Error("Invite cannot target both a team and a room");
+    }
+    if (invite.team_id) {
+      if (!invite.role) {
+        throw new Error("Team invite role is missing");
+      }
+      const team = this.getTeam(invite.team_id);
+      if (!team) {
+        throw new Error("Team not found");
+      }
+      return { inviteType: "team", team: { id: team.id, slug: team.slug, name: team.name } };
+    }
+    if (invite.room_id) {
+      if (invite.permission_preset !== "reader" && invite.permission_preset !== "editor") {
+        throw new Error("Room invite permission preset is missing");
+      }
+      const room = this.getRoom(invite.room_id);
+      if (!room) {
+        throw new Error("Room not found");
+      }
+      return { inviteType: "room", room: { id: room.id, name: room.name } };
+    }
+    if (invite.role || invite.permission_preset) {
+      throw new Error("Friend invite cannot carry a role or room preset");
+    }
+    return { inviteType: "friend" };
+  }
+
+  private upsertRoomInviteGrant(roomId: string, userId: string, preset: "reader" | "editor", actorUserId: string): void {
+    const permissions = expandPreset(preset);
+    const existing = this.db
+      .prepare(
+        "select * from acl_rules where room_id = ? and subject_type = 'user' and subject_id = ? and effect = 'allow' and path_pattern = '**/*' order by created_at asc limit 1"
+      )
+      .get(roomId, userId) as AclRuleRow | undefined;
+    if (existing) {
+      this.db.prepare("update acl_rules set permissions_json = ? where id = ?").run(JSON.stringify(permissions), existing.id);
+      this.audit({
+        teamId: null,
+        actorType: "user",
+        actorId: actorUserId,
+        action: "acl.granted",
+        resourceType: "room",
+        resourceId: roomId,
+        metadata: { aclId: existing.id, subjectType: "user", subjectId: userId, permissions, pathPattern: "**/*", updatedByInvite: true }
+      });
+      return;
+    }
+    this.createAclRule({
+      roomId,
+      actorUserId,
+      subjectType: "user",
+      subjectId: userId,
+      effect: "allow",
+      permissions,
+      pathPattern: "**/*"
+    });
+  }
+
+  private auditInviteUsed(invite: InviteRow, userId: string, displayName: string): void {
+    this.audit({
+      teamId: invite.team_id,
+      actorType: "user",
+      actorId: userId,
+      action: "invite.used",
+      resourceType: "invite",
+      resourceId: invite.id,
+      metadata: { displayName, roomId: invite.room_id }
+    });
   }
 
   private auditMemberJoined(teamId: string, userId: string, inviteId: string, displayName: string): void {

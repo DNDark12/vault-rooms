@@ -45,7 +45,10 @@ export class VaultRoomsView extends ItemView {
     container.addClass("vault-rooms-view");
 
     const header = container.createDiv({ cls: "vault-rooms-header" });
-    new Setting(header).setName("Vault Rooms").setHeading();
+    const headerSetting = new Setting(header).setName("Vault Rooms").setHeading();
+    if (this.plugin.canCreateAnyInvite()) {
+      headerSetting.addButton((button) => button.setCta().setButtonText("Invite").onClick(() => this.plugin.openCreateInviteModal()));
+    }
 
     this.renderHostingSection(container);
     this.renderActiveConnectionSection(container);
@@ -342,7 +345,6 @@ export class VaultRoomsView extends ItemView {
           this.render();
         });
       }
-      this.addPanelButton(cardActions, "Invite link", () => this.plugin.createInvite(team.id));
     }
     if (canDelete) {
       const deleteButton = this.addPanelButton(cardActions, "Delete team", () => this.deleteTeamWithConfirm(team));

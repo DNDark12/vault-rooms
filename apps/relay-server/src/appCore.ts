@@ -82,8 +82,9 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     bootstrapPin,
     connectionRegistry
   });
-  registerRoomRoutes(app, repo, { connectionRegistry });
-  registerFriendRoutes(app, repo, { connectionRegistry });
+  const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
+  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry });
+  registerFriendRoutes(app, repo, { publicUrl, connectionRegistry });
   registerFileRoutes(app, repo, {
     maxFileBytes,
     connectionRegistry

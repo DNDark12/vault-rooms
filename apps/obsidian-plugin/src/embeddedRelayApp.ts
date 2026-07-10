@@ -77,8 +77,9 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     bootstrapPin,
     connectionRegistry
   });
-  registerRoomRoutes(routeApp, repo, { connectionRegistry });
-  registerFriendRoutes(routeApp, repo, { connectionRegistry });
+  const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
+  registerRoomRoutes(routeApp, repo, { publicUrl, connectionRegistry });
+  registerFriendRoutes(routeApp, repo, { publicUrl, connectionRegistry });
   registerFileRoutes(routeApp, repo, {
     maxFileBytes,
     connectionRegistry

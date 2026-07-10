@@ -38,10 +38,12 @@ export type DevicePrincipalRow = {
 
 export type InviteRow = {
   id: string;
-  team_id: string;
+  team_id: string | null;
+  room_id: string | null;
+  permission_preset: "reader" | "editor" | null;
   created_by_user_id: string;
   token_hash: string;
-  role: "member" | "admin";
+  role: "member" | "admin" | null;
   expires_at: string;
   max_uses: number;
   use_count: number;
@@ -114,4 +116,3 @@ export type FileVersionWithContentRow = {
   created_at: string;
   content: string;
 };
-

@@ -45,10 +45,12 @@ export function runMigrations(db: RelayDb): void {
 
     create table if not exists invites(
       id text primary key,
-      team_id text not null,
+      team_id text,
+      room_id text,
+      permission_preset text,
       created_by_user_id text not null,
       token_hash text not null,
-      role text not null,
+      role text,
       expires_at text not null,
       max_uses integer not null,
       use_count integer not null,
@@ -137,10 +139,38 @@ export function runMigrations(db: RelayDb): void {
     );
   `);
 
+  rebuildLegacyInvitesTable(db);
+
   // Schema evolution for databases created before a column existed: `create table if not exists`
   // above only bootstraps brand new files, so an already-existing `rooms` table from an older
   // version of the plugin needs the new column added explicitly. Safe to run on every startup.
   addColumnIfMissing(db, "rooms", "conflict_policy", "text not null default 'keep_both'");
+}
+
+function rebuildLegacyInvitesTable(db: RelayDb): void {
+  const columns = db.prepare("pragma table_info(invites)").all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === "room_id")) {
+    return;
+  }
+  // Pending invite links are deliberately ephemeral. Rebuilding this one table is the only way
+  // SQLite can relax the legacy team_id/role NOT NULL constraints without risking durable data.
+  db.exec(`
+    drop table invites;
+    create table invites(
+      id text primary key,
+      team_id text,
+      room_id text,
+      permission_preset text,
+      created_by_user_id text not null,
+      token_hash text not null,
+      role text,
+      expires_at text not null,
+      max_uses integer not null,
+      use_count integer not null,
+      revoked_at text,
+      created_at text not null
+    );
+  `);
 }
 
 function addColumnIfMissing(db: RelayDb, table: string, column: string, definition: string): void {
