@@ -6480,6 +6480,95 @@ function activeServer(settings) {
 
 // src/VaultRoomsSettingTab.ts
 var import_obsidian3 = require("obsidian");
+
+// src/restrictedPorts.ts
+var CHROMIUM_RESTRICTED_PORTS = /* @__PURE__ */ new Set([
+  1,
+  7,
+  9,
+  11,
+  13,
+  15,
+  17,
+  19,
+  20,
+  21,
+  22,
+  23,
+  25,
+  37,
+  42,
+  43,
+  53,
+  69,
+  77,
+  79,
+  87,
+  95,
+  101,
+  102,
+  103,
+  104,
+  109,
+  110,
+  111,
+  113,
+  115,
+  117,
+  119,
+  123,
+  135,
+  137,
+  139,
+  143,
+  161,
+  179,
+  389,
+  427,
+  465,
+  512,
+  513,
+  514,
+  515,
+  526,
+  530,
+  531,
+  532,
+  540,
+  548,
+  554,
+  556,
+  563,
+  587,
+  601,
+  636,
+  989,
+  990,
+  993,
+  995,
+  1719,
+  1720,
+  1723,
+  2049,
+  3659,
+  4045,
+  5060,
+  5061,
+  6e3,
+  6566,
+  6665,
+  6666,
+  6667,
+  6668,
+  6669,
+  6697,
+  10080
+]);
+function isRestrictedPort(port) {
+  return CHROMIUM_RESTRICTED_PORTS.has(port);
+}
+
+// src/VaultRoomsSettingTab.ts
 var VaultRoomsSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(plugin) {
     super(plugin.app, plugin);
@@ -6536,7 +6625,7 @@ var VaultRoomsSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Public URL override").setDesc(
-      "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
+      "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - just the address, no http:// or port needed (both are filled in automatically, and any port you do include is ignored in favor of the server's real one). Leave this field blank entirely to use loopback for this device only."
     ).addText(
       (text) => {
         var _a;
@@ -6555,6 +6644,10 @@ var VaultRoomsSettingTab = class extends import_obsidian3.PluginSettingTab {
         const trimmed = value.trim();
         const parsed = trimmed ? Number.parseInt(trimmed, 10) : void 0;
         if (trimmed && (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535)) {
+          return;
+        }
+        if (parsed !== void 0 && isRestrictedPort(parsed)) {
+          new import_obsidian3.Notice(`Port ${parsed} is blocked by Obsidian's Electron runtime and can never be reached - choose a different port.`);
           return;
         }
         this.plugin.settings.server.port = parsed;
@@ -8492,10 +8585,9 @@ var stringToBytes = qrcode.stringToBytes;
 
 // src/modals/InviteMemberModal.ts
 var InviteMemberModal = class extends import_obsidian6.Modal {
-  constructor(plugin, inviteText, joinUrl) {
+  constructor(plugin, joinUrl) {
     super(plugin.app);
     this.plugin = plugin;
-    this.inviteText = inviteText;
     this.joinUrl = joinUrl;
   }
   onOpen() {
@@ -8516,8 +8608,6 @@ var InviteMemberModal = class extends import_obsidian6.Modal {
       })
     );
     this.renderQrCode(contentEl);
-    contentEl.createEl("p", { text: "Full details (server URL, token, link):" });
-    contentEl.createEl("textarea", { text: this.inviteText }).setAttr("style", "width: 100%; min-height: 100px;");
     new import_obsidian6.Setting(contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
   }
   /** Encodes the same joinUrl already shown above - purely a client-side rendering convenience
@@ -8537,7 +8627,7 @@ var InviteMemberModal = class extends import_obsidian6.Modal {
     wrapper.createEl("p", { text: "Or have them scan this with their phone and forward it to their computer:" });
     const qrContainer = wrapper.createDiv();
     qrContainer.setAttr("style", "display: inline-block; background: #fff; padding: 8px; border-radius: 4px;");
-    const svgMarkup = qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
+    const svgMarkup = qr.createSvgTag({ cellSize: 4, margin: 4 });
     const svgElement = new DOMParser().parseFromString(svgMarkup, "image/svg+xml").documentElement;
     qrContainer.appendChild(qrContainer.doc.importNode(svgElement, true));
   }
@@ -12498,9 +12588,7 @@ function withPort(urlString, port) {
   } catch (e) {
     return urlString;
   }
-  if (!url.port) {
-    url.port = String(port);
-  }
+  url.port = String(port);
   return `${url.protocol}//${url.host}`;
 }
 
@@ -12601,13 +12689,16 @@ async function describeBusyPort(port) {
   return `PORT=${port} is already in use by another app. Stop that app or choose another port.`;
 }
 async function requireAvailablePort(port) {
+  if (isRestrictedPort(port)) {
+    throw new Error(`PORT=${port} is blocked by Obsidian's Electron runtime (a Chromium-restricted port). Choose a different port.`);
+  }
   if (!await isPortAvailable(port)) {
     throw new Error(`PORT=${port} is already in use`);
   }
   return port;
 }
 async function chooseAvailablePort(preferredPort) {
-  if (preferredPort !== void 0 && await isPortAvailable(preferredPort)) {
+  if (preferredPort !== void 0 && !isRestrictedPort(preferredPort) && await isPortAvailable(preferredPort)) {
     return preferredPort;
   }
   for (let port = 8787; port <= 8797; port += 1) {
@@ -13272,9 +13363,7 @@ var VaultRoomsPlugin = class extends import_obsidian16.Plugin {
       );
     }
     const invite = await this.apiFor(server).createInvite(teamId, role);
-    new InviteMemberModal(this, `${invite.serverUrl}
-${invite.inviteToken}
-${invite.joinUrl}`, invite.joinUrl).open();
+    new InviteMemberModal(this, invite.joinUrl).open();
   }
   /**
    * Refreshes this device's own teams (for team-management UI), the full team directory (for the

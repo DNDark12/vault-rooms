@@ -392,7 +392,7 @@ export default class VaultRoomsPlugin extends Plugin {
       );
     }
     const invite = await this.apiFor(server).createInvite(teamId, role);
-    new InviteMemberModal(this, `${invite.serverUrl}\n${invite.inviteToken}\n${invite.joinUrl}`, invite.joinUrl).open();
+    new InviteMemberModal(this, invite.joinUrl).open();
   }
 
   /**

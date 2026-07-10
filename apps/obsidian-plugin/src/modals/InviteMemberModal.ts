@@ -5,7 +5,6 @@ import type VaultRoomsPlugin from "../main.js";
 export class InviteMemberModal extends Modal {
   constructor(
     private readonly plugin: VaultRoomsPlugin,
-    private readonly inviteText: string,
     private readonly joinUrl: string
   ) {
     super(plugin.app);
@@ -29,8 +28,6 @@ export class InviteMemberModal extends Modal {
       })
     );
     this.renderQrCode(contentEl);
-    contentEl.createEl("p", { text: "Full details (server URL, token, link):" });
-    contentEl.createEl("textarea", { text: this.inviteText }).setAttr("style", "width: 100%; min-height: 100px;");
     new Setting(contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
   }
 
@@ -51,7 +48,12 @@ export class InviteMemberModal extends Modal {
     wrapper.createEl("p", { text: "Or have them scan this with their phone and forward it to their computer:" });
     const qrContainer = wrapper.createDiv();
     qrContainer.setAttr("style", "display: inline-block; background: #fff; padding: 8px; border-radius: 4px;");
-    const svgMarkup = qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
+    // No `scalable: true` here: that option makes the library omit width/height entirely
+    // (viewBox only), and an inline <svg> appended straight into the DOM with no explicit size
+    // and no CSS renders at some tiny/near-zero default rather than filling its container - which
+    // is exactly why this showed up as a blank sliver instead of a QR code. Fixed pixel
+    // width/height (the default when scalable isn't passed) always renders at a real size.
+    const svgMarkup = qr.createSvgTag({ cellSize: 4, margin: 4 });
     const svgElement = new DOMParser().parseFromString(svgMarkup, "image/svg+xml").documentElement;
     qrContainer.appendChild(qrContainer.doc.importNode(svgElement, true));
   }
