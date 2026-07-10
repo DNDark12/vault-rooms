@@ -27,14 +27,14 @@ v0.1 has no TLS (see "Security model" below) - tokens and file contents travel i
 
 The repo is a pnpm TypeScript monorepo:
 
-- `apps/relay-server`: Fastify relay, SQLite storage (via `sql.js`, pure JS/WASM - no native build step), REST API, WebSocket sync (`vault-rooms-relay`).
-- `apps/obsidian-plugin`: Obsidian plugin shell, settings, setup/join/room commands, mount/download behavior, sync core behind `VaultAdapter`, and an **embedded copy of the relay server** that runs inside the plugin process (`@vault-rooms/obsidian-plugin`).
+- `apps/relay-server`: relay business logic (repositories, route handlers, sync message handling), SQLite storage (via `sql.js`, pure JS/WASM - no native build step), REST API, WebSocket sync (`vault-rooms-relay`). The standalone runtime here is Fastify-based; see below.
+- `apps/obsidian-plugin`: Obsidian plugin shell, settings, setup/join/room commands, mount/download behavior, sync core behind `VaultAdapter`, and an **embedded relay** that runs inside the plugin process (`@vault-rooms/obsidian-plugin`) - a lightweight `node:http` router plus the `ws` library, not Fastify (Obsidian's community-plugin review flags Fastify/AJV as unwanted bundle weight and "dynamic code execution"); it reuses the same route-handler/repository logic from `apps/relay-server`, just behind a different, much smaller HTTP/WebSocket layer.
 - `packages/protocol`: protocol, types, errors, token/path helpers (`@vault-rooms/protocol`).
 - `packages/policy-engine`: pure ACL evaluator used by both REST and sync (`@vault-rooms/policy`).
 
 There are two ways to run the relay, and both speak the exact same protocol:
 
-1. **Embedded (recommended for most teams).** The Obsidian plugin imports `vault-rooms-relay` directly and runs it in-process. Install the plugin, click **Start server** in the Vault Rooms panel (or Settings → Vault Rooms), and it's listening - no terminal, no separate install, no `.env` file. Config lives in the plugin's Settings tab and is stored the same way as any other Obsidian plugin setting.
+1. **Embedded (recommended for most teams).** The Obsidian plugin runs its own lightweight relay in-process (see above) - install the plugin, click **Start server** in the Vault Rooms panel (or Settings → Vault Rooms), and it's listening - no terminal, no separate install, no `.env` file. Config lives in the plugin's Settings tab and is stored the same way as any other Obsidian plugin setting. Unlike the standalone runtime, the embedded server does **not** auto-detect your LAN IP (see "Security model" below) - set a Public URL override before creating invites.
 2. **Standalone (`pnpm dev:server`).** The original CLI process, configured via `.env`/environment variables. Useful for development, for running the relay on a dedicated always-on machine instead of someone's laptop, or for team sizes where a personal-laptop-as-server model doesn't fit (see "Team size and scaling" below).
 
 Whoever's device is running the relay (embedded or standalone) is "the server." Everyone else's Obsidian plugin is a client that only ever makes outbound HTTP/WebSocket calls to that one server - they never bind a port or run their own relay for the same team (see "Do other members need to run their own server?" below).
@@ -55,7 +55,7 @@ Two other endpoints don't require a device bearer token, by design: joining via 
 
 CORS is intentionally permissive (`*`): the client talks to the relay from Obsidian's Electron process (not a browser page origin) and auth is Bearer-token, not cookie-based, so wildcard CORS carries little risk once bootstrap is PIN+Host gated. This will be revisited if the client ever moves to a real browser origin.
 
-**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The server auto-detects its real LAN IP (a private address like `192.168.x.x` or `10.x.x.x` - specific to your own network, never shown here) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates. If auto-detection fails (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server.
+**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The **standalone** relay (`pnpm dev:server`) auto-detects its real LAN IP (a private address like `192.168.x.x` or `10.x.x.x` - specific to your own network, never shown here) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates; if auto-detection fails there (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server. The **embedded** relay (running inside Obsidian) does not attempt LAN IP auto-detection at all - reading network interfaces is flagged by Obsidian's plugin review as machine fingerprinting - so it always requires a Public URL override to be set before invites will work for anyone but you; without one, invite links default to `127.0.0.1` and will only ever work on your own machine.
 
 ## Revocation and rejoin model
 
@@ -140,7 +140,7 @@ Clicking it opens Obsidian, and if the Vault Rooms plugin is installed there, it
 The link only works if:
 
 1. The recipient already has the Vault Rooms plugin installed (the link cannot install it).
-2. The `server` value is a LAN IP the recipient's machine can actually reach - never `127.0.0.1` (see the security model section above). The host's embedded server always binds LAN, so the printed/embedded URL uses the real LAN IP automatically unless auto-detection failed (see the Public URL override note above).
+2. The `server` value is a LAN IP the recipient's machine can actually reach - never `127.0.0.1` (see the security model section above). The host's server always binds every interface, but only the **standalone** runtime fills in the real LAN IP automatically; the **embedded** runtime needs a Public URL override set first (see the Public URL override note above) or every invite link will embed `127.0.0.1` and only work on the host's own machine.
 3. Both machines are actually on the same LAN. If in doubt, have the recipient open `http://<host-LAN-IP>:<port>/health` in a browser first; if that doesn't load, the invite link won't work either. Common culprits: different subnets, a firewall blocking the port, or Wi-Fi "client/AP isolation" on a guest network (isolation prevents devices on the same Wi-Fi from reaching each other at all).
 
 ## Do other members need to run their own server?
@@ -162,7 +162,7 @@ All of the following are enforced server-side (the UI just calls the same protec
 
 ## Team size and scaling
 
-This is a star topology: one relay, many clients over REST + WebSocket. For a small team (roughly up to a few dozen people editing occasionally) this works fine on ordinary hardware - Fastify comfortably handles tens of concurrent WebSocket connections, and file writes are small, infrequent, human-speed edits, not a write-heavy workload.
+This is a star topology: one relay, many clients over REST + WebSocket. For a small team (roughly up to a few dozen people editing occasionally) this works fine on ordinary hardware - both the standalone (Fastify) and embedded (lightweight `node:http` + `ws`) runtimes comfortably handle tens of concurrent WebSocket connections, and file writes are small, infrequent, human-speed edits, not a write-heavy workload.
 
 What doesn't scale, and matters more as the team grows toward 20-50 people:
 
@@ -213,12 +213,13 @@ To cut a release:
 - No rate-limit tuning UI: the relay applies a strict per-IP limit on the unauthenticated bootstrap endpoint and a WebSocket connection cap to protect the host (the server runs inside Obsidian's process). There is intentionally no general per-request limiter on authenticated traffic - it legitimately scales with vault size (mounting/reconciling an existing room can fire well over a hundred requests in a burst), and an earlier general limiter was removed after it broke sync on established rooms.
 - Single-host star topology: whoever hosts the relay (embedded or standalone) must stay running for the team to sync; see "Team size and scaling."
 - If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one. mDNS/QR discovery to avoid this is on the v0.2 roadmap.
+- The **embedded** relay never auto-detects your LAN IP (see "Security model" above) - you must set a Public URL override before creating an invite, every time your LAN IP changes. The standalone relay still auto-detects.
 
 ## Troubleshooting
 
 - `Test connection` says wrong service: another process is answering on that port.
 - A teammate can't reach the server at all: confirm the invite/server URL uses the host's actual LAN IP, not `127.0.0.1` - see "Invite links" above. Have them test `http://<host-LAN-IP>:<port>/health` in a browser first.
-- B cannot join: confirm the invite server URL embeds the actual bound port and A's real LAN IP, not `127.0.0.1`. If A's LAN IP auto-detection failed, set a Public URL override in Settings → Vault Rooms → Relay server and restart the server.
+- B cannot join: confirm the invite server URL embeds the actual bound port and A's real LAN IP, not `127.0.0.1`. If A is hosting the **embedded** server, this is expected until A sets a Public URL override (embedded never auto-detects); if A is hosting **standalone** and LAN IP auto-detection failed, set a Public URL override in Settings → Vault Rooms → Relay server (or `PUBLIC_URL` for standalone) and restart the server.
 - B can reach `/health` but the invite link does nothing when clicked: confirm the Vault Rooms plugin is installed and enabled on B's machine - the link only opens the Join form, it can't install the plugin.
 - Writes are denied: inspect ACL grants for the user/team and path pattern.
 - Conflicts are expected when two actors edit the same file version.
