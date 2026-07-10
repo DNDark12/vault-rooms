@@ -1,5 +1,7 @@
 # Vault Rooms
 
+![Status: Beta](https://img.shields.io/badge/status-beta-orange) ![Platform: Desktop only](https://img.shields.io/badge/platform-desktop--only-blue) ![Network: Trusted LAN only](https://img.shields.io/badge/network-trusted%20LAN%20only-critical)
+
 ## What it is
 
 Vault Rooms lets you create local rooms for selected folders in your vault with trusted people on the same local network.
@@ -40,6 +42,8 @@ There are two ways to run the relay, and both speak the exact same protocol:
 Whoever's device is running the relay (embedded or standalone) is "the server." Everyone else's Obsidian plugin is a client that only ever makes outbound HTTP/WebSocket calls to that one server - they never bind a port or run their own relay for the same team (see "Do other members need to run their own server?" below).
 
 ## Security model
+
+See [SECURITY.md](SECURITY.md) for the full threat model, token storage, revocation limitations, and how to report a vulnerability. Summary below.
 
 Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes, are generated with a CSPRNG (`crypto.randomBytes`), and only SHA-256 token hashes are stored in SQLite. Per-path `file:read` is enforced on every channel that carries file content - the REST download endpoint, live WebSocket broadcasts, **and** the initial room snapshot a device gets on subscribe/reconnect - so a member whose access list only grants some paths never receives the content (or even the filenames/hashes) of the paths they can't read.
 
