@@ -4,6 +4,7 @@ import type { EmbeddedServerSettings } from "./settings.js";
 import { requestUrlWithTimeout } from "./apiClient.js";
 import { createEmbeddedRelayApp, type EmbeddedRelayApp } from "./embeddedRelayApp.js";
 import { openObsidianSqlJsDb } from "./obsidianSqlJsDb.js";
+import { withPort } from "./publicUrl.js";
 // Bundled directly into main.js by esbuild's "binary" loader - see esbuild.config.mjs. This
 // avoids depending on a separately-shipped sql-wasm.wasm file, which the community-plugin
 // installer would never actually deliver (it only downloads main.js/manifest.json/styles.css).
@@ -65,7 +66,7 @@ export class EmbeddedRelayServer {
       // default) to actually do anything, so this doesn't expose more than intended.
       const port = explicitPort ? await requireAvailablePort(explicitPort) : await chooseAvailablePort(preferredPort);
       const publicUrlOverride = settings.publicUrlOverride?.trim();
-      const publicUrl = publicUrlOverride || `http://127.0.0.1:${port}`;
+      const publicUrl = publicUrlOverride ? withPort(publicUrlOverride, port) : `http://127.0.0.1:${port}`;
       const db = await openObsidianSqlJsDb(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
       let app: EmbeddedRelayApp;
       try {

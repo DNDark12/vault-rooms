@@ -61,7 +61,7 @@ mDNS discovery fundamentally requires binding a UDP socket and listening/broadca
 
 Carried over from a competitive review pass (comparing against Relay, EVC Team Relay, Collaborative Folders, Obsidian Live Share, Self-hosted LiveSync, LAN Vault Sync, and others) - these aren't technical roadmap items, they're constraints on how the project describes itself even as features above ship:
 
-- Don't position as a replacement for Relay, LiveSync, or Git-based sync plugins - Vault Rooms' actual differentiator is "no cloud, no account, LAN-only, room/path-level ACL," not feature-for-feature parity with mature collaboration suites.
+- Vault Rooms' actual differentiator is "no cloud, no account, LAN-only, room/path-level ACL," not feature-for-feature parity with mature collaboration suites.
 - Don't use "real-time collaboration" or "live editing" language that implies Google-Docs-style character-level co-editing until CRDT (P2 #1) actually ships - "live file sync" is the accurate phrase for what v0.1-v0.1.5 do.
 - Don't claim "version control" - no diff/merge UI exists yet (P2 #4 is a rollback viewer at most, not a Git-equivalent history/diff experience).
 - Don't claim E2EE or "secure" without qualification until TLS (P1 #1) ships, and even then, be precise about what's encrypted (transport) versus what isn't (server-side plaintext storage, client-side token storage - see SECURITY.md).

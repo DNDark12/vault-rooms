@@ -25,7 +25,7 @@ The full walkthrough, one device at a time. Every step names the exact command/b
 1. Install the plugin (see "Installing the Obsidian plugin manually" below).
 2. Command palette → **Vault Rooms: Start server** (or Settings → Vault Rooms → Relay server → **Start**). No terminal, no config file.
 3. Find this device's LAN IP - `ipconfig getifaddr en0` (macOS), `hostname -I` (Linux), or `ipconfig` (Windows, look for the active adapter's IPv4 address), typically something like `192.168.x.x` or `10.x.x.x`.
-4. Settings → Vault Rooms → Relay server → **Public URL override** → enter `http://<that-LAN-IP>:8787` (adjust the port if you changed it), then **Stop**/**Start** the server again so it takes effect. This step is mandatory for the embedded server - see "Security model" below for why it doesn't detect this automatically.
+4. Settings → Vault Rooms → Relay server → **Public URL override** → enter `http://<that-LAN-IP>` (the actual port is filled in automatically if you leave it off - only include one yourself if you also set an explicit Port below), then **Stop**/**Start** the server again so it takes effect. This step is mandatory for the embedded server - see "Security model" below for why it doesn't detect this automatically.
 5. Vault Rooms panel → **Set up server** - this makes you the server owner (creates your account/device identity) and optionally creates your first team in the same step.
 6. Vault Rooms panel → **Rooms** section → **Create room** - pick a folder from your vault to share.
 7. Open the room's Settings → grant access to a user or a team (a permission preset like reader/editor, or a custom path pattern and permission set).
