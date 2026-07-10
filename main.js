@@ -6462,14 +6462,13 @@ function confirmModal(app, title, message, ctaText) {
 
 // src/settings.ts
 var DEFAULT_SERVER_SETTINGS = {
-  allowRemoteBootstrap: false,
   maxFileBytes: 5 * 1024 * 1024,
   autoStart: false
 };
 var DEFAULT_SETTINGS = {
   servers: [],
   mountRoot: "Vault Rooms",
-  debounceMs: 750,
+  debounceMs: 300,
   mountedRooms: {},
   roomMountPaths: {},
   server: DEFAULT_SERVER_SETTINGS
@@ -6537,11 +6536,11 @@ var VaultRoomsSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Public URL override").setDesc(
-      "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.42 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
+      "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
     ).addText(
       (text) => {
         var _a;
-        return text.setPlaceholder("192.168.1.42").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
+        return text.setPlaceholder("192.168.1.100").setValue((_a = this.plugin.settings.server.publicUrlOverride) != null ? _a : "").onChange(async (value) => {
           const trimmed = value.trim();
           this.plugin.settings.server.publicUrlOverride = trimmed || void 0;
           await this.plugin.saveSettings();
@@ -6562,17 +6561,11 @@ var VaultRoomsSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Allow remote bootstrap").setDesc("Allow creating the first team from a non-localhost address. Leave off unless you know you need it.").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.server.allowRemoteBootstrap).onChange(async (value) => {
-        this.plugin.settings.server.allowRemoteBootstrap = value;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Max synced file size").setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).").addText(
-      (text) => text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
-        const parsed = Number.parseInt(value, 10);
-        if (Number.isFinite(parsed) && parsed > 0) {
-          this.plugin.settings.server.maxFileBytes = parsed;
+    new import_obsidian3.Setting(containerEl).setName("Max synced file size (MB)").setDesc("Files larger than this are rejected. Default 5 MB.").addText(
+      (text) => text.setValue(String(this.plugin.settings.server.maxFileBytes / (1024 * 1024))).onChange(async (value) => {
+        const parsedMb = Number.parseFloat(value);
+        if (Number.isFinite(parsedMb) && parsedMb > 0) {
+          this.plugin.settings.server.maxFileBytes = Math.round(parsedMb * 1024 * 1024);
           await this.plugin.saveSettings();
         }
       })
@@ -12551,7 +12544,13 @@ var EmbeddedRelayServer = class {
       try {
         app = await createEmbeddedRelayApp(db, {
           publicUrl,
-          allowRemoteBootstrap: settings.allowRemoteBootstrap,
+          // Always false for the embedded runtime: the plugin's own "Set up server" flow
+          // bootstraps over loopback unconditionally (see main.ts's setupServer(), which always
+          // uses status.localUrl), so this never needs relaxing here - it would only widen who
+          // can attempt POST /api/bootstrap on this device from elsewhere on the LAN, for no
+          // benefit to the one workflow that actually needs to bootstrap. Standalone still
+          // exposes this via ALLOW_REMOTE_BOOTSTRAP for its own legitimate remote-bootstrap case.
+          allowRemoteBootstrap: false,
           maxFileBytes: settings.maxFileBytes
         });
         await app.listen({ host: "0.0.0.0", port });

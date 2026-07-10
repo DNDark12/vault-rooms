@@ -72,7 +72,13 @@ export class EmbeddedRelayServer {
       try {
         app = await createEmbeddedRelayApp(db, {
           publicUrl,
-          allowRemoteBootstrap: settings.allowRemoteBootstrap,
+          // Always false for the embedded runtime: the plugin's own "Set up server" flow
+          // bootstraps over loopback unconditionally (see main.ts's setupServer(), which always
+          // uses status.localUrl), so this never needs relaxing here - it would only widen who
+          // can attempt POST /api/bootstrap on this device from elsewhere on the LAN, for no
+          // benefit to the one workflow that actually needs to bootstrap. Standalone still
+          // exposes this via ALLOW_REMOTE_BOOTSTRAP for its own legitimate remote-bootstrap case.
+          allowRemoteBootstrap: false,
           maxFileBytes: settings.maxFileBytes
         });
         await app.listen({ host: "0.0.0.0", port });

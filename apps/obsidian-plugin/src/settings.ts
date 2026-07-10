@@ -18,12 +18,11 @@ export type EmbeddedServerSettings = {
   port?: number;
   /** Runtime-managed remembered auto port. Leave undefined for first auto-pick. */
   pinnedPort?: number;
-  allowRemoteBootstrap: boolean;
   maxFileBytes: number;
   /** Start the embedded relay server automatically when Obsidian loads this vault. */
   autoStart: boolean;
   /**
-   * Manual override for the URL embedded in invite links (e.g. "http://192.168.1.42:8787").
+   * Manual override for the URL embedded in invite links (e.g. "http://192.168.1.100:8787").
    * Leave blank to keep invites on loopback for this device only.
    */
   publicUrlOverride?: string;
@@ -40,7 +39,6 @@ export type VaultRoomsSettings = {
 };
 
 export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
-  allowRemoteBootstrap: false,
   maxFileBytes: 5 * 1024 * 1024,
   autoStart: false
 };
@@ -48,7 +46,7 @@ export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
 export const DEFAULT_SETTINGS: VaultRoomsSettings = {
   servers: [],
   mountRoot: "Vault Rooms",
-  debounceMs: 750,
+  debounceMs: 300,
   mountedRooms: {},
   roomMountPaths: {},
   server: DEFAULT_SERVER_SETTINGS

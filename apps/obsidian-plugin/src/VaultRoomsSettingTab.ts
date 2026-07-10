@@ -81,11 +81,11 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.42 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
+        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - http:// and the actual port are both filled in automatically if you leave them off. Leave this field blank entirely to use loopback for this device only."
       )
       .addText((text) =>
         text
-          .setPlaceholder("192.168.1.42")
+          .setPlaceholder("192.168.1.100")
           .setValue(this.plugin.settings.server.publicUrlOverride ?? "")
           .onChange(async (value) => {
             const trimmed = value.trim();
@@ -116,23 +116,13 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Allow remote bootstrap")
-      .setDesc("Allow creating the first team from a non-localhost address. Leave off unless you know you need it.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.server.allowRemoteBootstrap).onChange(async (value) => {
-          this.plugin.settings.server.allowRemoteBootstrap = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Max synced file size")
-      .setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).")
+      .setName("Max synced file size (MB)")
+      .setDesc("Files larger than this are rejected. Default 5 MB.")
       .addText((text) =>
-        text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
-          const parsed = Number.parseInt(value, 10);
-          if (Number.isFinite(parsed) && parsed > 0) {
-            this.plugin.settings.server.maxFileBytes = parsed;
+        text.setValue(String(this.plugin.settings.server.maxFileBytes / (1024 * 1024))).onChange(async (value) => {
+          const parsedMb = Number.parseFloat(value);
+          if (Number.isFinite(parsedMb) && parsedMb > 0) {
+            this.plugin.settings.server.maxFileBytes = Math.round(parsedMb * 1024 * 1024);
             await this.plugin.saveSettings();
           }
         })
