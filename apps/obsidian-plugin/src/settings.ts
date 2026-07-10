@@ -24,8 +24,7 @@ export type EmbeddedServerSettings = {
   autoStart: boolean;
   /**
    * Manual override for the URL embedded in invite links (e.g. "http://192.168.1.42:8787").
-   * Only needed if LAN IP auto-detection picks the wrong network interface or fails outright
-   * (multiple NICs, VPNs, some Wi-Fi adapters, etc.) - leave blank to use the auto-detected LAN IP.
+   * Leave blank to keep invites on loopback for this device only.
    */
   publicUrlOverride?: string;
 };

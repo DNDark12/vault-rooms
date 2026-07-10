@@ -10,7 +10,7 @@ await esbuild.build({
   // into main.js at build time via esbuild's "binary" loader (base64-encoded, decoded into a
   // Uint8Array at load time) instead of being shipped and read from disk - see serverManager.ts.
   loader: { ".wasm": "binary" },
-  external: ["obsidian", "electron", "@codemirror/autocomplete", "@codemirror/collab", "@codemirror/commands", "@codemirror/language", "@codemirror/lint", "@codemirror/search", "@codemirror/state", "@codemirror/view", "@lezer/common", "@lezer/highlight", "@lezer/lr", ...builtins],
+  external: ["obsidian", "electron", "bufferutil", "utf-8-validate", "@codemirror/autocomplete", "@codemirror/collab", "@codemirror/commands", "@codemirror/language", "@codemirror/lint", "@codemirror/search", "@codemirror/state", "@codemirror/view", "@lezer/common", "@lezer/highlight", "@lezer/lr", ...builtins],
   format: "cjs",
   platform: "node",
   target: "es2018",

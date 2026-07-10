@@ -110,14 +110,17 @@ export class VaultRoomsView extends ItemView {
       if (status.lanUrl) {
         const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
         lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
-        this.addPanelButton(lanRow, "Copy LAN URL", async () => {
-          await navigator.clipboard.writeText(status.lanUrl ?? "");
-          new Notice("LAN URL copied.");
+        const lanInput = lanRow.createEl("input", { value: status.lanUrl });
+        lanInput.readOnly = true;
+        this.addPanelButton(lanRow, "Select LAN URL", () => {
+          lanInput.focus();
+          lanInput.select();
+          new Notice("LAN URL selected.");
         });
       } else {
         card.createEl("div", {
           cls: "vault-rooms-error",
-          text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
+          text: "Invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
         });
       }
     } else if (!status.running && status.error) {

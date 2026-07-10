@@ -41,6 +41,9 @@ importers:
       vault-rooms-relay:
         specifier: workspace:*
         version: link:../relay-server
+      ws:
+        specifier: ^8.18.3
+        version: 8.21.0
     devDependencies:
       builtin-modules:
         specifier: ^4.0.0

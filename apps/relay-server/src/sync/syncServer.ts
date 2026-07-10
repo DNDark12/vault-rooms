@@ -1,11 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { AppError, isEligiblePath, normalizeRelativePath, type SyncClientMessage } from "@vault-rooms/protocol";
 import { createId } from "@vault-rooms/protocol";
-import type WebSocket from "ws";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { isActivePrincipal } from "../db/repositories/relayRepository.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
-import { ConnectionRegistry, sendJson, type SyncConnection } from "./connectionRegistry.js";
+import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
+
+const timerHost = typeof window !== "undefined" ? window : globalThis;
 
 export function registerSyncRoutes(
   app: FastifyInstance,
@@ -13,61 +14,73 @@ export function registerSyncRoutes(
   registry: ConnectionRegistry,
   options: { maxFileBytes: number; maxConnections: number }
 ): void {
-  app.get("/sync", { websocket: true }, (socket: WebSocket) => {
-    if (registry.size() >= options.maxConnections) {
-      socket.close(1013, "Too many connections");
-      return;
+  app.get("/sync", { websocket: true }, (socket) => {
+    handleSyncSocket(socket, repo, registry, options);
+  });
+}
+
+export function handleSyncSocket(
+  socket: SyncSocket & {
+    on(event: "message", listener: (raw: { toString(): string }) => void): void;
+    on(event: "close", listener: () => void): void;
+  },
+  repo: RelayRepository,
+  registry: ConnectionRegistry,
+  options: { maxFileBytes: number; maxConnections: number }
+): void {
+  if (registry.size() >= options.maxConnections) {
+    socket.close(1013, "Too many connections");
+    return;
+  }
+
+  const connection: SyncConnection = {
+    id: createId("req"),
+    socket,
+    principal: null,
+    subscriptions: new Set()
+  };
+  registry.add(connection);
+
+  const ping = timerHost.setInterval(() => {
+    if (socket.readyState === socket.OPEN) {
+      socket.ping();
     }
+  }, 30_000);
 
-    const connection: SyncConnection = {
-      id: createId("req"),
-      socket,
-      principal: null,
-      subscriptions: new Set()
-    };
-    registry.add(connection);
-
-    const ping = setInterval(() => {
-      if (socket.readyState === socket.OPEN) {
-        socket.ping();
+  socket.on("message", (raw) => {
+    // handleMessage is async and this listener can't await it, so any rejection it produces
+    // (a thrown error inside a message-type branch that isn't already caught locally) would
+    // otherwise become an unhandled promise rejection - which, running inside the Obsidian
+    // plugin's own process, risks taking down more than just this one connection. Every
+    // message-type branch below also has its own try/catch for a clean client-facing
+    // rejection; this is the last-resort backstop for anything that slips past those.
+    handleMessage(repo, registry, connection, options, raw.toString()).catch((error) => {
+      console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
+      try {
+        connection.socket.close();
+      } catch {
+        // Socket may already be closed/closing; nothing more to do.
       }
-    }, 30_000);
-
-    socket.on("message", (raw) => {
-      // handleMessage is async and this listener can't await it, so any rejection it produces
-      // (a thrown error inside a message-type branch that isn't already caught locally) would
-      // otherwise become an unhandled promise rejection - which, running inside the Obsidian
-      // plugin's own process, risks taking down more than just this one connection. Every
-      // message-type branch below also has its own try/catch for a clean client-facing
-      // rejection; this is the last-resort backstop for anything that slips past those.
-      handleMessage(repo, registry, connection, options, raw.toString()).catch((error) => {
-        console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
-        try {
-          connection.socket.close();
-        } catch {
-          // Socket may already be closed/closing; nothing more to do.
-        }
-      });
     });
-    socket.on("close", () => {
-      clearInterval(ping);
-      if (connection.principal) {
-        try {
-          repo.audit({
-            teamId: null,
-            actorType: "device",
-            actorId: connection.principal.deviceId,
-            action: "sync.disconnected",
-            resourceType: "device",
-            resourceId: connection.principal.deviceId,
-            metadata: {}
-          });
-        } catch {
-          // Server may already be shutting down (db closed); disconnect audit is best-effort.
-        }
+  });
+  socket.on("close", () => {
+    timerHost.clearInterval(ping);
+    if (connection.principal) {
+      try {
+        repo.audit({
+          teamId: null,
+          actorType: "device",
+          actorId: connection.principal.deviceId,
+          action: "sync.disconnected",
+          resourceType: "device",
+          resourceId: connection.principal.deviceId,
+          metadata: {}
+        });
+      } catch {
+        // Server may already be shutting down (db closed); disconnect audit is best-effort.
       }
-      registry.remove(connection);
-    });
+    }
+    registry.remove(connection);
   });
 }
 
@@ -286,7 +299,7 @@ async function handleMessage(
   }
 }
 
-function sendRejection(socket: WebSocket, requestId: string, error: unknown): void {
+function sendRejection(socket: SyncSocket, requestId: string, error: unknown): void {
   if (error instanceof AppError) {
     const details = error.details as Record<string, unknown> | undefined;
     sendJson(socket, {

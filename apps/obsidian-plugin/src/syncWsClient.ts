@@ -1,5 +1,5 @@
 import type { SyncClientMessage, SyncServerMessage } from "@vault-rooms/protocol";
-import type { RelayApiClient } from "./apiClient.js";
+import { requestUrlWithTimeout, type RelayApiClient } from "./apiClient.js";
 import type { ServerConnection } from "./settings.js";
 import type { MountedRoomState } from "./syncClient.js";
 import { VaultSyncEngine } from "./syncClient.js";
@@ -88,16 +88,12 @@ export class RoomSyncSocket {
   }
 
   private async open(): Promise<void> {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);
     let healthy = false;
     try {
-      const response = await fetch(`${this.server.baseUrl.replace(/\/+$/, "")}/health`, { signal: controller.signal });
-      healthy = response.ok;
+      const response = await requestUrlWithTimeout({ url: `${this.server.baseUrl.replace(/\/+$/, "")}/health`, throw: false }, HEALTH_PROBE_TIMEOUT_MS);
+      healthy = response.status >= 200 && response.status < 300;
     } catch {
       healthy = false;
-    } finally {
-      window.clearTimeout(timeoutId);
     }
     if (this.closedByUser) {
       return;

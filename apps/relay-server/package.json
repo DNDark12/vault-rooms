@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./app-core": "./src/appCore.ts",
+    "./embedded-core": "./src/embeddedCore.ts",
     "./app": "./src/app.ts",
     "./config": "./src/config.ts"
   },

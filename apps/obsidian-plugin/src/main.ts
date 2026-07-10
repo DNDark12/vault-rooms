@@ -387,7 +387,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const status = this.getServerStatus();
     if (status.running && status.lanDetectionFailed) {
       new Notice(
-        "Warning: could not auto-detect this device's LAN IP, so this invite link still points at 127.0.0.1 and will NOT work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then create a new invite.",
+        "Warning: this invite link still points at 127.0.0.1 and will NOT work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, restart the server, then create a new invite.",
         12_000
       );
     }

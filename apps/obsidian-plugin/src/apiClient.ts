@@ -1,3 +1,4 @@
+import { requestUrl, type RequestUrlParam } from "obsidian";
 import type { RelayFileApi } from "./syncClient.js";
 
 export type RoomSummary = {
@@ -83,18 +84,19 @@ export class RelayApiClient implements RelayFileApi {
   ) {}
 
   async testConnection(): Promise<{ ok: true; version: string }> {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 3_000);
+    const response = await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, 3_000);
+    let body: { name?: string; version?: string };
     try {
-      const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
-      const body = (await response.json()) as { name?: string; version?: string };
-      if (body.name !== "vault-rooms") {
-        throw new Error("Something answered, but it is not a Vault Rooms server.");
-      }
-      return { ok: true, version: body.version ?? "unknown" };
-    } finally {
-      window.clearTimeout(timeout);
+      body = response.json as { name?: string; version?: string };
+    } catch {
+      // response.json is a synchronous getter that throws SyntaxError on invalid JSON - e.g. a
+      // router admin page or some other non-Vault-Rooms HTTP service answering on that host/port.
+      throw new Error("Something answered, but it is not a Vault Rooms server.");
     }
+    if (body.name !== "vault-rooms") {
+      throw new Error("Something answered, but it is not a Vault Rooms server.");
+    }
+    return { ok: true, version: body.version ?? "unknown" };
   }
 
   async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; pin: string }): Promise<BootstrapResponse> {
@@ -258,12 +260,14 @@ export class RelayApiClient implements RelayFileApi {
   }
 
   private async request<T = unknown>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await requestUrl({
+      url: `${this.baseUrl}${path}`,
       method: options.method ?? "GET",
       headers: {
-        ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
-        ...(options.body ? { "content-type": "application/json" } : {})
+        ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
       },
+      contentType: options.body ? "application/json" : undefined,
+      throw: false,
       body: options.body ? JSON.stringify(options.body) : undefined
     });
     // A well-behaved relay always answers with JSON (success or error envelope), but a network-
@@ -273,11 +277,11 @@ export class RelayApiClient implements RelayFileApi {
     // of a clean, actionable one.
     let body: unknown;
     try {
-      body = await response.json();
+      body = response.json;
     } catch {
       throw toRelayError(undefined, "Unexpected non-JSON response from relay");
     }
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       const error = toRelayError(body);
       if (error.code === "UNAUTHORIZED") {
         this.onUnauthorized?.();
@@ -286,6 +290,22 @@ export class RelayApiClient implements RelayFileApi {
     }
     return body as T;
   }
+}
+
+export function requestUrlWithTimeout(request: RequestUrlParam, timeoutMs: number): Promise<Awaited<ReturnType<typeof requestUrl>>> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error("Request timed out.")), timeoutMs);
+    requestUrl(request).then(
+      (response) => {
+        window.clearTimeout(timeout);
+        resolve(response);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
 }
 
 type RelayErrorBody = { error?: { message?: string; code?: string; details?: Record<string, unknown> } };

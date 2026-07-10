@@ -1,0 +1,12 @@
+export { runMigrations } from "./db/migrations.js";
+export { RelayRepository } from "./db/repositories/relayRepository.js";
+export { registerAuthRoutes } from "./routes/auth.routes.js";
+export { registerFileRoutes } from "./routes/file.routes.js";
+export { registerFriendRoutes } from "./routes/friend.routes.js";
+export { registerRoomRoutes } from "./routes/room.routes.js";
+export { registerTeamRoutes } from "./routes/team.routes.js";
+export { generateBootstrapPin } from "./security/bootstrapPin.js";
+export { FixedWindowRateLimiter } from "./security/rateLimiter.js";
+export { ConnectionRegistry } from "./sync/connectionRegistry.js";
+export { handleSyncSocket } from "./sync/syncServer.js";
+export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";

@@ -1,5 +1,4 @@
-import { FileSystemAdapter, Notice } from "obsidian";
-import { join } from "node:path";
+import { Notice } from "obsidian";
 import { RelayApiClient } from "../apiClient.js";
 import { activeServer, type ServerConnection } from "../settings.js";
 import { EmbeddedRelayServer, type EmbeddedServerStatus } from "../serverManager.js";
@@ -57,13 +56,8 @@ export class ServerConnectionManager {
 
   private getOrCreateEmbeddedServer(): EmbeddedRelayServer {
     if (!this.embeddedServer) {
-      const adapter = this.ctx.app.vault.adapter;
-      if (!(adapter instanceof FileSystemAdapter)) {
-        throw new Error("Vault Rooms requires the desktop app (filesystem access).");
-      }
-      const pluginDir = join(adapter.getBasePath(), this.ctx.manifest.dir ?? `${this.ctx.app.vault.configDir}/plugins/${this.ctx.manifest.id}`);
-      const dataDir = join(pluginDir, "server-data");
-      this.embeddedServer = new EmbeddedRelayServer(dataDir);
+      const pluginDir = this.ctx.manifest.dir ?? `${this.ctx.app.vault.configDir}/plugins/${this.ctx.manifest.id}`;
+      this.embeddedServer = new EmbeddedRelayServer(this.ctx.app.vault.adapter, `${pluginDir}/server-data/relay.sqlite`);
     }
     return this.embeddedServer;
   }

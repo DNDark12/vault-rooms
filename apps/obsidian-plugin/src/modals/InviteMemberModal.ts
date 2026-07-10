@@ -17,11 +17,14 @@ export class InviteMemberModal extends Modal {
     contentEl.createEl("p", {
       text: "Send this link to a teammate on the same LAN. Clicking it opens Obsidian and pre-fills the join form (Vault Rooms plugin must already be installed on their side)."
     });
-    contentEl.createEl("a", { text: this.joinUrl, href: this.joinUrl }).setAttr("style", "display: block; word-break: break-all; margin-bottom: 12px;");
+    const linkInput = contentEl.createEl("textarea", { text: this.joinUrl });
+    linkInput.readOnly = true;
+    linkInput.setAttr("style", "width: 100%; min-height: 68px; margin-bottom: 12px;");
     new Setting(contentEl).addButton((button) =>
-      button.setButtonText("Copy invite link").onClick(async () => {
-        await navigator.clipboard.writeText(this.joinUrl);
-        new Notice("Invite link copied.");
+      button.setButtonText("Select invite link").onClick(() => {
+        linkInput.focus();
+        linkInput.select();
+        new Notice("Invite link selected.");
       })
     );
     contentEl.createEl("p", { text: "Full details (server URL, token, link):" });

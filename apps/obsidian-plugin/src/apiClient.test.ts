@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { requestUrl } from "obsidian";
 import { RelayApiClient } from "./apiClient.js";
 
 describe("RelayApiClient.request", () => {
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.mocked(requestUrl).mockReset();
   });
 
   it("throws a clean error instead of a raw SyntaxError when the response body is not JSON", async () => {
@@ -11,10 +12,12 @@ describe("RelayApiClient.request", () => {
     // relay - response.json() throws a raw SyntaxError for this, which used to bypass
     // onUnauthorized/toRelayError entirely instead of surfacing a clear, actionable error.
     const response = {
-      ok: false,
-      json: () => Promise.reject(new SyntaxError("Unexpected end of JSON input"))
-    } as unknown as Response;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+      status: 502,
+      get json() {
+        throw new SyntaxError("Unexpected end of JSON input");
+      }
+    };
+    vi.mocked(requestUrl).mockResolvedValue(response as Awaited<ReturnType<typeof requestUrl>>);
 
     const onUnauthorized = vi.fn();
     const client = new RelayApiClient("https://relay.example", "token", onUnauthorized);
@@ -26,10 +29,10 @@ describe("RelayApiClient.request", () => {
 
   it("still parses a valid JSON error envelope and routes UNAUTHORIZED through onUnauthorized", async () => {
     const response = {
-      ok: false,
-      json: () => Promise.resolve({ error: { code: "UNAUTHORIZED", message: "Token no longer valid" } })
-    } as unknown as Response;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+      status: 401,
+      json: { error: { code: "UNAUTHORIZED", message: "Token no longer valid" } }
+    };
+    vi.mocked(requestUrl).mockResolvedValue(response as Awaited<ReturnType<typeof requestUrl>>);
 
     const onUnauthorized = vi.fn();
     const client = new RelayApiClient("https://relay.example", "token", onUnauthorized);
@@ -40,10 +43,10 @@ describe("RelayApiClient.request", () => {
 
   it("returns the parsed JSON body on success", async () => {
     const response = {
-      ok: true,
-      json: () => Promise.resolve({ rooms: [] })
-    } as unknown as Response;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+      status: 200,
+      json: { rooms: [] }
+    };
+    vi.mocked(requestUrl).mockResolvedValue(response as Awaited<ReturnType<typeof requestUrl>>);
 
     const client = new RelayApiClient("https://relay.example", "token");
     await expect(client.listRooms()).resolves.toEqual({ rooms: [] });

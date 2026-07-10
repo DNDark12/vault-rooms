@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { requestUrl } from "obsidian";
 import { RoomSyncSocket, type RoomSyncSocketDeps } from "./syncWsClient.js";
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 import type { ServerConnection } from "./settings.js";
@@ -113,19 +114,20 @@ function stubWebSocket(): ReturnType<typeof vi.fn> {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.mocked(requestUrl).mockReset();
 });
 
 describe("RoomSyncSocket health probe", () => {
   it("schedules a reconnect without constructing a WebSocket when the health probe fails", async () => {
     const WebSocketSpy = stubWebSocket();
     const setTimeoutSpy = vi.spyOn(window, "setTimeout");
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    vi.mocked(requestUrl).mockRejectedValue(new Error("offline"));
     const socket = new RoomSyncSocket(createServer(), createDeps());
 
     socket.connect();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(fetch).toHaveBeenCalledWith("http://localhost:8787/health", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(requestUrl).toHaveBeenCalledWith({ url: "http://localhost:8787/health", throw: false });
     expect(WebSocketSpy).not.toHaveBeenCalled();
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
     socket.disconnect();
@@ -133,7 +135,7 @@ describe("RoomSyncSocket health probe", () => {
 
   it("constructs the WebSocket with the sync URL when the health probe succeeds", async () => {
     const WebSocketSpy = stubWebSocket();
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
     const socket = new RoomSyncSocket(createServer(), createDeps());
 
     socket.connect();

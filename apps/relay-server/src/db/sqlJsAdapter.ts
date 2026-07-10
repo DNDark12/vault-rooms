@@ -17,8 +17,8 @@ export interface RelayDb {
   pragma(pragmaString: string): void;
   transaction<Args extends unknown[], R>(fn: (...args: Args) => R): (...args: Args) => R;
   /** Force any pending writes to disk immediately. No-op for in-memory databases. */
-  flush(): void;
-  close(): void;
+  flush(): void | Promise<void>;
+  close(): void | Promise<void>;
 }
 
 export type SqlJsLocator = {
@@ -29,6 +29,8 @@ export type SqlJsLocator = {
 };
 
 let sqlJsPromise: Promise<SqlJsStatic> | null = null;
+const timerHost = typeof window !== "undefined" ? window : globalThis;
+type FlushTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
 
 function loadSqlJs(locator?: SqlJsLocator): Promise<SqlJsStatic> {
   if (!sqlJsPromise) {
@@ -67,14 +69,14 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
     }
   }
 
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let flushTimer: FlushTimer | null = null;
 
   function flush(): void {
     if (isMemory) {
       return;
     }
     if (flushTimer) {
-      clearTimeout(flushTimer);
+      timerHost.clearTimeout(flushTimer);
       flushTimer = null;
     }
     writeFileSync(dbPath, Buffer.from(sqlDb.export()));
@@ -84,10 +86,10 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
     if (isMemory || flushTimer) {
       return;
     }
-    flushTimer = setTimeout(() => {
+    flushTimer = timerHost.setTimeout(() => {
       flushTimer = null;
       flush();
-    }, 25);
+    }, 25) as FlushTimer;
     flushTimer.unref?.();
   }
 

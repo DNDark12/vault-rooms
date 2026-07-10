@@ -1,4 +1,5 @@
 import { Notice, PluginSettingTab, Setting } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 
@@ -7,10 +8,30 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     super(plugin.app, plugin);
   }
 
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        name: "Vault Rooms settings",
+        searchable: false,
+        render: (setting) => {
+          const { settingEl } = setting;
+          settingEl.empty();
+          this.renderServerSettings(settingEl);
+          this.renderSyncSettings(settingEl);
+          this.renderServersSettings(settingEl);
+        }
+      }
+    ];
+  }
+
+  /** Fallback for Obsidian runtimes that don't call getSettingDefinitions() (pre-1.13, or any
+   *  build where the app doesn't wire that dispatch up) - the app core calls this unconditionally
+   *  when it doesn't know about the declarative API, and gets a TypeError if it's missing. Kept
+   *  in sync with getSettingDefinitions()'s render callback above; only one of the two runs on any
+   *  given Obsidian version, per Obsidian's own SettingTab#display() doc. */
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
     this.renderServersSettings(containerEl);
@@ -32,7 +53,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
               status.lanUrl
                 ? `, LAN: ${status.lanUrl}`
                 : status.lanDetectionFailed
-                  ? " — could NOT auto-detect a LAN IP; invite links will point at 127.0.0.1 and won't work for teammates until you set a Public URL override below, then restart the server."
+                  ? " — invite links will point at 127.0.0.1 until you set a Public URL override below, then restart the server."
                   : ""
             }`
           : status.error
@@ -60,11 +81,11 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "The server always listens on your local network so teammates can connect - no TLS in v0.1, so only run this on networks you trust. Set this only if LAN IP auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers): this device's real LAN address, e.g. http://192.168.1.42:8787. Leave blank to auto-detect."
+        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. http://192.168.1.42:8787. Leave blank to use loopback for this device only."
       )
       .addText((text) =>
         text
-          .setPlaceholder("auto-detect")
+          .setPlaceholder("http://192.168.1.42:8787")
           .setValue(this.plugin.settings.server.publicUrlOverride ?? "")
           .onChange(async (value) => {
             const trimmed = value.trim();

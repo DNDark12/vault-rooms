@@ -1,6 +1,7 @@
 import { normalizePath } from "obsidian";
 import type { Plugin, TAbstractFile, TFile } from "obsidian";
 import type { VaultAdapter, VaultChangeEvent } from "./syncClient.js";
+import { isFile, listFiles } from "./vaultTraversal.js";
 
 export class ObsidianVaultAdapter implements VaultAdapter {
   constructor(private readonly plugin: Plugin) {}
@@ -60,10 +61,11 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async list(prefix: string): Promise<string[]> {
     const normalizedPrefix = normalizePath(prefix).replace(/\/+$/, "");
-    return this.app.vault
-      .getFiles()
-      .map((file) => file.path)
-      .filter((path) => path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`));
+    const root = normalizedPrefix ? this.app.vault.getAbstractFileByPath(normalizedPrefix) : this.app.vault.getRoot();
+    if (!root) {
+      return [];
+    }
+    return listFiles(root).map((file) => file.path);
   }
 
   onChange(cb: (event: VaultChangeEvent) => void): () => void {
@@ -112,6 +114,3 @@ export class ObsidianVaultAdapter implements VaultAdapter {
   }
 }
 
-function isFile(file: TAbstractFile): file is TFile {
-  return "extension" in file;
-}

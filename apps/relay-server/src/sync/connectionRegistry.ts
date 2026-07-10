@@ -1,10 +1,17 @@
-import type WebSocket from "ws";
 import type { SyncServerMessage } from "@vault-rooms/protocol";
 import type { DevicePrincipal } from "../db/repositories/relayRepository.js";
 
+export type SyncSocket = {
+  readonly OPEN: number;
+  readonly readyState: number;
+  send(payload: string): void;
+  close(code?: number, reason?: string): void;
+  ping(): void;
+};
+
 export type SyncConnection = {
   id: string;
-  socket: WebSocket;
+  socket: SyncSocket;
   principal: DevicePrincipal | null;
   subscriptions: Set<string>;
 };
@@ -83,6 +90,6 @@ export class ConnectionRegistry {
   }
 }
 
-export function sendJson(socket: WebSocket, payload: SyncServerMessage): void {
+export function sendJson(socket: SyncSocket, payload: SyncServerMessage): void {
   socket.send(JSON.stringify(payload));
 }
