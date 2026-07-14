@@ -15,6 +15,7 @@ export * from "./security/identityStore.js";
 export * from "./security/rotation.js";
 export { ConnectionRegistry } from "./sync/connectionRegistry.js";
 export { handleSyncSocket } from "./sync/syncServer.js";
+export type { SyncTimerHost } from "./sync/syncServer.js";
 export { createRelayCore } from "./relayCore.js";
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
 export type { RelayCoreOptions } from "./relayCore.js";

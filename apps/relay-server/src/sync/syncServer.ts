@@ -7,13 +7,16 @@ import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 
-const timerHost = typeof window !== "undefined" ? window : globalThis;
+export type SyncTimerHost = {
+  setInterval(callback: () => void, delayMs: number): unknown;
+  clearInterval(handle: unknown): void;
+};
 
 export function registerSyncRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number }
+  options: { maxFileBytes: number; maxConnections: number; timerHost: SyncTimerHost }
 ): void {
   app.get("/sync", { websocket: true }, (socket, request) => {
     handleSyncSocket(socket, repo, registry, { ...options, transport: requestTransport(request) });
@@ -27,7 +30,7 @@ export function handleSyncSocket(
   },
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number; transport: RequestTransport }
+  options: { maxFileBytes: number; maxConnections: number; transport: RequestTransport; timerHost: SyncTimerHost }
 ): void {
   if (registry.size() >= options.maxConnections) {
     socket.close(1013, "Too many connections");
@@ -42,7 +45,7 @@ export function handleSyncSocket(
   };
   registry.add(connection);
 
-  const ping = timerHost.setInterval(() => {
+  const ping = options.timerHost.setInterval(() => {
     if (socket.readyState === socket.OPEN) {
       socket.ping();
     }
@@ -65,7 +68,7 @@ export function handleSyncSocket(
     });
   });
   socket.on("close", () => {
-    timerHost.clearInterval(ping);
+    options.timerHost.clearInterval(ping);
     if (connection.principal) {
       try {
         repo.audit({

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "node:timers";
 import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic } from "sql.js";
 
 export type SqlRow = Record<string, unknown>;
@@ -35,8 +36,19 @@ export type SqlJsLocator = {
 };
 
 let sqlJsPromise: Promise<SqlJsStatic> | null = null;
-const timerHost = typeof window !== "undefined" ? window : globalThis;
-type FlushTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
+type FlushTimer = number | ReturnType<typeof setNodeTimeout>;
+
+function setFlushTimeout(callback: () => void, delayMs: number): FlushTimer {
+  return typeof window !== "undefined" ? window.setTimeout(callback, delayMs) : setNodeTimeout(callback, delayMs);
+}
+
+function clearFlushTimeout(timer: FlushTimer): void {
+  if (typeof timer === "number") {
+    window.clearTimeout(timer);
+  } else {
+    clearNodeTimeout(timer);
+  }
+}
 
 function loadSqlJs(locator?: SqlJsLocator): Promise<SqlJsStatic> {
   if (!sqlJsPromise) {
@@ -82,7 +94,7 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
       return;
     }
     if (flushTimer) {
-      timerHost.clearTimeout(flushTimer);
+      clearFlushTimeout(flushTimer);
       flushTimer = null;
     }
     const temporaryPath = `${dbPath}.tmp`;
@@ -104,11 +116,13 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
     if (isMemory || flushTimer) {
       return;
     }
-    flushTimer = timerHost.setTimeout(() => {
+    flushTimer = setFlushTimeout(() => {
       flushTimer = null;
       flush();
     }, 25);
-    flushTimer.unref?.();
+    if (typeof flushTimer !== "number") {
+      flushTimer.unref();
+    }
   }
 
   function prepare(sql: string): PreparedStatement {

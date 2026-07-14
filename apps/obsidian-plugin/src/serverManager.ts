@@ -348,7 +348,7 @@ export class EmbeddedRelayServer {
       this.identityStore = null;
       this.securityRuntimeState = null;
       this.status = { running: false, error: "TLS enforcement listener shutdown failed; embedded relay stopped." };
-      const cleanupErrors = cleanup.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+      const cleanupErrors = rejectionErrors(cleanup);
       throw new AggregateError(
         [error, ...cleanupErrors],
         "TLS enforcement committed but legacy listener shutdown failed; embedded relay stopped."
@@ -407,8 +407,8 @@ export class EmbeddedRelayServer {
       this.identityStore = null;
       this.securityRuntimeState = null;
       this.status = { running: false, error: "Identity rotation rollback failed; embedded relay stopped." };
-      const rollbackErrors = rollback.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
-      const cleanupErrors = cleanup.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+      const rollbackErrors = rejectionErrors(rollback);
+      const cleanupErrors = rejectionErrors(cleanup);
       throw new AggregateError(
         [error, ...rollbackErrors, ...cleanupErrors],
         "Identity rotation failed and rollback was incomplete; the embedded relay was stopped."
@@ -474,6 +474,17 @@ function withHttpsPort(urlString: string, port: number): string {
 
 function toArrayBuffer(buffer: Uint8Array): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+}
+
+function rejectionErrors(results: readonly PromiseSettledResult<unknown>[]): Error[] {
+  const errors: Error[] = [];
+  for (const result of results) {
+    if (result.status === "rejected") {
+      const reason: unknown = result.reason;
+      errors.push(reason instanceof Error ? reason : new Error(String(reason)));
+    }
+  }
+  return errors;
 }
 
 function isExplicitPortBusyError(error: unknown, port: number): boolean {

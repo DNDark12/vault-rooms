@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
+import { clearInterval as clearNodeInterval, setInterval as setNodeInterval } from "node:timers";
 import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
 import type { RelayDb } from "./db/sqlJsAdapter.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
@@ -11,7 +12,12 @@ import { assertTransportAllowed, registerSecurityRoutes, type RequestTransport }
 import { registerTeamRoutes } from "./routes/team.routes.js";
 import { createRelayCore, type RelayCoreOptions } from "./relayCore.js";
 import { certPemToDerBase64Url } from "./security/identity.js";
-import { registerSyncRoutes } from "./sync/syncServer.js";
+import { registerSyncRoutes, type SyncTimerHost } from "./sync/syncServer.js";
+
+const nodeSyncTimerHost: SyncTimerHost = {
+  setInterval: (callback, delayMs) => setNodeInterval(callback, delayMs),
+  clearInterval: (handle) => clearNodeInterval(handle as ReturnType<typeof setNodeInterval>)
+};
 
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
 
@@ -123,7 +129,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     registerSecurityRoutes(app, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
   }
   void app.register(async (syncApp) => {
-    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections });
+    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections, timerHost: nodeSyncTimerHost });
   });
 
   if (options.ownsDb !== false) {

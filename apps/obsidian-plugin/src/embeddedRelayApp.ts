@@ -27,7 +27,8 @@ import {
   type RelayDb,
   type InviteSecurityContext,
   type RequestTransport,
-  type SecurityRuntime
+  type SecurityRuntime,
+  type SyncTimerHost
 } from "vault-rooms-relay/embedded-core";
 
 type SyncSocketLike = Parameters<typeof handleSyncSocket>[0];
@@ -72,6 +73,10 @@ type Route = {
 
 const MIN_WEBSOCKET_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const SOCKET_CLOSE_GRACE_MS = 500;
+const windowSyncTimerHost: SyncTimerHost = {
+  setInterval: (callback, delayMs) => window.setInterval(callback, delayMs),
+  clearInterval: (handle) => window.clearInterval(handle as number)
+};
 
 export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelayAppOptions = {}): Promise<EmbeddedRelayApp> {
   const core = options.core ?? createRelayCore(db, options);
@@ -86,7 +91,12 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
   } = core;
   const security = options.security ?? core.security;
   const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket, transport) => {
-    handleSyncSocket(socket, repo, connectionRegistry, { maxFileBytes, maxConnections, transport });
+    handleSyncSocket(socket, repo, connectionRegistry, {
+      maxFileBytes,
+      maxConnections,
+      transport,
+      timerHost: windowSyncTimerHost
+    });
   }, options.publicUrl ?? "http://127.0.0.1:8787");
 
   app.get("/health", async (): Promise<HealthResponse> => ({

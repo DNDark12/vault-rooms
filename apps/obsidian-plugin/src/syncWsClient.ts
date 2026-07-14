@@ -184,7 +184,7 @@ export class RoomSyncSocket {
         return;
       }
       this.handlingPinnedFailure = true;
-      const eventError = (event as ErrorEvent).error;
+      const eventError: unknown = "error" in event ? (event as { error?: unknown }).error : undefined;
       const error = event instanceof Error ? event : eventError instanceof Error ? eventError : new Error("Pinned WebSocket connection failed.");
       void this.deps.onPinnedTransportFailure(error).then(
         (decision) => {

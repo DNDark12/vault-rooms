@@ -1,5 +1,6 @@
 import { Modal, Setting, type App } from "obsidian";
 import type { ServerConnection } from "../settings.js";
+import { setDestructiveCompat } from "../obsidianCompat.js";
 
 type PinMismatchActions = {
   onJoinWithNewInvite?: () => void;
@@ -44,9 +45,7 @@ export class PinMismatchModal extends Modal {
         })
       )
       .addButton((button) =>
-        button
-          .setButtonText("Remove saved connection")
-          .setWarning()
+        setDestructiveCompat(button.setButtonText("Remove saved connection"))
           .onClick(async () => {
             await this.actions.onRemoveSavedConnection?.();
             this.close();

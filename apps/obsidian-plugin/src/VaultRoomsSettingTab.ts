@@ -4,6 +4,7 @@ import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
 import { pinnedInfoForServer } from "./controllers/ServerConnectionManager.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
+import { refreshSettingTab, setDestructiveCompat } from "./obsidianCompat.js";
 import { isRestrictedPort } from "./restrictedPorts.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
@@ -17,11 +18,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         name: "Vault Rooms settings",
         searchable: false,
         render: (setting) => {
-          const { settingEl } = setting;
-          settingEl.empty();
-          this.renderServerSettings(settingEl);
-          this.renderSyncSettings(settingEl);
-          this.renderServersSettings(settingEl);
+          this.renderSettings(setting.settingEl);
         }
       }
     ];
@@ -33,11 +30,18 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
    *  in sync with getSettingDefinitions()'s render callback above; only one of the two runs on any
    *  given Obsidian version, per Obsidian's own SettingTab#display() doc. */
   display(): void {
-    const { containerEl } = this;
+    this.renderSettings(this.containerEl);
+  }
+
+  private renderSettings(containerEl: HTMLElement): void {
     containerEl.empty();
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
     this.renderServersSettings(containerEl);
+  }
+
+  private refresh(): void {
+    refreshSettingTab(this, (containerEl) => this.renderSettings(containerEl));
   }
 
   private renderServerSettings(containerEl: HTMLElement): void {
@@ -77,7 +81,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             } catch (error) {
               new Notice(error instanceof Error ? error.message : "Vault Rooms server action failed");
             }
-            this.display();
+            this.refresh();
           })
       );
 
@@ -199,7 +203,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         button.setButtonText("Use").setDisabled(active).onClick(async () => {
           try {
             await this.plugin.activateServer(server.id);
-            this.display();
+            this.refresh();
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "Server switch failed");
           }
@@ -215,15 +219,13 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         })
       );
       setting.addButton((button) =>
-        button
-          .setButtonText("Forget")
-          .setWarning()
+        setDestructiveCompat(button.setButtonText("Forget"))
           .onClick(async () => {
             if (!(await confirmModal(this.app, "Forget server", `Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`, "Forget"))) {
               return;
             }
             await this.plugin.forgetServer(server.id);
-            this.display();
+            this.refresh();
           })
       );
     }
@@ -244,7 +246,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             const mode = await chooseMigrationMode(this.app);
             if (!mode) return;
             await this.plugin.enableTlsMigration(mode);
-            this.display();
+            this.refresh();
           })
         );
       return;
@@ -259,9 +261,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         .setName("TLS migration")
         .setDesc(`${detail} — ${status.plainDeviceCount ?? 0} active device(s) still seen on legacy HTTP.`)
         .addButton((button) =>
-          button
-            .setButtonText("Enforce TLS")
-            .setWarning()
+          setDestructiveCompat(button.setButtonText("Enforce TLS"))
             .onClick(async () => {
               if (
                 !(await confirmModal(
@@ -274,7 +274,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
                 return;
               }
               await this.plugin.enforceTls();
-              this.display();
+              this.refresh();
             })
         );
       return;
@@ -284,9 +284,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       .setName("Pinned TLS")
       .setDesc(detail)
       .addButton((button) =>
-        button
-          .setButtonText("Rotate server identity")
-          .setWarning()
+        setDestructiveCompat(button.setButtonText("Rotate server identity"))
           .onClick(async () => {
             if (
               !(await confirmModal(
@@ -299,7 +297,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
               return;
             }
             await this.plugin.rotateIdentity();
-            this.display();
+            this.refresh();
           })
       );
   }
