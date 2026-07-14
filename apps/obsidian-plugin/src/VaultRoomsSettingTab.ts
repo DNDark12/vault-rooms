@@ -1,6 +1,8 @@
-import { Notice, PluginSettingTab, Setting } from "obsidian";
+import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
+import type { MigrationMode } from "@vault-rooms/protocol";
 import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
+import { pinnedInfoForServer } from "./controllers/ServerConnectionManager.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import { isRestrictedPort } from "./restrictedPorts.js";
 
@@ -78,6 +80,10 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             this.display();
           })
       );
+
+    if (status.running) {
+      this.renderTransportSecurity(containerEl, status);
+    }
 
     new Setting(containerEl)
       .setName("Public URL override")
@@ -202,7 +208,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       setting.addButton((button) =>
         button.setButtonText("Test").onClick(async () => {
           try {
-            await this.plugin.testConnection(server.baseUrl);
+            await this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server));
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "Connection failed");
           }
@@ -222,4 +228,114 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       );
     }
   }
+
+  private renderTransportSecurity(
+    containerEl: HTMLElement,
+    status: Extract<ReturnType<VaultRoomsPlugin["getServerStatus"]>, { running: true }>
+  ): void {
+    if (status.securityState === "plain_legacy") {
+      new Setting(containerEl)
+        .setName("Transport security")
+        .setDesc(
+          "This team is using legacy plaintext HTTP/WS. Tokens and content are not encrypted on the LAN. Enable TLS migration to protect future traffic."
+        )
+        .addButton((button) =>
+          button.setButtonText("Enable TLS migration").onClick(async () => {
+            const mode = await chooseMigrationMode(this.app);
+            if (!mode) return;
+            await this.plugin.enableTlsMigration(mode);
+            this.display();
+          })
+        );
+      return;
+    }
+
+    const identity = status.pinnedInfo;
+    const detail = identity
+      ? `${identity.tlsName} — fingerprint ${identity.pinnedIdentitySpkiSha256}${status.httpsUrl ? ` — ${status.httpsUrl}` : ""}`
+      : "Pinned identity unavailable";
+    if (status.securityState === "tls_migrating") {
+      new Setting(containerEl)
+        .setName("TLS migration")
+        .setDesc(`${detail} — ${status.plainDeviceCount ?? 0} active device(s) still seen on legacy HTTP.`)
+        .addButton((button) =>
+          button
+            .setButtonText("Enforce TLS")
+            .setWarning()
+            .onClick(async () => {
+              if (
+                !(await confirmModal(
+                  this.app,
+                  "Enforce TLS",
+                  "Disable the legacy HTTP/WS listener now? Devices that have not migrated will stop connecting.",
+                  "Enforce TLS"
+                ))
+              ) {
+                return;
+              }
+              await this.plugin.enforceTls();
+              this.display();
+            })
+        );
+      return;
+    }
+
+    new Setting(containerEl)
+      .setName("Pinned TLS")
+      .setDesc(detail)
+      .addButton((button) =>
+        button
+          .setButtonText("Rotate server identity")
+          .setWarning()
+          .onClick(async () => {
+            if (
+              !(await confirmModal(
+                this.app,
+                "Rotate server identity",
+                "Rotate the pinned server identity and restart only the TLS listener? Connected TLS clients will verify the signed rotation before reconnecting.",
+                "Rotate identity"
+              ))
+            ) {
+              return;
+            }
+            await this.plugin.rotateIdentity();
+            this.display();
+          })
+      );
+  }
+}
+
+function chooseMigrationMode(app: App): Promise<MigrationMode | null> {
+  return new Promise((resolve) => {
+    class MigrationModeModal extends Modal {
+      private selected: MigrationMode | null = null;
+
+      onOpen(): void {
+        this.setTitle("Enable TLS migration");
+        this.contentEl.createEl("p", {
+          text: "Normal migration lets authenticated legacy devices learn the new pin over their existing HTTP connection. Strict migration requires a fresh pinned invite link from the owner."
+        });
+        new Setting(this.contentEl)
+          .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+          .addButton((button) =>
+            button.setButtonText("Normal").setCta().onClick(() => {
+              this.selected = "non_strict";
+              this.close();
+            })
+          )
+          .addButton((button) =>
+            button.setButtonText("Strict").onClick(() => {
+              this.selected = "strict";
+              this.close();
+            })
+          );
+      }
+
+      onClose(): void {
+        this.contentEl.empty();
+        resolve(this.selected);
+      }
+    }
+    new MigrationModeModal(app).open();
+  });
 }

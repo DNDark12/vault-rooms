@@ -1,6 +1,7 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { defaultDeviceName } from "./deviceName.js";
+import { assertPinMaterial, type PinnedInviteInfo } from "../pinnedTransport.js";
 
 export class JoinTeamModal extends Modal {
   private inviteInput = "";
@@ -17,7 +18,8 @@ export class JoinTeamModal extends Modal {
     private readonly plugin: VaultRoomsPlugin,
     private readonly mode: "join" | "rejoin" = "join",
     serverUrl = "",
-    inviteToken = ""
+    inviteToken = "",
+    private pin?: PinnedInviteInfo
   ) {
     super(plugin.app);
     this.serverUrl = serverUrl;
@@ -95,7 +97,7 @@ export class JoinTeamModal extends Modal {
       .addText((text) => text.setValue(this.deviceName || defaultDeviceName()).onChange((value) => (this.deviceName = value.trim())));
     new Setting(contentEl).addButton((button) =>
       button.setButtonText("Test connection").onClick(async () => {
-        await this.plugin.testConnection(this.serverUrl);
+        await this.plugin.testConnection(this.serverUrl, this.pin);
       })
     );
     new Setting(contentEl).addButton((button) =>
@@ -108,7 +110,7 @@ export class JoinTeamModal extends Modal {
 
   private async submit(): Promise<void> {
     try {
-      await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop");
+      await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop", this.pin);
       this.close();
     } catch (error) {
       new Notice(error instanceof Error ? error.message : "Join failed");
@@ -125,6 +127,7 @@ export class JoinTeamModal extends Modal {
     }
     this.serverUrl = parsed.serverUrl;
     this.inviteToken = parsed.inviteToken;
+    this.pin = parsed.pin;
     if (render) {
       this.onOpen();
     }
@@ -132,7 +135,7 @@ export class JoinTeamModal extends Modal {
   }
 }
 
-function parseInviteInput(input: string): { serverUrl?: string; inviteToken?: string } {
+function parseInviteInput(input: string): { serverUrl?: string; inviteToken?: string; pin?: PinnedInviteInfo } {
   const text = input.trim();
   const parsed = parseInviteUrl(text);
   if (parsed.serverUrl || parsed.inviteToken) {
@@ -144,12 +147,26 @@ function parseInviteInput(input: string): { serverUrl?: string; inviteToken?: st
   return { serverUrl, inviteToken };
 }
 
-function parseInviteUrl(input: string): { serverUrl?: string; inviteToken?: string } {
+function parseInviteUrl(input: string): { serverUrl?: string; inviteToken?: string; pin?: PinnedInviteInfo } {
   try {
     const url = new URL(input);
+    const security = url.searchParams.get("security");
+    const serverId = url.searchParams.get("serverId");
+    const tlsName = url.searchParams.get("tlsName");
+    const pinnedIdentitySpkiSha256 = url.searchParams.get("fp");
+    const identityCertificateDer = url.searchParams.get("idc");
+    const pin =
+      security === "pinned-tls" && serverId && tlsName && pinnedIdentitySpkiSha256 && identityCertificateDer
+        ? { serverId, tlsName, pinnedIdentitySpkiSha256, identityCertificateDer }
+        : undefined;
+    if (security === "pinned-tls" && !pin) {
+      return {};
+    }
+    if (pin) assertPinMaterial(pin);
     return {
       serverUrl: url.searchParams.get("server") ?? undefined,
-      inviteToken: url.searchParams.get("token") ?? url.searchParams.get("inviteToken") ?? undefined
+      inviteToken: url.searchParams.get("token") ?? url.searchParams.get("inviteToken") ?? undefined,
+      pin
     };
   } catch {
     return {};

@@ -3,10 +3,13 @@ import {
   createId,
   createToken,
   hashToken,
+  verifyInviteAcceptanceProofForTokenHash,
   type AclEffect,
   type AclRule,
   type CapabilityMode,
+  type MigrationMode,
   type Permission,
+  type ServerSecurityState,
   type SubjectType,
   type TeamRole
 } from "@vault-rooms/protocol";
@@ -37,6 +40,7 @@ export type DevicePrincipal = {
   userDisplayName: string;
   userRevokedAt: string | null;
   isServerOwner: boolean;
+  tokenSecurity: "plain" | "tls";
 };
 
 export type UserTeam = {
@@ -78,6 +82,10 @@ export class RelayRepository {
     );
   }
 
+  durable<T>(operation: () => T): Promise<T> {
+    return this.db.durable(operation);
+  }
+
   getServerOwnerId(): string | null {
     const row = this.db.prepare("select value from server_meta where key = 'owner_user_id'").get() as { value: string } | undefined;
     return row?.value ?? null;
@@ -87,7 +95,47 @@ export class RelayRepository {
     this.db.prepare("insert or replace into server_meta(key, value) values ('owner_user_id', ?)").run(userId);
   }
 
-  bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string }): BootstrapResult {
+  getOrCreateServerId(): string {
+    const existing = this.db.prepare("select value from server_meta where key = 'server_id'").get() as { value: string } | undefined;
+    if (existing) {
+      return existing.value;
+    }
+    const serverId = createId("srv");
+    this.db.prepare("insert into server_meta(key, value) values ('server_id', ?)").run(serverId);
+    return serverId;
+  }
+
+  setServerId(serverId: string): void {
+    this.db.prepare("insert or replace into server_meta(key, value) values ('server_id', ?)").run(serverId);
+  }
+
+  wasMigratedFromLegacyV01(): boolean {
+    return Boolean(this.db.prepare("select 1 from server_meta where key = 'legacy_v01_migrated' and value = '1'").get());
+  }
+
+  getSecurityState(): ServerSecurityState {
+    const row = this.db.prepare("select value from server_meta where key = 'security_state'").get() as { value: ServerSecurityState } | undefined;
+    return row?.value ?? "plain_legacy";
+  }
+
+  hasExplicitSecurityState(): boolean {
+    return Boolean(this.db.prepare("select 1 as present from server_meta where key = 'security_state'").get());
+  }
+
+  setSecurityState(state: ServerSecurityState): void {
+    this.db.prepare("insert or replace into server_meta(key, value) values ('security_state', ?)").run(state);
+  }
+
+  getMigrationMode(): MigrationMode {
+    const row = this.db.prepare("select value from server_meta where key = 'migration_mode'").get() as { value: MigrationMode } | undefined;
+    return row?.value ?? "non_strict";
+  }
+
+  setMigrationMode(mode: MigrationMode): void {
+    this.db.prepare("insert or replace into server_meta(key, value) values ('migration_mode', ?)").run(mode);
+  }
+
+  bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; tokenSecurity: "plain" | "tls" }): BootstrapResult {
     const now = new Date().toISOString();
     const userId = createId("usr");
     const deviceId = createId("dev");
@@ -95,12 +143,17 @@ export class RelayRepository {
     let team: { id: string; slug: string; name: string } | undefined;
 
     const create = this.db.transaction(() => {
+      if (this.getServerOwnerId()) {
+        throw new AppError("PERMISSION_DENIED", "Bootstrap has already been completed.", 403);
+      }
       this.db
         .prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values (?, ?, null, ?, ?)")
         .run(userId, input.displayName, now, now);
       this.db
-        .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
-        .run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
+        .prepare(
+          "insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, last_transport, token_security, created_at) values (?, ?, ?, ?, null, null, null, ?, ?)"
+        )
+        .run(deviceId, userId, input.deviceName, hashToken(deviceToken), input.tokenSecurity ?? "plain", now);
       this.setServerOwner(userId);
 
       if (input.teamName) {
@@ -137,6 +190,69 @@ export class RelayRepository {
     };
   }
 
+  recoverServerOwnerDevice(input: { deviceName: string; tokenSecurity: "plain" | "tls" }): BootstrapResult & { isServerOwner: true } {
+    const recover = this.db.transaction(() => {
+      const ownerUserId = this.getServerOwnerId();
+      const owner = ownerUserId ? this.getUser(ownerUserId) : null;
+      if (!owner || owner.revoked_at) {
+        throw new AppError("NOT_FOUND", "Active server owner not found.", 404);
+      }
+      const now = new Date().toISOString();
+      const deviceId = createId("dev");
+      const deviceToken = createToken("dev");
+      this.db
+        .prepare(
+          "insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, last_transport, token_security, created_at) values (?, ?, ?, ?, null, null, null, ?, ?)"
+        )
+        .run(deviceId, owner.id, input.deviceName, hashToken(deviceToken), input.tokenSecurity, now);
+      this.audit({
+        teamId: null,
+        actorType: "system",
+        actorId: owner.id,
+        action: "owner.device_recovered",
+        resourceType: "device",
+        resourceId: deviceId,
+        metadata: { tokenSecurity: input.tokenSecurity }
+      });
+      return {
+        user: { id: owner.id, displayName: owner.display_name },
+        device: { id: deviceId, displayName: input.deviceName },
+        deviceToken,
+        isServerOwner: true
+      } satisfies BootstrapResult & { isServerOwner: true };
+    });
+    return recover();
+  }
+
+  revokeRecoveredOwnerDevice(deviceId: string): void {
+    const revoke = this.db.transaction(() => {
+      const ownerUserId = this.getServerOwnerId();
+      const device = this.db.prepare("select user_id, revoked_at from devices where id = ?").get(deviceId) as
+        | { user_id: string; revoked_at: string | null }
+        | undefined;
+      const recoveryAudit = this.db
+        .prepare("select 1 from audit_events where action = 'owner.device_recovered' and resource_id = ?")
+        .get(deviceId);
+      if (!ownerUserId || !device || device.user_id !== ownerUserId || !recoveryAudit) {
+        throw new AppError("VALIDATION_ERROR", "Device is not a recovery device for the server owner.", 422);
+      }
+      if (device.revoked_at) {
+        return;
+      }
+      this.db.prepare("update devices set revoked_at = ? where id = ?").run(new Date().toISOString(), deviceId);
+      this.audit({
+        teamId: null,
+        actorType: "system",
+        actorId: ownerUserId,
+        action: "owner.device_recovery_rolled_back",
+        resourceType: "device",
+        resourceId: deviceId,
+        metadata: {}
+      });
+    });
+    revoke();
+  }
+
   authenticateDeviceToken(token: string): DevicePrincipal | null {
     const row = this.db
       .prepare(
@@ -148,7 +264,8 @@ export class RelayRepository {
             u.id as user_id,
             u.display_name as user_display_name,
             u.revoked_at as user_revoked_at,
-            (select value from server_meta where key = 'owner_user_id') as server_owner_id
+            (select value from server_meta where key = 'owner_user_id') as server_owner_id,
+            d.token_security
           from devices d
           join users u on u.id = d.user_id
           where d.token_hash = ?
@@ -156,6 +273,26 @@ export class RelayRepository {
       )
       .get(hashToken(token)) as DevicePrincipalRow | undefined;
     return row ? mapPrincipal(row) : null;
+  }
+
+  authenticateDeviceInviteProof(input: {
+    deviceId: string;
+    deviceProof: string;
+    serverId: string;
+    inviteToken: string;
+    identitySpkiSha256: string;
+  }): DevicePrincipal | null {
+    const row = this.db
+      .prepare("select token_hash, token_security from devices where id = ? and revoked_at is null")
+      .get(input.deviceId) as { token_hash: string; token_security: "plain" | "tls" } | undefined;
+    if (
+      !row ||
+      row.token_security !== "plain" ||
+      !verifyInviteAcceptanceProofForTokenHash(row.token_hash, input.deviceProof, input)
+    ) {
+      return null;
+    }
+    return this.authenticateDeviceById(input.deviceId);
   }
 
   // Registers an additional device for an existing user. There is no REST route for this yet
@@ -169,6 +306,36 @@ export class RelayRepository {
       .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
       .run(deviceId, input.userId, input.deviceName, hashToken(deviceToken), now);
     return { deviceId, deviceToken };
+  }
+
+  markDeviceTransport(deviceId: string, transport: "http" | "https"): void {
+    this.db.prepare("update devices set last_transport = ?, last_seen_at = ? where id = ? and revoked_at is null").run(
+      transport,
+      new Date().toISOString(),
+      deviceId
+    );
+  }
+
+  countActiveDevicesOnPlainTransport(): number {
+    const row = this.db
+      .prepare(
+        `
+          select count(*) as count
+          from devices d
+          join users u on u.id = d.user_id
+          where d.last_transport = 'http' and d.revoked_at is null and u.revoked_at is null
+        `
+      )
+      .get() as { count: number };
+    return row.count;
+  }
+
+  rotateDeviceToken(deviceId: string): { deviceToken: string } {
+    return this.db.transaction(() => this.rotateDeviceTokenWithinTransaction(deviceId, "tls_migration"))();
+  }
+
+  isLegacyPlainToken(principal: DevicePrincipal): boolean {
+    return principal.tokenSecurity === "plain";
   }
 
   listUserTeams(userId: string): UserTeam[] {
@@ -232,7 +399,7 @@ export class RelayRepository {
     return { inviteId, inviteToken };
   }
 
-  joinInvite(input: { inviteToken: string; displayName: string; deviceName: string }): JoinInviteResult {
+  joinInvite(input: { inviteToken: string; displayName: string; deviceName: string; tokenSecurity: "plain" | "tls" }): JoinInviteResult {
     const invite = this.requireValidInvite(input.inviteToken);
     const target = this.resolveInviteTarget(invite);
 
@@ -253,8 +420,10 @@ export class RelayRepository {
         this.upsertRoomInviteGrant(target.room.id, userId, invite.permission_preset!, invite.created_by_user_id);
       }
       this.db
-        .prepare("insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, created_at) values (?, ?, ?, ?, null, null, ?)")
-        .run(deviceId, userId, input.deviceName, hashToken(deviceToken), now);
+        .prepare(
+          "insert into devices(id, user_id, display_name, token_hash, revoked_at, last_seen_at, last_transport, token_security, created_at) values (?, ?, ?, ?, null, null, null, ?, ?)"
+        )
+        .run(deviceId, userId, input.deviceName, hashToken(deviceToken), input.tokenSecurity ?? "plain", now);
       this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
       if (target.inviteType === "team") {
         this.auditMemberJoined(target.team.id, userId, invite.id, input.displayName);
@@ -274,6 +443,32 @@ export class RelayRepository {
   }
 
   acceptInvite(input: { inviteToken: string; userId: string }): InviteAcceptanceResult {
+    return this.db.transaction(() => this.acceptInviteWithinTransaction(input))();
+  }
+
+  acceptInviteAndMaybeRotateDeviceToken(input: {
+    inviteToken: string;
+    userId: string;
+    deviceId: string;
+    transport: "http" | "https";
+  }): InviteAcceptanceResult & { deviceToken?: string } {
+    return this.db.transaction(() => {
+      const accepted = this.acceptInviteWithinTransaction(input);
+      const principal = this.authenticateDeviceById(input.deviceId);
+      if (!principal || principal.userId !== input.userId) {
+        throw new AppError("UNAUTHORIZED", "Invalid device credentials.", 401);
+      }
+      if (input.transport !== "https" || principal.tokenSecurity === "tls") {
+        return accepted;
+      }
+      return {
+        ...accepted,
+        ...this.rotateDeviceTokenWithinTransaction(input.deviceId, "pinned_invite_accept")
+      };
+    })();
+  }
+
+  private acceptInviteWithinTransaction(input: { inviteToken: string; userId: string }): InviteAcceptanceResult {
     const invite = this.requireValidInvite(input.inviteToken);
     const target = this.resolveInviteTarget(invite);
     const user = this.getUser(input.userId);
@@ -286,27 +481,24 @@ export class RelayRepository {
     }
 
     const now = new Date().toISOString();
-    const accept = this.db.transaction(() => {
-      if (target.inviteType === "team") {
-        const existing = this.getTeamMembership(target.team.id, input.userId);
-        if (existing) {
-          this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(invite.role, target.team.id, input.userId);
-        } else {
-          this.db
-            .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
-            .run(target.team.id, input.userId, invite.role, now);
-        }
+    if (target.inviteType === "team") {
+      const existing = this.getTeamMembership(target.team.id, input.userId);
+      if (existing) {
+        this.db.prepare("update team_members set role = ?, revoked_at = null where team_id = ? and user_id = ?").run(invite.role, target.team.id, input.userId);
       } else {
-        this.upsertRoomInviteGrant(target.room.id, input.userId, invite.permission_preset!, invite.created_by_user_id);
+        this.db
+          .prepare("insert into team_members(team_id, user_id, role, revoked_at, created_at) values (?, ?, ?, null, ?)")
+          .run(target.team.id, input.userId, invite.role, now);
       }
-      this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
-      if (target.inviteType === "team") {
-        this.auditMemberJoined(target.team.id, input.userId, invite.id, user.display_name);
-      } else {
-        this.auditInviteUsed(invite, input.userId, user.display_name);
-      }
-    });
-    accept();
+    } else {
+      this.upsertRoomInviteGrant(target.room.id, input.userId, invite.permission_preset!, invite.created_by_user_id);
+    }
+    this.db.prepare("update invites set use_count = use_count + 1 where id = ?").run(invite.id);
+    if (target.inviteType === "team") {
+      this.auditMemberJoined(target.team.id, input.userId, invite.id, user.display_name);
+    } else {
+      this.auditInviteUsed(invite, input.userId, user.display_name);
+    }
 
     return target;
   }
@@ -768,6 +960,51 @@ export class RelayRepository {
     return invite;
   }
 
+  private authenticateDeviceById(deviceId: string): DevicePrincipal | null {
+    const row = this.db
+      .prepare(
+        `
+          select
+            d.id as device_id,
+            d.display_name as device_display_name,
+            d.revoked_at as device_revoked_at,
+            u.id as user_id,
+            u.display_name as user_display_name,
+            u.revoked_at as user_revoked_at,
+            (select value from server_meta where key = 'owner_user_id') as server_owner_id,
+            d.token_security
+          from devices d
+          join users u on u.id = d.user_id
+          where d.id = ?
+        `
+      )
+      .get(deviceId) as DevicePrincipalRow | undefined;
+    return row ? mapPrincipal(row) : null;
+  }
+
+  private rotateDeviceTokenWithinTransaction(
+    deviceId: string,
+    reason: "tls_migration" | "pinned_invite_accept"
+  ): { deviceToken: string } {
+    const deviceToken = createToken("dev");
+    const result = this.db
+      .prepare("update devices set token_hash = ?, token_security = 'tls' where id = ? and revoked_at is null")
+      .run(hashToken(deviceToken), deviceId);
+    if (result.changes !== 1) {
+      throw new AppError("NOT_FOUND", "Active device not found.", 404);
+    }
+    this.audit({
+      teamId: null,
+      actorType: "device",
+      actorId: deviceId,
+      action: "device.token_rotated",
+      resourceType: "device",
+      resourceId: deviceId,
+      metadata: { reason }
+    });
+    return { deviceToken };
+  }
+
   private resolveInviteTarget(invite: InviteRow): InviteGrantResult {
     if (invite.team_id && invite.room_id) {
       throw new Error("Invite cannot target both a team and a room");
@@ -905,7 +1142,8 @@ function mapPrincipal(row: DevicePrincipalRow): DevicePrincipal {
     userId: row.user_id,
     userDisplayName: row.user_display_name,
     userRevokedAt: row.user_revoked_at,
-    isServerOwner: row.server_owner_id === row.user_id
+    isServerOwner: row.server_owner_id === row.user_id,
+    tokenSecurity: row.token_security
   };
 }
 

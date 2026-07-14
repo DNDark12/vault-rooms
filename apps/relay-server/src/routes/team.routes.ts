@@ -6,7 +6,8 @@ import type { TeamRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
-import { toInviteResponse } from "./inviteResponse.js";
+import { toInviteResponse, type InviteSecurityContext } from "./inviteResponse.js";
+import { requestTransport } from "./security.routes.js";
 
 export type TeamRoutesOptions = {
   publicUrl: string;
@@ -14,6 +15,7 @@ export type TeamRoutesOptions = {
   /** Unguessable per-process PIN required by POST /api/bootstrap - see security/bootstrapPin.ts. */
   bootstrapPin: string;
   connectionRegistry?: ConnectionRegistry;
+  security?: InviteSecurityContext;
 };
 
 export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, options: TeamRoutesOptions): void {
@@ -52,11 +54,14 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "displayName and deviceName are required.", 422);
     }
 
-    return repo.bootstrapServer({
-      displayName: body.displayName,
-      deviceName: body.deviceName,
-      teamName: body.teamName
-    });
+    return repo.durable(() =>
+      repo.bootstrapServer({
+        displayName: body.displayName!,
+        deviceName: body.deviceName!,
+        teamName: body.teamName,
+        tokenSecurity: requestTransport(request) === "https" ? "tls" : "plain"
+      })
+    );
   });
 
   app.post("/api/teams", async (request) => {
@@ -105,14 +110,16 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "role must be member or admin.", 422);
     }
 
-    const invite = repo.createInvite({
-      teamId,
-      createdByUserId: principal.userId,
-      role,
-      expiresInMinutes: body.expiresInMinutes ?? 60,
-      maxUses: body.maxUses ?? 1
-    });
-    return toInviteResponse(invite, options.publicUrl);
+    const invite = await repo.durable(() =>
+      repo.createInvite({
+        teamId,
+        createdByUserId: principal.userId,
+        role,
+        expiresInMinutes: body.expiresInMinutes ?? 60,
+        maxUses: body.maxUses ?? 1
+      })
+    );
+    return toInviteResponse(invite, options.publicUrl, repo.getSecurityState() === "plain_legacy" ? undefined : options.security);
   });
 
   app.get("/api/teams/:teamId/members", async (request: FastifyRequest) => {

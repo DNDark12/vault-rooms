@@ -1,4 +1,6 @@
 import { requestUrl, type RequestUrlParam } from "obsidian";
+import type { SecurityUpgradeInfo } from "@vault-rooms/protocol";
+import { pinnedRequest, type PinnedServerInfo } from "./pinnedTransport.js";
 import type { RelayFileApi } from "./syncClient.js";
 
 export type RoomSummary = {
@@ -65,7 +67,9 @@ export type InviteGrantResult =
   | { inviteType: "friend" };
 
 export type InviteJoinResponse = BootstrapResponse & InviteGrantResult;
-export type InviteAcceptanceResponse = InviteGrantResult | { inviteType: "friend"; alreadyConnected: true };
+export type InviteAcceptanceResponse = (InviteGrantResult | { inviteType: "friend"; alreadyConnected: true }) & {
+  deviceToken?: string;
+};
 
 export type AclRuleSummary = {
   id: string;
@@ -90,11 +94,32 @@ export class RelayApiClient implements RelayFileApi {
      * itself isn't malformed, the server simply has no record of it. Lets the caller (the plugin)
      * flag the saved team as needing to be re-set-up/re-joined instead of just failing silently.
      */
-    private readonly onUnauthorized?: () => void
+    private readonly onUnauthorized?: () => void,
+    private readonly pinned?: PinnedServerInfo,
+    private readonly onAuthenticated?: () => void,
+    private readonly onPinnedTransportFailure?: (error: Error) => Promise<"retry" | "normal" | "stop">
   ) {}
 
   async testConnection(): Promise<{ ok: true; version: string }> {
-    const response = await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, 3_000);
+    return this.testConnectionAttempt(true);
+  }
+
+  private async testConnectionAttempt(allowPinnedRecovery: boolean): Promise<{ ok: true; version: string }> {
+    let response: Awaited<ReturnType<typeof pinnedRequest>> | Awaited<ReturnType<typeof requestUrlWithTimeout>>;
+    try {
+      response = this.pinned
+        ? await pinnedRequest(this.pinned, { url: `${this.baseUrl}/health`, timeoutMs: 3_000 })
+        : await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, 3_000);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+        const decision = await this.onPinnedTransportFailure(normalized);
+        if (decision === "retry") {
+          return this.testConnectionAttempt(false);
+        }
+      }
+      throw normalized;
+    }
     let body: { name?: string; version?: string };
     try {
       body = response.json as { name?: string; version?: string };
@@ -117,6 +142,7 @@ export class RelayApiClient implements RelayFileApi {
   }
 
   async me(): Promise<{
+    serverId?: string;
     user: { id: string; displayName: string };
     device: { id: string; displayName: string };
     isServerOwner: boolean;
@@ -125,10 +151,29 @@ export class RelayApiClient implements RelayFileApi {
     return this.request("/api/me");
   }
 
+  async securityUpgradeInfo(): Promise<SecurityUpgradeInfo> {
+    return this.request("/api/security/upgrade-info");
+  }
+
+  async completeTlsMigration(): Promise<{ deviceToken: string }> {
+    return this.request("/api/security/complete-tls-migration", { method: "POST" });
+  }
+
   async acceptInvite(inviteToken: string): Promise<InviteAcceptanceResponse> {
     return this.request("/api/invites/accept", {
       method: "POST",
       body: { inviteToken }
+    });
+  }
+
+  async acceptInviteWithProof(input: {
+    inviteToken: string;
+    deviceId: string;
+    deviceProof: string;
+  }): Promise<InviteAcceptanceResponse> {
+    return this.request("/api/invites/accept", {
+      method: "POST",
+      body: input
     });
   }
 
@@ -283,17 +328,41 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  private async request<T = unknown>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
-    const response = await requestUrl({
-      url: `${this.baseUrl}${path}`,
-      method: options.method ?? "GET",
-      headers: {
-        ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
-      },
-      contentType: options.body ? "application/json" : undefined,
-      throw: false,
-      body: options.body ? JSON.stringify(options.body) : undefined
-    });
+  private async request<T = unknown>(
+    path: string,
+    options: { method?: string; body?: unknown } = {},
+    allowPinnedRecovery = true
+  ): Promise<T> {
+    const headers = {
+      ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+      ...(options.body ? { "content-type": "application/json" } : {})
+    };
+    let response: Awaited<ReturnType<typeof pinnedRequest>> | Awaited<ReturnType<typeof requestUrl>>;
+    try {
+      response = this.pinned
+        ? await pinnedRequest(this.pinned, {
+            url: `${this.baseUrl}${path}`,
+            method: options.method ?? "GET",
+            headers,
+            body: options.body ? JSON.stringify(options.body) : undefined
+          })
+        : await requestUrl({
+            url: `${this.baseUrl}${path}`,
+            method: options.method ?? "GET",
+            headers,
+            throw: false,
+            body: options.body ? JSON.stringify(options.body) : undefined
+          });
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+        const decision = await this.onPinnedTransportFailure(normalized);
+        if (decision === "retry") {
+          return this.request(path, options, false);
+        }
+      }
+      throw normalized;
+    }
     // A well-behaved relay always answers with JSON (success or error envelope), but a network-
     // level proxy, an empty response, or a truncated body could hand back something that isn't -
     // response.json() throws a raw SyntaxError for that, which would bypass toRelayError()'s
@@ -312,6 +381,7 @@ export class RelayApiClient implements RelayFileApi {
       }
       throw error;
     }
+    this.onAuthenticated?.();
     return body as T;
   }
 }

@@ -88,6 +88,30 @@ export class ConnectionRegistry {
       }
     }
   }
+
+  closeDeviceConnections(deviceId: string, reason: "credentials_rotated"): void {
+    for (const connection of this.connections) {
+      if (connection.principal?.deviceId === deviceId) {
+        connection.socket.close(4001, reason);
+      }
+    }
+  }
+
+  closeLegacyPlainTokenConnections(): void {
+    for (const connection of this.connections) {
+      if (connection.principal?.tokenSecurity === "plain") {
+        connection.socket.close(4002, "tls_enforced");
+      }
+    }
+  }
+
+  broadcastAuthenticated(message: SyncServerMessage): void {
+    for (const connection of this.connections) {
+      if (connection.principal && connection.socket.readyState === connection.socket.OPEN) {
+        sendJson(connection.socket, message);
+      }
+    }
+  }
 }
 
 export function sendJson(socket: SyncSocket, payload: SyncServerMessage): void {

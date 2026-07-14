@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DataAdapter } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js/dist/sql-wasm-browser.js";
-import { openObsidianSqlJsDb } from "./obsidianSqlJsDb.js";
+import { runMigrations } from "../../relay-server/src/db/migrations.js";
+import { LEGACY_V01_SCHEMA, RELEASED_V01_SCHEMA } from "../../relay-server/test/fixtures/legacyV01.js";
+import { openObsidianSqlJsDb, restoreObsidianLegacyV01Backup } from "./obsidianSqlJsDb.js";
 
 // obsidianSqlJsDb.ts calls window.setTimeout/clearTimeout directly (it only ever runs embedded,
 // inside Obsidian, so it has no need for the timerHost fallback the shared standalone/embedded
@@ -23,6 +25,10 @@ class FakeDataAdapter implements Pick<DataAdapter, AdapterMethod> {
   /** Per-call artificial delay (ms) for writeBinary, consumed FIFO - lets a test make one write
    *  slower than another to deterministically reproduce/verify flush ordering. */
   writeDelaysMs: number[] = [];
+  writeFailures = 0;
+  writeBinaryCalls = 0;
+  readonly failingWriteCalls = new Set<number>();
+  rejectRenameOverwrite = false;
 
   async exists(path: string): Promise<boolean> {
     return this.store.has(path) || this.folders.has(path);
@@ -38,9 +44,14 @@ class FakeDataAdapter implements Pick<DataAdapter, AdapterMethod> {
   }
 
   async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
+    this.writeBinaryCalls += 1;
     const delay = this.writeDelaysMs.shift() ?? 0;
     if (delay > 0) {
       await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    if (this.writeFailures > 0 || this.failingWriteCalls.has(this.writeBinaryCalls)) {
+      this.writeFailures = Math.max(0, this.writeFailures - 1);
+      throw new Error("simulated durable write failure");
     }
     this.store.set(path, data.slice(0));
   }
@@ -58,6 +69,9 @@ class FakeDataAdapter implements Pick<DataAdapter, AdapterMethod> {
     const data = this.store.get(normalizedPath);
     if (!data) {
       throw new Error(`Missing file: ${normalizedPath}`);
+    }
+    if (this.rejectRenameOverwrite && this.store.has(normalizedNewPath)) {
+      throw new Error("Destination file already exists!");
     }
     this.store.set(normalizedNewPath, data);
     this.store.delete(normalizedPath);
@@ -142,26 +156,136 @@ describe("openObsidianSqlJsDb - legacy archive detection (A1)", () => {
     }
   });
 
-  it("archives a legacy database (devices.team_id present) and replaces it with a fresh database", async () => {
+  it("backs up a legacy database without moving it and preserves its data through migration", async () => {
     const { SQL, wasmBinary } = await loadSqlJs();
     const adapter = new FakeDataAdapter();
     const dbPath = "vault-rooms/relay.sqlite";
-    const legacyBytes = bytesFromSchema(SQL, "create table devices (id integer, team_id integer)");
+    const legacyBytes = bytesFromSchema(
+      SQL,
+      `${LEGACY_V01_SCHEMA}
+       insert into users values ('usr_owner', 'Owner', '2026-01-01', '2026-01-01');
+       insert into teams values ('team_a', 'alpha', 'Alpha', 'usr_owner', '2026-01-01', '2026-01-01');
+       insert into team_members values ('team_a', 'usr_owner', 'owner', null, '2026-01-01');
+       insert into devices values ('dev_owner', 'team_a', 'usr_owner', 'Mac', 'token-hash', null, null, '2026-01-01');`
+    );
     await adapter.writeBinary(dbPath, legacyBytes);
 
     const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
     try {
+      runMigrations(db);
       expect(adapter.store.has(`${dbPath}.bak-v1`)).toBe(true);
-      // ArrayBuffer has no enumerable own properties, so toEqual() on raw ArrayBuffers can't tell
-      // byte content apart - compare via Uint8Array views instead.
       expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(legacyBytes));
+      expect(db.prepare("select token_hash from devices where id = 'dev_owner'").get()).toEqual({ token_hash: "token-hash" });
     } finally {
       await db.close();
     }
-    // The fresh DB replacing the legacy one only gets flushed to disk on close()/scheduleFlush -
-    // after close() above, dbPath should hold a brand-new (empty-schema) database, not the legacy
-    // bytes that got moved to .bak-v1.
     expect(new Uint8Array(adapter.store.get(dbPath)!)).not.toEqual(new Uint8Array(legacyBytes));
+  });
+
+  it("backs up the exact released v0.1 schema before its additive migration", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const releasedBytes = bytesFromSchema(
+      SQL,
+      `${RELEASED_V01_SCHEMA}
+       insert into users values ('usr_owner', 'Owner', null, '2026-01-01', '2026-01-01');
+       insert into server_meta values ('owner_user_id', 'usr_owner');
+       insert into devices values ('dev_owner', 'usr_owner', 'Mac', 'release-token-hash', null, null, '2026-01-01');`
+    );
+    await adapter.writeBinary(dbPath, releasedBytes);
+
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    try {
+      runMigrations(db);
+      expect(adapter.store.has(`${dbPath}.bak-v1`)).toBe(true);
+      expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(releasedBytes));
+      expect(db.prepare("select value from server_meta where key = 'legacy_v01_migrated'").get()).toEqual({ value: "1" });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("recovers an already-archived v0.1 database when the active replacement is empty", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+
+    const empty = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    runMigrations(empty);
+    await empty.close();
+
+    const legacyBytes = bytesFromSchema(
+      SQL,
+      `${LEGACY_V01_SCHEMA}
+       insert into users values ('usr_owner', 'Owner', '2026-01-01', '2026-01-01');
+       insert into teams values ('team_a', 'alpha', 'Alpha', 'usr_owner', '2026-01-01', '2026-01-01');
+       insert into team_members values ('team_a', 'usr_owner', 'owner', null, '2026-01-01');
+       insert into devices values ('dev_owner', 'team_a', 'usr_owner', 'Mac', 'token-hash', null, null, '2026-01-01');`
+    );
+    await adapter.writeBinary(`${dbPath}.bak-v1`, legacyBytes);
+
+    const recovered = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    try {
+      runMigrations(recovered);
+      expect(recovered.prepare("select token_hash from devices where id = 'dev_owner'").get()).toEqual({ token_hash: "token-hash" });
+    } finally {
+      await recovered.close();
+    }
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(legacyBytes));
+  });
+
+  it("restores a legacy backup explicitly while retaining the current database separately", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const active = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    runMigrations(active);
+    active.prepare("insert into users(id, display_name, revoked_at, created_at, updated_at) values ('usr_new', 'New', null, 'now', 'now')").run();
+    active.prepare("insert into server_meta(key, value) values ('owner_user_id', 'usr_new')").run();
+    await active.close();
+    const activeBytes = adapter.store.get(dbPath)!;
+    const legacyBytes = bytesFromSchema(SQL, LEGACY_V01_SCHEMA);
+    await adapter.writeBinary(`${dbPath}.bak-v1`, legacyBytes);
+
+    const result = await restoreObsidianLegacyV01Backup(asDataAdapter(adapter), dbPath, { wasmBinary });
+
+    expect(result.previousDatabaseBackupPath).toBe(`${dbPath}.pre-v01-restore`);
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.pre-v01-restore`)!)).toEqual(new Uint8Array(activeBytes));
+    expect(new Uint8Array(adapter.store.get(dbPath)!)).toEqual(new Uint8Array(legacyBytes));
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(legacyBytes));
+  });
+
+  it("accepts an exact released v0.1 database for explicit restoration", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const activeBytes = bytesFromSchema(SQL, "create table current_data(id text); insert into current_data values ('keep');");
+    const releasedBytes = bytesFromSchema(SQL, RELEASED_V01_SCHEMA);
+    await adapter.writeBinary(dbPath, activeBytes);
+    await adapter.writeBinary(`${dbPath}.bak-v1`, releasedBytes);
+
+    await restoreObsidianLegacyV01Backup(asDataAdapter(adapter), dbPath, { wasmBinary });
+
+    expect(new Uint8Array(adapter.store.get(dbPath)!)).toEqual(new Uint8Array(releasedBytes));
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(releasedBytes));
+  });
+
+  it("leaves both databases intact when explicit legacy restoration cannot promote its copy", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const activeBytes = bytesFromSchema(SQL, "create table current_data(id text); insert into current_data values ('keep');");
+    const legacyBytes = bytesFromSchema(SQL, LEGACY_V01_SCHEMA);
+    await adapter.writeBinary(dbPath, activeBytes);
+    await adapter.writeBinary(`${dbPath}.bak-v1`, legacyBytes);
+    adapter.failingWriteCalls.add(adapter.writeBinaryCalls + 2);
+
+    await expect(restoreObsidianLegacyV01Backup(asDataAdapter(adapter), dbPath, { wasmBinary })).rejects.toThrow("simulated durable write failure");
+
+    expect(new Uint8Array(adapter.store.get(dbPath)!)).toEqual(new Uint8Array(activeBytes));
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(legacyBytes));
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.pre-v01-restore`)!)).toEqual(new Uint8Array(activeBytes));
   });
 });
 
@@ -179,6 +303,29 @@ function selectValue(db: InstanceType<SqlJsStatic["Database"]>): { value: string
 }
 
 describe("openObsidianSqlJsDb - flush serialization (A2)", () => {
+  it("replaces an existing database when DataAdapter rename refuses to overwrite its destination", async () => {
+    const { wasmBinary, SQL } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    adapter.rejectRenameOverwrite = true;
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    db.prepare("insert into kv (id, value) values (1, ?)").run("before");
+    await db.flush();
+
+    await expect(
+      db.durable(() => db.prepare("update kv set value = ? where id = 1").run("after"))
+    ).resolves.toEqual({ changes: 1 });
+
+    const persisted = new SQL.Database(new Uint8Array(adapter.store.get(dbPath)!));
+    try {
+      expect(selectValue(persisted)).toEqual({ value: "after" });
+    } finally {
+      persisted.close();
+      await db.close();
+    }
+  });
+
   it("serializes overlapping flushes so the last write's bytes are what ends up persisted", async () => {
     const { wasmBinary } = await loadSqlJs();
     const adapter = new FakeDataAdapter();
@@ -254,5 +401,61 @@ describe("openObsidianSqlJsDb - flush serialization (A2)", () => {
       check.close();
       await db.close();
     }
+  });
+
+  it("rolls a durable mutation back in memory and leaves the previous database file intact when persistence fails", async () => {
+    const { wasmBinary, SQL } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    db.prepare("insert into kv (id, value) values (1, ?)").run("stable");
+    await db.flush();
+
+    const durable = (db as unknown as { durable?: <T>(operation: () => T) => Promise<T> }).durable;
+    expect(durable).toBeTypeOf("function");
+    adapter.writeFailures = 1;
+
+    await expect(
+      durable!.call(db, () => db.prepare("update kv set value = ? where id = 1").run("uncommitted"))
+    ).rejects.toThrow("simulated durable write failure");
+
+    expect(db.prepare("select value from kv where id = 1").get()).toEqual({ value: "stable" });
+    expect(adapter.store.has(`${dbPath}.tmp`)).toBe(false);
+    const persisted = new SQL.Database(new Uint8Array(adapter.store.get(dbPath)!));
+    try {
+      expect(selectValue(persisted)).toEqual({ value: "stable" });
+    } finally {
+      persisted.close();
+      await db.close();
+    }
+  });
+
+  it("blocks unrelated writers while a rollback-capable durable image is in flight", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    db.prepare("insert into kv (id, value) values (1, ?)").run("stable");
+    await db.flush();
+
+    adapter.writeDelaysMs = [0, 250];
+    adapter.failingWriteCalls.add(adapter.writeBinaryCalls + 2);
+    let durableError: unknown;
+    const durable = db
+      .durable(() => db.prepare("update kv set value = ? where id = 1").run("security-new"))
+      .catch((error: unknown) => {
+        durableError = error;
+      });
+    await vi.waitFor(() => expect(db.prepare("select value from kv where id = 1").get()).toEqual({ value: "security-new" }));
+
+    expect(() => db.prepare("update kv set value = ? where id = 1").run("unrelated-write")).toThrow(
+      "durable persistence"
+    );
+    await durable;
+    expect(durableError).toMatchObject({ message: "simulated durable write failure" });
+    expect(db.prepare("select value from kv where id = 1").get()).toEqual({ value: "stable" });
+    await db.close();
   });
 });

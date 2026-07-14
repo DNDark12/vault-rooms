@@ -165,7 +165,8 @@ function buildClient(input: {
     deviceName: input.deviceName,
     deviceToken: input.deviceToken,
     isServerOwner: false,
-    status: "active"
+    status: "active",
+    securityMode: "plain"
   };
   const api = new RelayApiClient(input.baseUrl, input.deviceToken);
   const syncEngine = new VaultSyncEngine(vault, api);

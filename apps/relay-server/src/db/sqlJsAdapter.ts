@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic } from "sql.js";
 
@@ -18,6 +18,12 @@ export interface RelayDb {
   transaction<Args extends unknown[], R>(fn: (...args: Args) => R): (...args: Args) => R;
   /** Force any pending writes to disk immediately. No-op for in-memory databases. */
   flush(): void | Promise<void>;
+  /**
+   * Run a security/integrity-sensitive synchronous mutation and expose its result only after the
+   * resulting database image is durable. A failed write restores the prior in-memory image too, so
+   * the caller never observes a credential/state transition that only half happened.
+   */
+  durable<T>(operation: () => T): Promise<T>;
   close(): void | Promise<void>;
 }
 
@@ -60,7 +66,7 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
     }
   }
 
-  const sqlDb: SqlJsDatabase = new SQL.Database(initialBytes);
+  let sqlDb: SqlJsDatabase = new SQL.Database(initialBytes);
 
   let closed = false;
   function assertOpen(): void {
@@ -79,7 +85,19 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
       timerHost.clearTimeout(flushTimer);
       flushTimer = null;
     }
-    writeFileSync(dbPath, Buffer.from(sqlDb.export()));
+    const temporaryPath = `${dbPath}.tmp`;
+    try {
+      writeFileSync(temporaryPath, Buffer.from(sqlDb.export()));
+      renameSync(temporaryPath, dbPath);
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+
+  function restore(snapshot: Uint8Array): void {
+    sqlDb.close();
+    sqlDb = new SQL.Database(snapshot);
   }
 
   function scheduleFlush(): void {
@@ -170,6 +188,18 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
         return;
       }
       flush();
+    },
+    async durable<T>(operation: () => T): Promise<T> {
+      flush();
+      const snapshot = sqlDb.export();
+      try {
+        const result = operation();
+        flush();
+        return result;
+      } catch (error) {
+        restore(snapshot);
+        throw error;
+      }
     },
     close() {
       if (closed) {

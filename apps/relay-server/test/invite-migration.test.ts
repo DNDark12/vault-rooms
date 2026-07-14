@@ -3,7 +3,7 @@ import { runMigrations } from "../src/db/migrations.js";
 import { openSqlJsDb } from "../src/db/sqlJsAdapter.js";
 
 describe("invite schema migration", () => {
-  it("rebuilds only the legacy invites table and preserves durable data", async () => {
+  it("rebuilds the legacy invites table without discarding pending invites or durable data", async () => {
     const db = await openSqlJsDb(":memory:");
     db.exec(`
       create table teams(
@@ -57,7 +57,13 @@ describe("invite schema migration", () => {
     ]);
     expect(columns.find((column) => column.name === "team_id")?.notnull).toBe(0);
     expect(columns.find((column) => column.name === "role")?.notnull).toBe(0);
-    expect(db.prepare("select count(*) as count from invites").get()).toEqual({ count: 0 });
+    expect(db.prepare("select id, team_id, room_id, role, token_hash from invites").get()).toEqual({
+      id: "inv_1",
+      team_id: "team_1",
+      room_id: null,
+      role: "member",
+      token_hash: "hash"
+    });
     expect(db.prepare("select id from teams").get()).toEqual({ id: "team_1" });
     expect(db.prepare("select id from users").get()).toEqual({ id: "usr_1" });
 

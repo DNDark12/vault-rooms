@@ -23,6 +23,8 @@ export type DeviceRow = {
   display_name: string;
   revoked_at: string | null;
   last_seen_at: string | null;
+  last_transport: "http" | "https" | null;
+  token_security: "plain" | "tls";
   created_at: string;
 };
 
@@ -34,6 +36,7 @@ export type DevicePrincipalRow = {
   user_display_name: string;
   user_revoked_at: string | null;
   server_owner_id: string | null;
+  token_security: "plain" | "tls";
 };
 
 export type InviteRow = {

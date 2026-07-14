@@ -58,12 +58,34 @@ describe("EmbeddedRelayApp.close", () => {
   it("does not terminate sockets that close during the graceful shutdown window", async () => {
     const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined);
     const socket = new GracefulFakeSocket();
-    (app as unknown as { sockets: Set<WebSocket> }).sockets.add(socket as unknown as WebSocket);
+    (app as unknown as { sockets: Map<WebSocket, "http" | "https"> }).sockets.set(
+      socket as unknown as WebSocket,
+      "http"
+    );
 
     await app.close();
 
     expect(socket.closeCalls).toBe(1);
     expect(socket.terminateCalls).toBe(0);
+  });
+
+  it("closes a transport socket that appears while its listener is shutting down", async () => {
+    const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined);
+    const socketsByTransport = (app as unknown as { sockets: Map<WebSocket, "http" | "https"> }).sockets;
+    const lateSocket = new GracefulFakeSocket();
+    const firstSocket = new GracefulFakeSocket(() => {
+      socketsByTransport.set(lateSocket as unknown as WebSocket, "http");
+    });
+    socketsByTransport.set(firstSocket as unknown as WebSocket, "http");
+    (app as unknown as { plainServer: { close: (callback: (error?: Error) => void) => void } }).plainServer = {
+      close: (callback) => callback()
+    };
+
+    await app.closePlainListener();
+
+    expect(firstSocket.closeCalls).toBe(1);
+    expect(lateSocket.closeCalls).toBe(1);
+    await app.close();
   });
 });
 
@@ -72,12 +94,17 @@ class GracefulFakeSocket extends EventEmitter {
   terminateCalls = 0;
   readyState: number = WebSocket.OPEN;
 
+  constructor(private readonly afterClose?: () => void) {
+    super();
+  }
+
   close(): void {
     this.closeCalls += 1;
     this.readyState = WebSocket.CLOSING;
     queueMicrotask(() => {
       this.readyState = WebSocket.CLOSED;
       this.emit("close");
+      this.afterClose?.();
     });
   }
 
@@ -353,6 +380,9 @@ async function createMemoryDb(): Promise<RelayDb> {
     },
     flush() {
       return undefined;
+    },
+    async durable<T>(operation: () => T): Promise<T> {
+      return operation();
     },
     close() {
       if (closed) {

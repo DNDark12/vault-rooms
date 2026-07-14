@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestUrl } from "obsidian";
-import { RoomSyncSocket, type RoomSyncSocketDeps } from "./syncWsClient.js";
+import { RoomSyncSocket, toWsUrl, type RoomSyncSocketDeps } from "./syncWsClient.js";
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 import type { ServerConnection } from "./settings.js";
 import type { RelayApiClient } from "./apiClient.js";
@@ -73,7 +73,8 @@ function createServer(): ServerConnection {
     deviceName: "A laptop",
     deviceToken: "token",
     isServerOwner: false,
-    status: "active"
+    status: "active",
+    securityMode: "plain"
   };
 }
 
@@ -118,6 +119,10 @@ afterEach(() => {
 });
 
 describe("RoomSyncSocket health probe", () => {
+  it("maps HTTPS relay URLs to WSS", () => {
+    expect(toWsUrl("https://relay.example/base/")).toBe("wss://relay.example/base/sync");
+  });
+
   it("schedules a reconnect without constructing a WebSocket when the health probe fails", async () => {
     const WebSocketSpy = stubWebSocket();
     const setTimeoutSpy = vi.spyOn(window, "setTimeout");
@@ -142,6 +147,78 @@ describe("RoomSyncSocket health probe", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(WebSocketSpy).toHaveBeenCalledWith("ws://localhost:8787/sync");
+    socket.disconnect();
+  });
+
+  it("hard-stops the reconnect loop when pinned failure classification says stop", async () => {
+    const server = { ...createServer(), baseUrl: "https://relay.example", securityMode: "pinned-tls" as const };
+    const onPinnedTransportFailure = vi.fn().mockResolvedValue("stop");
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const socket = new RoomSyncSocket(server, { ...createDeps(), onPinnedTransportFailure });
+
+    socket.connect();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onPinnedTransportFailure).toHaveBeenCalledOnce();
+    expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 1000);
+    expect(socket.getState()).toBe("offline");
+  });
+});
+
+describe("RoomSyncSocket security messages", () => {
+  it("reports security upgrades and successful pinned hello authentication", async () => {
+    const onSecurityUpgradeAvailable = vi.fn();
+    const onHelloOk = vi.fn();
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      onSecurityUpgradeAvailable,
+      onHelloOk
+    });
+
+    await (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage(
+      JSON.stringify({ type: "security_upgrade_available", httpsUrl: "https://relay", wssUrl: "wss://relay/sync" })
+    );
+    await (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage(
+      JSON.stringify({ type: "hello_ok", requestId: "hello_1", device: { id: "dev_1" } })
+    );
+
+    expect(onSecurityUpgradeAvailable).toHaveBeenCalledOnce();
+    expect(onHelloOk).toHaveBeenCalledOnce();
+  });
+
+  it("re-probes migration after a plain socket reconnects", async () => {
+    let closeHandler: (() => void) | undefined;
+    const WebSocketSpy = vi.fn(function (this: {
+      readyState: number;
+      addEventListener: (type: string, listener: () => void) => void;
+      close: () => void;
+      send: () => void;
+    }) {
+      this.readyState = 1;
+      this.addEventListener = vi.fn((type: string, listener: () => void) => {
+        if (type === "close") closeHandler = listener;
+      });
+      this.close = vi.fn();
+      this.send = vi.fn();
+    });
+    (WebSocketSpy as unknown as { OPEN: number }).OPEN = 1;
+    vi.stubGlobal("WebSocket", WebSocketSpy);
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const onSecurityUpgradeAvailable = vi.fn();
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      onSecurityUpgradeAvailable
+    });
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+
+    socket.connect();
+    await new Promise((resolve) => setImmediate(resolve));
+    await handleMessage(JSON.stringify({ type: "hello_ok", requestId: "hello_1" }));
+    expect(onSecurityUpgradeAvailable).toHaveBeenCalledOnce();
+
+    closeHandler?.();
+    await handleMessage(JSON.stringify({ type: "hello_ok", requestId: "hello_2" }));
+    expect(onSecurityUpgradeAvailable).toHaveBeenCalledTimes(2);
     socket.disconnect();
   });
 });

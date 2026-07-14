@@ -13,9 +13,9 @@
  *  server's real port).
  *  `new URL(...)` throws on a schemeless input like "192.168.1.100:9000" instead of parsing it as
  *  host:port (it looks like an opaque "scheme:opaque-data" URL without "//"), so a scheme is
- *  prepended first whenever the input doesn't already contain "://" - this repo's relay only ever
- *  speaks plain HTTP (see SECURITY.md - no TLS in v0.1), so "http://" is the only sensible default,
- *  never invented for an input that already specifies some other scheme. Rebuilds from the parsed
+ *  prepended first whenever the input doesn't already contain "://". This helper is used for the
+ *  plain legacy listener, so "http://" is its default; pinned startup uses the separate HTTPS URL
+ *  builder. A scheme already supplied by the caller is never replaced. Rebuilds from the parsed
  *  origin only (protocol + host), discarding any path/query the user might have typed by mistake,
  *  rather than using URL#toString()'s normalization - that appends a trailing slash which would
  *  double up with the leading "/" every caller already prepends to request paths. Returns the

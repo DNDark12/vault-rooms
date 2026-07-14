@@ -1,16 +1,33 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import type { Socket } from "node:net";
-import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
+import {
+  AppError,
+  PRODUCT_NAME,
+  PRODUCT_VERSION,
+  toApiError,
+  type HealthResponse,
+  type IdentityRotationRecord,
+  type MigrationMode,
+  type SecurityUpgradeInfo,
+  type ServerSecurityState
+} from "@vault-rooms/protocol";
 import WebSocket, { WebSocketServer } from "ws";
 import {
+  certPemToDerBase64Url,
   createRelayCore,
   handleSyncSocket,
+  assertTransportAllowed,
   registerAuthRoutes,
   registerFileRoutes,
   registerFriendRoutes,
   registerRoomRoutes,
+  registerSecurityRoutes,
   registerTeamRoutes,
-  type RelayDb
+  type RelayDb,
+  type InviteSecurityContext,
+  type RequestTransport,
+  type SecurityRuntime
 } from "vault-rooms-relay/embedded-core";
 
 type SyncSocketLike = Parameters<typeof handleSyncSocket>[0];
@@ -23,7 +40,11 @@ type EmbeddedRelayAppOptions = {
   rateLimit?: {
     bootstrapMax?: number;
     bootstrapWindowMs?: number;
+    rotationProbeMax?: number;
+    rotationProbeWindowMs?: number;
   };
+  security?: { runtime: SecurityRuntime };
+  core?: ReturnType<typeof createRelayCore>;
 };
 
 type RouteMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -37,6 +58,7 @@ type EmbeddedRequest = {
   query: Record<string, string>;
   hostname: string;
   ip: string;
+  transport: RequestTransport;
 };
 
 type RouteHandler = (request: EmbeddedRequest) => unknown;
@@ -52,10 +74,20 @@ const MIN_WEBSOCKET_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const SOCKET_CLOSE_GRACE_MS = 500;
 
 export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelayAppOptions = {}): Promise<EmbeddedRelayApp> {
-  const { repo, connectionRegistry, bootstrapPin, bootstrapRateLimiter, maxFileBytes, maxConnections } = createRelayCore(db, options);
-  const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket) => {
-    handleSyncSocket(socket, repo, connectionRegistry, { maxFileBytes, maxConnections });
-  });
+  const core = options.core ?? createRelayCore(db, options);
+  const {
+    repo,
+    connectionRegistry,
+    bootstrapPin,
+    bootstrapRateLimiter,
+    rotationProbeRateLimiter,
+    maxFileBytes,
+    maxConnections
+  } = core;
+  const security = options.security ?? core.security;
+  const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket, transport) => {
+    handleSyncSocket(socket, repo, connectionRegistry, { maxFileBytes, maxConnections, transport });
+  }, options.publicUrl ?? "http://127.0.0.1:8787");
 
   app.get("/health", async (): Promise<HealthResponse> => ({
     ok: true,
@@ -64,26 +96,130 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
   }));
 
   app.beforeRoute((request) => {
+    assertTransportAllowed(repo, request.transport, request.url);
+  });
+
+  app.beforeRoute((request) => {
     if (request.method === "POST" && request.url === "/api/bootstrap" && !bootstrapRateLimiter.consume(request.ip)) {
       throw new AppError("RATE_LIMITED", "Too many bootstrap attempts. Try again later.", 429);
     }
   });
 
   const routeApp = app as never;
-  registerAuthRoutes(routeApp, repo);
+  const currentInviteSecurity = (): InviteSecurityContext | undefined => {
+    const persistedIdentity = security?.runtime.getIdentity() ?? null;
+    return persistedIdentity
+      ? {
+          serverId: persistedIdentity.serverId,
+          tlsName: persistedIdentity.identity.tlsName,
+          identitySpkiSha256: persistedIdentity.identity.identitySpkiSha256,
+          identityCertificateDer: certPemToDerBase64Url(persistedIdentity.identity.identityCertPem)
+        }
+      : undefined;
+  };
+  registerAuthRoutes(routeApp, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity });
   registerTeamRoutes(routeApp, repo, {
-    publicUrl: options.publicUrl ?? "http://127.0.0.1:8787",
+    get publicUrl() {
+      return app.getPublicUrl();
+    },
+    get security() {
+      return currentInviteSecurity();
+    },
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
     bootstrapPin,
     connectionRegistry
   });
-  const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
-  registerRoomRoutes(routeApp, repo, { publicUrl, connectionRegistry });
-  registerFriendRoutes(routeApp, repo, { publicUrl, connectionRegistry });
+  registerRoomRoutes(routeApp, repo, {
+    get publicUrl() {
+      return app.getPublicUrl();
+    },
+    get security() {
+      return currentInviteSecurity();
+    },
+    connectionRegistry
+  });
+  registerFriendRoutes(routeApp, repo, {
+    get publicUrl() {
+      return app.getPublicUrl();
+    },
+    get security() {
+      return currentInviteSecurity();
+    },
+    connectionRegistry
+  });
   registerFileRoutes(routeApp, repo, {
     maxFileBytes,
     connectionRegistry
   });
+  if (security) {
+    registerSecurityRoutes(routeApp, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
+  }
+
+  app.securityAdmin = {
+    getSecurityState: () => repo.getSecurityState(),
+    getMigrationMode: () => repo.getMigrationMode(),
+    plainDeviceCount: () => repo.countActiveDevicesOnPlainTransport(),
+    enableTlsMigration: async (mode, serverId) => {
+      await repo.durable(() => {
+        repo.setMigrationMode(mode);
+        repo.setSecurityState("tls_migrating");
+        repo.audit({
+          teamId: null,
+          actorType: "system",
+          actorId: serverId,
+          action: "security.migration_enabled",
+          resourceType: "server",
+          resourceId: serverId,
+          metadata: { mode }
+        });
+      });
+    },
+    broadcastUpgrade: (info) => {
+      connectionRegistry.broadcastAuthenticated({
+        type: "security_upgrade_available",
+        httpsUrl: info.httpsUrl,
+        wssUrl: info.wssUrl
+      });
+    },
+    enforceTls: async (serverId) => {
+      await repo.durable(() => {
+        repo.setSecurityState("tls_enforced");
+        repo.audit({
+          teamId: null,
+          actorType: "system",
+          actorId: serverId,
+          action: "security.tls_enforced",
+          resourceType: "server",
+          resourceId: serverId,
+          metadata: {}
+        });
+      });
+      connectionRegistry.closeLegacyPlainTokenConnections();
+    },
+    recordIdentityRotation: async (serverId, record) => {
+      await repo.durable(() => {
+        repo.audit({
+          teamId: null,
+          actorType: "system",
+          actorId: serverId,
+          action: "identity.rotated",
+          resourceType: "server",
+          resourceId: serverId,
+          metadata: {
+            rotationId: record.rotationId,
+            oldIdentitySpkiSha256: record.oldIdentitySpkiSha256,
+            newIdentitySpkiSha256: record.newIdentitySpkiSha256
+          }
+        });
+      });
+    }
+  };
+  app.ownerAdmin = {
+    isBootstrapped: () => repo.getServerOwnerId() !== null,
+    recoverOwnerDevice: (deviceName, tokenSecurity) =>
+      repo.durable(() => repo.recoverServerOwnerDevice({ deviceName, tokenSecurity })),
+    revokeRecoveredOwnerDevice: (deviceId) => repo.durable(() => repo.revokeRecoveredOwnerDevice(deviceId))
+  };
 
   return app;
 }
@@ -91,31 +227,44 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
 export class EmbeddedRelayApp {
   private readonly routes: Route[] = [];
   private readonly beforeRouteHooks: Array<(request: EmbeddedRequest) => void> = [];
-  private readonly sockets = new Set<WebSocket>();
+  private readonly sockets = new Map<WebSocket, RequestTransport>();
   private readonly webSocketServer: WebSocketServer;
-  private server: Server | null = null;
+  private plainServer: HttpServer | null = null;
+  private tlsServer: HttpsServer | null = null;
+  securityAdmin!: EmbeddedSecurityAdmin;
+  ownerAdmin!: EmbeddedOwnerAdmin;
 
   constructor(
     private readonly db: RelayDb,
     private readonly maxFileBytes: number,
     readonly bootstrapPin: string,
-    private readonly handleSyncSocket: (socket: SyncSocketLike) => void
+    private readonly handleSyncSocket: (socket: SyncSocketLike, transport: RequestTransport) => void,
+    private publicUrl = "http://127.0.0.1:8787"
   ) {
     this.webSocketServer = new WebSocketServer({
       noServer: true,
       maxPayload: Math.max(maxFileBytes * 2, MIN_WEBSOCKET_PAYLOAD_BYTES),
       perMessageDeflate: false
     });
-    this.webSocketServer.on("connection", (webSocket) => {
-      this.sockets.add(webSocket);
+    this.webSocketServer.on("connection", (webSocket, request) => {
+      const transport = (request as IncomingMessage & { transport?: RequestTransport }).transport ?? "http";
+      this.sockets.set(webSocket, transport);
       webSocket.on("close", () => {
         this.sockets.delete(webSocket);
       });
       webSocket.on("error", () => {
         // ws emits protocol errors (for example maxPayload violations) before closing.
       });
-      this.handleSyncSocket(webSocket);
+      this.handleSyncSocket(webSocket, transport);
     });
+  }
+
+  getPublicUrl(): string {
+    return this.publicUrl;
+  }
+
+  setPublicUrl(publicUrl: string): void {
+    this.publicUrl = publicUrl;
   }
 
   get(path: string, handler: RouteHandler): void;
@@ -145,11 +294,11 @@ export class EmbeddedRelayApp {
   }
 
   async listen(options: { host: string; port: number }): Promise<void> {
-    const server = createServer((request, response) => {
-      void this.handleHttp(request, response);
+    const server = createHttpServer((request, response) => {
+      void this.handleHttp(request, response, "http");
     });
     server.on("upgrade", (request, socket, head) => {
-      this.handleUpgrade(request, socket as Socket, head);
+      this.handleUpgrade(request, socket as Socket, head, "http");
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -158,30 +307,75 @@ export class EmbeddedRelayApp {
         resolve();
       });
     });
-    this.server = server;
+    this.plainServer = server;
+  }
+
+  async listenTls(options: { host: string; port: number; key: string; cert: string }): Promise<void> {
+    const server = createHttpsServer({ key: options.key, cert: options.cert }, (request, response) => {
+      void this.handleHttp(request, response, "https");
+    });
+    server.on("upgrade", (request, socket, head) => {
+      this.handleUpgrade(request, socket as Socket, head, "https");
+    });
+    await listenServer(server, options.host, options.port);
+    this.tlsServer = server;
+  }
+
+  async closePlainListener(): Promise<void> {
+    const server = this.plainServer;
+    this.plainServer = null;
+    await this.closeListenerAndSockets(server, "http");
+  }
+
+  async closeTlsListener(): Promise<void> {
+    const server = this.tlsServer;
+    this.tlsServer = null;
+    await this.closeListenerAndSockets(server, "https");
+  }
+
+  async restartTls(options: { host: string; port: number; key: string; cert: string }): Promise<void> {
+    const server = this.tlsServer;
+    this.tlsServer = null;
+    await this.closeListenerAndSockets(server, "https");
+    await this.listenTls(options);
   }
 
   async close(): Promise<void> {
-    await Promise.all([...this.sockets].map((socket) => closeSocketWithGrace(socket)));
-    await new Promise<void>((resolve, reject) => {
-      if (!this.server) {
-        resolve();
-        return;
-      }
-      this.server.close((error) => (error ? reject(error) : resolve()));
-    });
-    this.server = null;
+    await Promise.all([...this.sockets.keys()].map((socket) => closeSocketWithGrace(socket)));
+    await Promise.all([closeServer(this.plainServer), closeServer(this.tlsServer)]);
+    this.plainServer = null;
+    this.tlsServer = null;
     await new Promise<void>((resolve, reject) => {
       this.webSocketServer.close((error) => (error ? reject(error) : resolve()));
     });
     await this.db.close();
   }
 
+  private async closeSocketsForTransport(transport: RequestTransport): Promise<void> {
+    await Promise.all(
+      [...this.sockets.entries()]
+        .filter(([, socketTransport]) => socketTransport === transport)
+        .map(([socket]) => closeSocketWithGrace(socket))
+    );
+  }
+
+  private async closeListenerAndSockets(
+    server: HttpServer | HttpsServer | null,
+    transport: RequestTransport
+  ): Promise<void> {
+    const listenerClosed = closeServer(server);
+    await this.closeSocketsForTransport(transport);
+    await listenerClosed;
+    // An upgrade already accepted before server.close() took effect can be registered after the
+    // first snapshot. Once the listener is fully closed, a final pass is stable.
+    await this.closeSocketsForTransport(transport);
+  }
+
   private addRoute(method: RouteMethod, path: string, handler: RouteHandler): void {
     this.routes.push({ method, path, segments: splitPath(path), handler });
   }
 
-  private async handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  private async handleHttp(request: IncomingMessage, response: ServerResponse, transport: RequestTransport): Promise<void> {
     applyCors(response);
     if (request.method === "OPTIONS") {
       response.writeHead(204);
@@ -208,7 +402,8 @@ export class EmbeddedRelayApp {
         params: match.params,
         query: Object.fromEntries(parsedUrl.searchParams.entries()),
         hostname: hostnameFromHeader(request.headers.host),
-        ip: request.socket.remoteAddress ?? ""
+        ip: request.socket.remoteAddress ?? "",
+        transport
       };
       for (const hook of this.beforeRouteHooks) {
         hook(baseRequest);
@@ -223,7 +418,7 @@ export class EmbeddedRelayApp {
     }
   }
 
-  private handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+  private handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer, transport: RequestTransport): void {
     const parsedUrl = new URL(request.url ?? "/", "http://127.0.0.1");
     if (parsedUrl.pathname !== "/sync") {
       socket.destroy();
@@ -231,6 +426,21 @@ export class EmbeddedRelayApp {
     }
 
     try {
+      const embeddedRequest: EmbeddedRequest = {
+        method: (request.method ?? "GET").toUpperCase(),
+        url: parsedUrl.pathname,
+        headers: request.headers,
+        body: undefined,
+        params: {},
+        query: Object.fromEntries(parsedUrl.searchParams.entries()),
+        hostname: hostnameFromHeader(request.headers.host),
+        ip: request.socket.remoteAddress ?? "",
+        transport
+      };
+      for (const hook of this.beforeRouteHooks) {
+        hook(embeddedRequest);
+      }
+      (request as IncomingMessage & { transport: RequestTransport }).transport = transport;
       this.webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
         this.webSocketServer.emit("connection", webSocket, request);
       });
@@ -265,6 +475,48 @@ export class EmbeddedRelayApp {
     }
     return null;
   }
+}
+
+export type EmbeddedSecurityAdmin = {
+  getSecurityState(): ServerSecurityState;
+  getMigrationMode(): MigrationMode;
+  plainDeviceCount(): number;
+  enableTlsMigration(mode: MigrationMode, serverId: string): Promise<void>;
+  broadcastUpgrade(info: SecurityUpgradeInfo): void;
+  enforceTls(serverId: string): Promise<void>;
+  recordIdentityRotation(serverId: string, record: IdentityRotationRecord): Promise<void>;
+};
+
+export type EmbeddedOwnerRecoveryResult = {
+  user: { id: string; displayName: string };
+  device: { id: string; displayName: string };
+  deviceToken: string;
+  isServerOwner: true;
+};
+
+export type EmbeddedOwnerAdmin = {
+  isBootstrapped(): boolean;
+  recoverOwnerDevice(deviceName: string, tokenSecurity: "plain" | "tls"): Promise<EmbeddedOwnerRecoveryResult>;
+  revokeRecoveredOwnerDevice(deviceId: string): Promise<void>;
+};
+
+async function listenServer(server: HttpServer | HttpsServer, host: string, port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: HttpServer | HttpsServer | null): Promise<void> {
+  if (!server) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
 }
 
 async function closeSocketWithGrace(socket: WebSocket): Promise<void> {

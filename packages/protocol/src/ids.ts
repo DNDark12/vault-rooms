@@ -11,7 +11,9 @@ export type IdPrefix =
   | "fil"
   | "ver"
   | "aud"
-  | "req";
+  | "req"
+  | "srv"
+  | "rot";
 
 export function createId(prefix: IdPrefix): string {
   return `${prefix}_${randomBytes(12).toString("base64url")}`;
