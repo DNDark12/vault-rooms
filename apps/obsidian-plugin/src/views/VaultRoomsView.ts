@@ -1,6 +1,7 @@
 import { ItemView, Notice, Setting, WorkspaceLeaf } from "obsidian";
 import type { TeamSummary } from "../apiClient.js";
 import { pinnedInfoForServer } from "../controllers/ServerConnectionManager.js";
+import { lanSharePresentation } from "../lanShareReachability.js";
 import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
 
@@ -133,6 +134,26 @@ export class VaultRoomsView extends ItemView {
           lanInput.select();
           new Notice("LAN URL selected.");
         });
+        this.addPanelButton(lanRow, "Test LAN URL", () => this.plugin.refreshLanShareReachability(true));
+        const reachability = this.plugin.getLanShareReachability();
+        const presentation = lanSharePresentation(reachability);
+        if (presentation) {
+          const lanBadgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
+          lanBadgeRow.createSpan({
+            cls: `vault-rooms-badge ${presentation.className}`,
+            text: presentation.label
+          });
+        }
+        if (reachability.status === "unreachable") {
+          card.createEl("div", {
+            cls: "vault-rooms-error",
+            text: `This device cannot reach the configured LAN share URL (${reachability.error}). Update Public URL override, restart the server, then test the LAN URL again.`
+          });
+        }
+        card.createEl("div", {
+          cls: "vault-rooms-room-meta",
+          text: "This host-side check does not guarantee that a teammate's firewall or Wi-Fi client isolation will allow the connection."
+        });
       } else {
         card.createEl("div", {
           cls: "vault-rooms-error",
@@ -190,6 +211,9 @@ export class VaultRoomsView extends ItemView {
 
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
     card.createEl("div", { text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+    if (this.plugin.activeServerIsOwnEmbeddedServer()) {
+      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Local owner connection" });
+    }
     const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
     if (this.plugin.activeServerIsOwnStoppedServer()) {
       badgeRow.createSpan({ cls: "vault-rooms-badge is-stopped", text: "Live sync: server stopped" });

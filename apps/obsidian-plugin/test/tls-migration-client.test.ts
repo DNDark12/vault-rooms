@@ -1,7 +1,6 @@
 import { request as httpsRequest } from "node:https";
 import type { Server as NetServer } from "node:net";
 import { createServer } from "node:net";
-import type { AddressInfo } from "node:net";
 import type { DetailedPeerCertificate, TLSSocket } from "node:tls";
 import type { DataAdapter } from "obsidian";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -147,7 +146,7 @@ describe("embedded TLS startup state", () => {
   it("explicitly restores a non-empty reset database from v0.1 without losing either file", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
-    const port = await getFreePort();
+    const port = await findAvailablePortBlock();
     const active = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
     createRelayCore(active).repo.bootstrapServer({ displayName: "Replacement owner", deviceName: "Replacement Mac", tokenSecurity: "plain" });
     await active.close();
@@ -195,7 +194,7 @@ describe("embedded TLS startup state", () => {
   it("recovers an erased local owner credential through the running process without reopening bootstrap", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
-    const port = await getFreePort();
+    const port = await findAvailablePortBlock();
     const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
     const core = createRelayCore(db);
     const original = core.repo.bootstrapServer({ displayName: "Owner", deviceName: "Original Mac", tokenSecurity: "plain" });
@@ -252,7 +251,7 @@ describe("embedded TLS startup state", () => {
 
     const server = new EmbeddedRelayServer(asDataAdapter(adapter), dbPath);
     embeddedServers.push(server);
-    const status = await server.start({ port: await getFreePort(), maxFileBytes: 1024, autoStart: false });
+    const status = await server.start({ port: await findAvailablePortBlock(), maxFileBytes: 1024, autoStart: false });
     expect(status).toMatchObject({ running: true, bootstrapped: true, securityMode: "pinned-tls" });
     const recovered = await server.recoverOwnerDevice("Recovered pinned Mac");
     await server.stop();
@@ -508,7 +507,7 @@ describe("same-process embedded TLS ownership lifecycle", () => {
   it("rolls back persisted identity state and audit when TLS listener replacement fails", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
-    const settings: EmbeddedServerSettings = { port: await getFreePort(), maxFileBytes: 1024, autoStart: false };
+    const settings: EmbeddedServerSettings = { port: await findAvailablePortBlock(), maxFileBytes: 1024, autoStart: false };
     const server = new EmbeddedRelayServer(asDataAdapter(adapter), dbPath);
     embeddedServers.push(server);
     const initial = await server.start(settings);
@@ -533,7 +532,7 @@ describe("same-process embedded TLS ownership lifecycle", () => {
   it("publishes the rotated runtime identity before audit and restores every identity surface if audit fails", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
-    const settings: EmbeddedServerSettings = { port: await getFreePort(), maxFileBytes: 1024, autoStart: false };
+    const settings: EmbeddedServerSettings = { port: await findAvailablePortBlock(), maxFileBytes: 1024, autoStart: false };
     const server = new EmbeddedRelayServer(asDataAdapter(adapter), dbPath);
     embeddedServers.push(server);
     const initial = await server.start(settings);
@@ -601,7 +600,7 @@ describe("same-process embedded TLS ownership lifecycle", () => {
   it("stops honestly when replacement closes the old listener and durable rollback then fails", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
-    const settings: EmbeddedServerSettings = { port: await getFreePort(), maxFileBytes: 1024, autoStart: false };
+    const settings: EmbeddedServerSettings = { port: await findAvailablePortBlock(), maxFileBytes: 1024, autoStart: false };
     const server = new EmbeddedRelayServer(asDataAdapter(adapter), dbPath);
     embeddedServers.push(server);
     const initial = await server.start(settings);
@@ -610,7 +609,7 @@ describe("same-process embedded TLS ownership lifecycle", () => {
     const runningApp = (server as unknown as { app: EmbeddedRelayApp }).app;
     const store = (server as unknown as { identityStore: IdentityStore }).identityStore;
     const originalRestart = runningApp.restartTls.bind(runningApp);
-    const blockedPort = await getFreePort();
+    const blockedPort = await findAvailablePortBlock();
     const blocker = createServer();
     blockers.push(blocker);
     await new Promise<void>((resolve, reject) => {
@@ -875,8 +874,8 @@ async function startDualStackEmbeddedApp(
   const serverId = core.repo.getOrCreateServerId();
   const identity = await identityFactory(serverId);
   const persisted = { serverId, identity, rotations: [] };
-  const httpPort = await getFreePort();
-  const tlsPort = await getFreePort();
+  const httpPort = await findAvailablePortBlock();
+  const tlsPort = httpPort + 1;
   const app = await createEmbeddedRelayApp(db, {
     core,
     publicUrl: `https://127.0.0.1:${tlsPort}`,
@@ -896,17 +895,6 @@ async function startDualStackEmbeddedApp(
     cert: tlsCertificateChainPem(identity)
   });
   return { app, identity, repo: core.repo, serverId, httpPort, tlsPort };
-}
-
-async function getFreePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const port = (server.address() as AddressInfo).port;
-  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  return port;
 }
 
 async function findAvailablePortBlock(): Promise<number> {
