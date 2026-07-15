@@ -1,9 +1,9 @@
 {
   "id": "vault-rooms",
   "name": "Vault Rooms",
-  "version": "0.1.1",
-  "minAppVersion": "1.13.0",
-  "description": "Share vault folders with teammates on your local network in real time - invite links, fine-grained per-folder access control, and live sync. No cloud, no separate server to run.",
+  "version": "0.2.0",
+  "minAppVersion": "1.12.7",
+  "description": "Share vault folders with trusted teammates on your local network - invite links, per-room and per-path access control, and live file sync via an embedded relay. No cloud account, no separate server to run.",
   "author": "DNDark",
   "authorUrl": "https://github.com/DNDark12",
   "isDesktopOnly": true

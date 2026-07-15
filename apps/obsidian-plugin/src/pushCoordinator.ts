@@ -41,8 +41,8 @@ export class RoomPushCoordinator {
   private readonly cancel: (id: number) => void;
 
   constructor(private readonly deps: RoomPushCoordinatorDeps) {
-    this.schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms) as unknown as number);
-    this.cancel = deps.cancel ?? ((id) => clearTimeout(id as unknown as ReturnType<typeof setTimeout>));
+    this.schedule = deps.schedule ?? ((fn, ms) => window.setTimeout(fn, ms));
+    this.cancel = deps.cancel ?? ((id) => window.clearTimeout(id));
   }
 
   /** Handles one already-classified local vault event for this room. */

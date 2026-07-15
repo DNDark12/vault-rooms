@@ -23,6 +23,8 @@ export type DeviceRow = {
   display_name: string;
   revoked_at: string | null;
   last_seen_at: string | null;
+  last_transport: "http" | "https" | null;
+  token_security: "plain" | "tls";
   created_at: string;
 };
 
@@ -34,14 +36,17 @@ export type DevicePrincipalRow = {
   user_display_name: string;
   user_revoked_at: string | null;
   server_owner_id: string | null;
+  token_security: "plain" | "tls";
 };
 
 export type InviteRow = {
   id: string;
-  team_id: string;
+  team_id: string | null;
+  room_id: string | null;
+  permission_preset: "reader" | "editor" | null;
   created_by_user_id: string;
   token_hash: string;
-  role: "member" | "admin";
+  role: "member" | "admin" | null;
   expires_at: string;
   max_uses: number;
   use_count: number;
@@ -114,4 +119,3 @@ export type FileVersionWithContentRow = {
   created_at: string;
   content: string;
 };
-

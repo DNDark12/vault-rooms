@@ -1,10 +1,17 @@
-import type WebSocket from "ws";
 import type { SyncServerMessage } from "@vault-rooms/protocol";
 import type { DevicePrincipal } from "../db/repositories/relayRepository.js";
 
+export type SyncSocket = {
+  readonly OPEN: number;
+  readonly readyState: number;
+  send(payload: string): void;
+  close(code?: number, reason?: string): void;
+  ping(): void;
+};
+
 export type SyncConnection = {
   id: string;
-  socket: WebSocket;
+  socket: SyncSocket;
   principal: DevicePrincipal | null;
   subscriptions: Set<string>;
 };
@@ -81,8 +88,32 @@ export class ConnectionRegistry {
       }
     }
   }
+
+  closeDeviceConnections(deviceId: string, reason: "credentials_rotated"): void {
+    for (const connection of this.connections) {
+      if (connection.principal?.deviceId === deviceId) {
+        connection.socket.close(4001, reason);
+      }
+    }
+  }
+
+  closeLegacyPlainTokenConnections(): void {
+    for (const connection of this.connections) {
+      if (connection.principal?.tokenSecurity === "plain") {
+        connection.socket.close(4002, "tls_enforced");
+      }
+    }
+  }
+
+  broadcastAuthenticated(message: SyncServerMessage): void {
+    for (const connection of this.connections) {
+      if (connection.principal && connection.socket.readyState === connection.socket.OPEN) {
+        sendJson(connection.socket, message);
+      }
+    }
+  }
 }
 
-export function sendJson(socket: WebSocket, payload: SyncServerMessage): void {
+export function sendJson(socket: SyncSocket, payload: SyncServerMessage): void {
   socket.send(JSON.stringify(payload));
 }

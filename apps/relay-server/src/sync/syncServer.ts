@@ -1,73 +1,106 @@
 import type { FastifyInstance } from "fastify";
 import { AppError, isEligiblePath, normalizeRelativePath, type SyncClientMessage } from "@vault-rooms/protocol";
 import { createId } from "@vault-rooms/protocol";
-import type WebSocket from "ws";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
-import { isActivePrincipal } from "../db/repositories/relayRepository.js";
+import { requestTransport, type RequestTransport } from "../routes/security.routes.js";
+import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
-import { ConnectionRegistry, sendJson, type SyncConnection } from "./connectionRegistry.js";
+import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
+
+export type SyncTimerHost = {
+  setInterval(callback: () => void, delayMs: number): unknown;
+  clearInterval(handle: unknown): void;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+};
 
 export function registerSyncRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number }
+  options: { maxFileBytes: number; maxConnections: number; timerHost: SyncTimerHost }
 ): void {
-  app.get("/sync", { websocket: true }, (socket: WebSocket) => {
-    if (registry.size() >= options.maxConnections) {
-      socket.close(1013, "Too many connections");
-      return;
+  app.get("/sync", { websocket: true }, (socket, request) => {
+    handleSyncSocket(socket, repo, registry, { ...options, transport: requestTransport(request) });
+  });
+}
+
+export function handleSyncSocket(
+  socket: SyncSocket & {
+    on(event: "message", listener: (raw: { toString(): string }) => void): void;
+    on(event: "close", listener: () => void): void;
+  },
+  repo: RelayRepository,
+  registry: ConnectionRegistry,
+  options: { maxFileBytes: number; maxConnections: number; transport: RequestTransport; timerHost: SyncTimerHost }
+): void {
+  if (registry.size() >= options.maxConnections) {
+    socket.close(1013, "Too many connections");
+    return;
+  }
+
+  const connection: SyncConnection = {
+    id: createId("req"),
+    socket,
+    principal: null,
+    subscriptions: new Set()
+  };
+  registry.add(connection);
+
+  let helloTimeout: unknown = options.timerHost.setTimeout(() => {
+    helloTimeout = undefined;
+    if (!connection.principal) {
+      socket.close(1008, "Authentication timeout");
     }
+  }, 10_000);
+  const clearHelloTimeout = (): void => {
+    if (helloTimeout !== undefined) {
+      options.timerHost.clearTimeout(helloTimeout);
+      helloTimeout = undefined;
+    }
+  };
 
-    const connection: SyncConnection = {
-      id: createId("req"),
-      socket,
-      principal: null,
-      subscriptions: new Set()
-    };
-    registry.add(connection);
+  const ping = options.timerHost.setInterval(() => {
+    if (socket.readyState === socket.OPEN) {
+      socket.ping();
+    }
+  }, 30_000);
 
-    const ping = setInterval(() => {
-      if (socket.readyState === socket.OPEN) {
-        socket.ping();
+  socket.on("message", (raw) => {
+    // handleMessage is async and this listener can't await it, so any rejection it produces
+    // (a thrown error inside a message-type branch that isn't already caught locally) would
+    // otherwise become an unhandled promise rejection - which, running inside the Obsidian
+    // plugin's own process, risks taking down more than just this one connection. Every
+    // message-type branch below also has its own try/catch for a clean client-facing
+    // rejection; this is the last-resort backstop for anything that slips past those.
+    handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString()).catch((error) => {
+      console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
+      try {
+        connection.socket.close();
+      } catch {
+        // Socket may already be closed/closing; nothing more to do.
       }
-    }, 30_000);
-
-    socket.on("message", (raw) => {
-      // handleMessage is async and this listener can't await it, so any rejection it produces
-      // (a thrown error inside a message-type branch that isn't already caught locally) would
-      // otherwise become an unhandled promise rejection - which, running inside the Obsidian
-      // plugin's own process, risks taking down more than just this one connection. Every
-      // message-type branch below also has its own try/catch for a clean client-facing
-      // rejection; this is the last-resort backstop for anything that slips past those.
-      handleMessage(repo, registry, connection, options, raw.toString()).catch((error) => {
-        console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
-        try {
-          connection.socket.close();
-        } catch {
-          // Socket may already be closed/closing; nothing more to do.
-        }
-      });
     });
-    socket.on("close", () => {
-      clearInterval(ping);
-      if (connection.principal) {
-        try {
-          repo.audit({
-            teamId: null,
-            actorType: "device",
-            actorId: connection.principal.deviceId,
-            action: "sync.disconnected",
-            resourceType: "device",
-            resourceId: connection.principal.deviceId,
-            metadata: {}
-          });
-        } catch {
-          // Server may already be shutting down (db closed); disconnect audit is best-effort.
-        }
+  });
+  socket.on("close", () => {
+    clearHelloTimeout();
+    options.timerHost.clearInterval(ping);
+    if (connection.principal) {
+      try {
+        repo.audit({
+          teamId: null,
+          actorType: "device",
+          actorId: connection.principal.deviceId,
+          action: "sync.disconnected",
+          resourceType: "device",
+          resourceId: connection.principal.deviceId,
+          metadata: {}
+        });
+      } catch {
+        // Server may already be shutting down (db closed); disconnect audit is best-effort.
       }
-      registry.remove(connection);
-    });
+    }
+    registry.remove(connection);
   });
 }
 
@@ -75,7 +108,7 @@ async function handleMessage(
   repo: RelayRepository,
   registry: ConnectionRegistry,
   connection: SyncConnection,
-  options: { maxFileBytes: number },
+  options: { maxFileBytes: number; transport: RequestTransport; onAuthenticated: () => void },
   raw: string
 ): Promise<void> {
   let message: SyncClientMessage;
@@ -88,13 +121,10 @@ async function handleMessage(
 
   if (message.type === "hello") {
     try {
-      const principal = repo.authenticateDeviceToken(message.token);
-      if (!isActivePrincipal(principal)) {
-        sendJson(connection.socket, { type: "hello_error", requestId: message.requestId, code: "UNAUTHORIZED" });
-        connection.socket.close();
-        return;
-      }
+      const principal = authenticateActiveDeviceToken(repo, message.token);
+      repo.markDeviceTransport(principal.deviceId, options.transport);
       connection.principal = principal;
+      options.onAuthenticated();
       repo.audit({
         teamId: null,
         actorType: "device",
@@ -191,7 +221,7 @@ async function handleMessage(
       const room = requireRoom(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
       if (!isEligiblePath(relativePath)) {
-        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
+        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (supported: Markdown/text/canvas/JSON/CSV, common image formats, and PDF).", 422);
       }
       if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
         throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
@@ -286,7 +316,7 @@ async function handleMessage(
   }
 }
 
-function sendRejection(socket: WebSocket, requestId: string, error: unknown): void {
+function sendRejection(socket: SyncSocket, requestId: string, error: unknown): void {
   if (error instanceof AppError) {
     const details = error.details as Record<string, unknown> | undefined;
     sendJson(socket, {

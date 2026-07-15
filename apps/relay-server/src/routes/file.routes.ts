@@ -62,13 +62,14 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     }
     const relativePath = normalizeRelativePath(body.relativePath);
     if (!isEligiblePath(relativePath)) {
-      throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
+      throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (supported: Markdown/text/canvas/JSON/CSV, common image formats, and PDF).", 422);
     }
     if (Buffer.byteLength(body.content, "utf8") > options.maxFileBytes) {
       throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
     }
 
     const baseVersion = body.baseVersion ?? 0;
+    assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });
     assertRoomPermission({
       repo,
       principal,
@@ -113,6 +114,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "relativePath and baseVersion are required.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
+    assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });
     assertRoomPermission({ repo, principal, room, permission: "file:delete", relativePath });
     const result = repo.deleteFile({
       roomId: room.id,

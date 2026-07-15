@@ -1,10 +1,12 @@
 {
   "name": "vault-rooms-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./app-core": "./src/appCore.ts",
+    "./embedded-core": "./src/embeddedCore.ts",
     "./app": "./src/app.ts",
     "./config": "./src/config.ts"
   },
@@ -16,10 +18,12 @@
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",
+    "@peculiar/x509": "2.0.0",
     "@vault-rooms/policy": "workspace:*",
     "@vault-rooms/protocol": "workspace:*",
     "fastify": "^5.4.0",
     "pino": "^9.7.0",
+    "reflect-metadata": "0.2.2",
     "sql.js": "^1.14.1",
     "tsx": "^4.20.3",
     "ws": "^8.18.3"

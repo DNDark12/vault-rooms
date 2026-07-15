@@ -8,7 +8,9 @@ export type ErrorCode =
   | "INVALID_PATH"
   | "NOT_FOUND"
   | "VALIDATION_ERROR"
-  | "ADAPTER_CONFLICT";
+  | "ADAPTER_CONFLICT"
+  | "RATE_LIMITED"
+  | "TLS_REQUIRED";
 
 export class AppError extends Error {
   constructor(

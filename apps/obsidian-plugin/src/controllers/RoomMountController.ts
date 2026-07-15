@@ -8,6 +8,7 @@ import {
   type VaultAdapter,
   VaultSyncEngine
 } from "../syncClient.js";
+import { listFiles } from "../vaultTraversal.js";
 import type { PluginContext } from "./PluginContext.js";
 
 export type RoomMountControllerDeps = Pick<
@@ -103,8 +104,12 @@ export class RoomMountController {
     // mountPath the server has never heard of (skips anything it already knows about, including
     // tombstoned/deleted paths - those are intentional server-side deletions, not "missing" files).
     const localPaths = await this.deps.vaultAdapter.list(mountPath);
+    const configDir = this.deps.app.vault.configDir.replace(/\/+$/, "");
     for (const localPath of localPaths) {
-      const relativePath = localPath.slice(mountPath.length + 1);
+      if (!mountPath && (localPath === configDir || localPath.startsWith(`${configDir}/`))) {
+        continue;
+      }
+      const relativePath = mountPath ? localPath.slice(mountPath.length + 1) : localPath;
       if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
         continue;
       }
@@ -188,7 +193,8 @@ export class RoomMountController {
     }
     const prefix = mountPath.replace(/\/+$/, "");
     const conflicts: Array<{ relativePath: string; conflictRelativePath: string }> = [];
-    for (const file of this.deps.app.vault.getFiles()) {
+    const mountedRoot = this.deps.app.vault.getAbstractFileByPath(prefix);
+    for (const file of mountedRoot ? listFiles(mountedRoot) : []) {
       const path = file.path;
       if (path !== prefix && !path.startsWith(`${prefix}/`)) {
         continue;

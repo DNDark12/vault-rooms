@@ -1,5 +1,6 @@
 import { ItemView, Notice, Setting, WorkspaceLeaf } from "obsidian";
 import type { TeamSummary } from "../apiClient.js";
+import { pinnedInfoForServer } from "../controllers/ServerConnectionManager.js";
 import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
 
@@ -45,7 +46,10 @@ export class VaultRoomsView extends ItemView {
     container.addClass("vault-rooms-view");
 
     const header = container.createDiv({ cls: "vault-rooms-header" });
-    new Setting(header).setName("Vault Rooms").setHeading();
+    const headerSetting = new Setting(header).setName("Vault Rooms").setHeading();
+    if (this.plugin.canCreateAnyInvite()) {
+      headerSetting.addButton((button) => button.setCta().setButtonText("Invite").onClick(() => this.plugin.openCreateInviteModal()));
+    }
 
     this.renderHostingSection(container);
     this.renderActiveConnectionSection(container);
@@ -55,6 +59,12 @@ export class VaultRoomsView extends ItemView {
     if (!server) {
       container.createDiv({ cls: "vault-rooms-empty", text: "Set up or join a server above to load teams and rooms." });
       return;
+    }
+    if (server.securityState === "pin_mismatch") {
+      container.createDiv({
+        cls: "vault-rooms-error",
+        text: "Sync is blocked because this server presented an unverified identity. Compare the saved and presented fingerprints with the server owner; there is no trust-anyway bypass."
+      });
     }
 
     this.renderFriendsSection(container);
@@ -107,17 +117,26 @@ export class VaultRoomsView extends ItemView {
     badgeRow.createSpan({ cls: status.running ? "vault-rooms-badge is-running" : "vault-rooms-badge is-stopped", text: status.running ? "Running" : "Stopped" });
 
     if (status.running) {
+      if (status.legacyV01BackupAvailable) {
+        card.createEl("div", {
+          cls: "vault-rooms-error",
+          text: "A v0.1 database archived by an earlier upgrade build is available. Restore it to recover the original users, teams, rooms, files, and history."
+        });
+      }
       if (status.lanUrl) {
         const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
         lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
-        this.addPanelButton(lanRow, "Copy LAN URL", async () => {
-          await navigator.clipboard.writeText(status.lanUrl ?? "");
-          new Notice("LAN URL copied.");
+        const lanInput = lanRow.createEl("input", { value: status.lanUrl });
+        lanInput.readOnly = true;
+        this.addPanelButton(lanRow, "Select LAN URL", () => {
+          lanInput.focus();
+          lanInput.select();
+          new Notice("LAN URL selected.");
         });
       } else {
         card.createEl("div", {
           cls: "vault-rooms-error",
-          text: "Could not auto-detect this device's LAN IP - invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
+          text: "Invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
         });
       }
     } else if (!status.running && status.error) {
@@ -129,6 +148,9 @@ export class VaultRoomsView extends ItemView {
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
     if (status.running) {
       this.addPanelButton(actions, "Stop server", () => this.plugin.stopEmbeddedServer());
+      if (status.legacyV01BackupAvailable) {
+        this.addPanelButton(actions, "Restore v0.1 data", () => this.plugin.restoreLegacyV01Data(), true);
+      }
     } else {
       this.addPanelButton(actions, "Start server", async () => {
         await this.plugin.startEmbeddedServer();
@@ -146,6 +168,8 @@ export class VaultRoomsView extends ItemView {
 
     const server = this.plugin.getActiveServer();
     const hasOwnServer = this.plugin.hasOwnServer();
+    const serverStatus = this.plugin.getServerStatus();
+    const needsOwnerRecovery = !hasOwnServer && serverStatus.running && serverStatus.bootstrapped;
     if (!server) {
       section.createDiv({
         cls: "vault-rooms-empty",
@@ -157,7 +181,7 @@ export class VaultRoomsView extends ItemView {
       // bootstrapped" error; "Join" has no such limit; you can join as many other people's servers
       // as you like.
       if (!hasOwnServer) {
-        this.addPanelButton(actions, "Set up server", () => this.plugin.openSetupServerModal(), true);
+        this.addPanelButton(actions, needsOwnerRecovery ? "Recover server access" : "Set up server", () => this.plugin.openSetupServerModal(), true);
       }
       // Join becomes the primary (CTA) action once Set up is no longer offered.
       this.addPanelButton(actions, "Join server", () => this.plugin.openJoinTeamModal(), hasOwnServer);
@@ -201,7 +225,7 @@ export class VaultRoomsView extends ItemView {
    * one active instead. Rooms mounted under a server that isn't active are simply paused - their
    * local files stay put and nothing is lost, but neither pushes nor live updates happen until you
    * switch back to that server (see the note under Rooms below). There's no background multi-server
-   * sync in v0.1; this is a deliberate simplification, not a bug you're missing a setting for.
+   * sync; this is a deliberate simplification, not a bug you're missing a setting for.
    */
   private renderOtherServersSection(parent: HTMLElement): void {
     const active = this.plugin.getActiveServer();
@@ -224,7 +248,7 @@ export class VaultRoomsView extends ItemView {
         item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
         const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
         this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
-        this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl));
+        this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server)));
       }
     });
   }
@@ -339,7 +363,6 @@ export class VaultRoomsView extends ItemView {
           this.render();
         });
       }
-      this.addPanelButton(cardActions, "Invite link", () => this.plugin.createInvite(team.id));
     }
     if (canDelete) {
       const deleteButton = this.addPanelButton(cardActions, "Delete team", () => this.deleteTeamWithConfirm(team));

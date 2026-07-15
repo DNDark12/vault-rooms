@@ -16,4 +16,6 @@ export interface PluginContext {
   requireActiveServer(): ServerConnection;
   saveSettings(): Promise<void>;
   renderOpenRoomsViews(): void;
+  openJoinServer?(): void;
+  removeSavedConnection?(server: ServerConnection): Promise<void>;
 }

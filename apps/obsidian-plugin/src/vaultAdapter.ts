@@ -1,6 +1,7 @@
 import { normalizePath } from "obsidian";
-import type { Plugin, TAbstractFile, TFile, Vault } from "obsidian";
+import type { Plugin, TFile } from "obsidian";
 import type { VaultAdapter, VaultChangeEvent } from "./syncClient.js";
+import { isFile, listFiles } from "./vaultTraversal.js";
 
 export class ObsidianVaultAdapter implements VaultAdapter {
   constructor(private readonly plugin: Plugin) {}
@@ -60,14 +61,15 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async list(prefix: string): Promise<string[]> {
     const normalizedPrefix = normalizePath(prefix).replace(/\/+$/, "");
-    return this.app.vault
-      .getFiles()
-      .map((file) => file.path)
-      .filter((path) => path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`));
+    const root = normalizedPrefix ? this.app.vault.getAbstractFileByPath(normalizedPrefix) : this.app.vault.getRoot();
+    if (!root) {
+      return [];
+    }
+    return listFiles(root).map((file) => file.path);
   }
 
   onChange(cb: (event: VaultChangeEvent) => void): () => void {
-    const vault = this.app.vault as Vault;
+    const vault = this.app.vault;
     const refs = [
       vault.on("create", (file) => cb({ type: "create", path: file.path })),
       vault.on("modify", (file) => cb({ type: "modify", path: file.path })),
@@ -110,8 +112,4 @@ export class ObsidianVaultAdapter implements VaultAdapter {
       await this.app.vault.createFolder(folder);
     }
   }
-}
-
-function isFile(file: TAbstractFile): file is TFile {
-  return "extension" in file;
 }

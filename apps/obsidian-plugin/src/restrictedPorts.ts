@@ -1,0 +1,21 @@
+/**
+ * Ports Chromium (and therefore Obsidian's Electron renderer - every `requestUrl`/`fetch`/
+ * WebSocket call the plugin makes) unconditionally refuses to connect to, regardless of what's
+ * actually listening there - historically abused protocol ports (SMTP, NTP, IRC, etc.) that a
+ * malicious web page could otherwise use to smuggle traffic to. The relay can still *bind* one of
+ * these (nothing at the OS/Node level stops that), but every client request to it then fails with
+ * `net::ERR_UNSAFE_PORT` - a silent, confusing "it's running but nothing can reach it" state -
+ * so this must be checked before accepting an explicit Port setting, not discovered after the
+ * fact. List mirrors Chromium's kRestrictedPorts
+ * (https://source.chromium.org/chromium/chromium/src/+/main:net/base/port_util.cc).
+ */
+const CHROMIUM_RESTRICTED_PORTS: ReadonlySet<number> = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110,
+  111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000,
+  6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080
+]);
+
+export function isRestrictedPort(port: number): boolean {
+  return CHROMIUM_RESTRICTED_PORTS.has(port);
+}

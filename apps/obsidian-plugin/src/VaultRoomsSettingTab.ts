@@ -1,19 +1,47 @@
-import { Notice, PluginSettingTab, Setting } from "obsidian";
+import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
+import type { MigrationMode } from "@vault-rooms/protocol";
+import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
+import { pinnedInfoForServer } from "./controllers/ServerConnectionManager.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
+import { refreshSettingTab, setDestructiveCompat } from "./obsidianCompat.js";
+import { isRestrictedPort } from "./restrictedPorts.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
   constructor(private readonly plugin: VaultRoomsPlugin) {
     super(plugin.app, plugin);
   }
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        name: "Vault Rooms settings",
+        searchable: false,
+        render: (setting) => {
+          this.renderSettings(setting.settingEl);
+        }
+      }
+    ];
+  }
 
+  /** Fallback for Obsidian runtimes that don't call getSettingDefinitions() (pre-1.13, or any
+   *  build where the app doesn't wire that dispatch up) - the app core calls this unconditionally
+   *  when it doesn't know about the declarative API, and gets a TypeError if it's missing. Kept
+   *  in sync with getSettingDefinitions()'s render callback above; only one of the two runs on any
+   *  given Obsidian version, per Obsidian's own SettingTab#display() doc. */
+  display(): void {
+    this.renderSettings(this.containerEl);
+  }
+
+  private renderSettings(containerEl: HTMLElement): void {
+    containerEl.empty();
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
     this.renderServersSettings(containerEl);
+  }
+
+  private refresh(): void {
+    refreshSettingTab(this, (containerEl) => this.renderSettings(containerEl));
   }
 
   private renderServerSettings(containerEl: HTMLElement): void {
@@ -32,7 +60,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
               status.lanUrl
                 ? `, LAN: ${status.lanUrl}`
                 : status.lanDetectionFailed
-                  ? " — could NOT auto-detect a LAN IP; invite links will point at 127.0.0.1 and won't work for teammates until you set a Public URL override below, then restart the server."
+                  ? " — invite links will point at 127.0.0.1 until you set a Public URL override below, then restart the server."
                   : ""
             }`
           : status.error
@@ -53,18 +81,22 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             } catch (error) {
               new Notice(error instanceof Error ? error.message : "Vault Rooms server action failed");
             }
-            this.display();
+            this.refresh();
           })
       );
+
+    if (status.running) {
+      this.renderTransportSecurity(containerEl, status);
+    }
 
     new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "The server always listens on your local network so teammates can connect - no TLS in v0.1, so only run this on networks you trust. Set this only if LAN IP auto-detection picks the wrong network interface or fails outright (multiple network adapters, VPNs, some Wi-Fi drivers): this device's real LAN address, e.g. http://192.168.1.42:8787. Leave blank to auto-detect."
+        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - just the address, no http:// or port needed (both are filled in automatically, and any port you do include is ignored in favor of the server's real one). Leave this field blank entirely to use loopback for this device only."
       )
       .addText((text) =>
         text
-          .setPlaceholder("auto-detect")
+          .setPlaceholder("192.168.1.100")
           .setValue(this.plugin.settings.server.publicUrlOverride ?? "")
           .onChange(async (value) => {
             const trimmed = value.trim();
@@ -89,29 +121,23 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             if (trimmed && (!Number.isInteger(parsed) || (parsed as number) <= 0 || (parsed as number) > 65535)) {
               return;
             }
+            if (parsed !== undefined && isRestrictedPort(parsed)) {
+              new Notice(`Port ${parsed} is blocked by Obsidian's Electron runtime and can never be reached - choose a different port.`);
+              return;
+            }
             this.plugin.settings.server.port = parsed;
             await this.plugin.saveSettings();
           })
       );
 
     new Setting(containerEl)
-      .setName("Allow remote bootstrap")
-      .setDesc("Allow creating the first team from a non-localhost address. Leave off unless you know you need it.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.server.allowRemoteBootstrap).onChange(async (value) => {
-          this.plugin.settings.server.allowRemoteBootstrap = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Max synced file size")
-      .setDesc("Files larger than this (in bytes) are rejected. Default 5242880 (5 MB).")
+      .setName("Max synced file size (MB)")
+      .setDesc("Files larger than this are rejected. Default 5 MB.")
       .addText((text) =>
-        text.setValue(String(this.plugin.settings.server.maxFileBytes)).onChange(async (value) => {
-          const parsed = Number.parseInt(value, 10);
-          if (Number.isFinite(parsed) && parsed > 0) {
-            this.plugin.settings.server.maxFileBytes = parsed;
+        text.setValue(String(this.plugin.settings.server.maxFileBytes / (1024 * 1024))).onChange(async (value) => {
+          const parsedMb = Number.parseFloat(value);
+          if (Number.isFinite(parsedMb) && parsedMb > 0) {
+            this.plugin.settings.server.maxFileBytes = Math.round(parsedMb * 1024 * 1024);
             await this.plugin.saveSettings();
           }
         })
@@ -177,7 +203,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         button.setButtonText("Use").setDisabled(active).onClick(async () => {
           try {
             await this.plugin.activateServer(server.id);
-            this.display();
+            this.refresh();
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "Server switch failed");
           }
@@ -186,24 +212,128 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       setting.addButton((button) =>
         button.setButtonText("Test").onClick(async () => {
           try {
-            await this.plugin.testConnection(server.baseUrl);
+            await this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server));
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "Connection failed");
           }
         })
       );
       setting.addButton((button) =>
-        button
-          .setButtonText("Forget")
-          .setDestructive()
+        setDestructiveCompat(button.setButtonText("Forget"))
           .onClick(async () => {
             if (!(await confirmModal(this.app, "Forget server", `Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`, "Forget"))) {
               return;
             }
             await this.plugin.forgetServer(server.id);
-            this.display();
+            this.refresh();
           })
       );
     }
   }
+
+  private renderTransportSecurity(
+    containerEl: HTMLElement,
+    status: Extract<ReturnType<VaultRoomsPlugin["getServerStatus"]>, { running: true }>
+  ): void {
+    if (status.securityState === "plain_legacy") {
+      new Setting(containerEl)
+        .setName("Transport security")
+        .setDesc(
+          "This team is using legacy plaintext HTTP/WS. Tokens and content are not encrypted on the LAN. Enable TLS migration to protect future traffic."
+        )
+        .addButton((button) =>
+          button.setButtonText("Enable TLS migration").onClick(async () => {
+            const mode = await chooseMigrationMode(this.app);
+            if (!mode) return;
+            await this.plugin.enableTlsMigration(mode);
+            this.refresh();
+          })
+        );
+      return;
+    }
+
+    const identity = status.pinnedInfo;
+    const detail = identity
+      ? `${identity.tlsName} — fingerprint ${identity.pinnedIdentitySpkiSha256}${status.httpsUrl ? ` — ${status.httpsUrl}` : ""}`
+      : "Pinned identity unavailable";
+    if (status.securityState === "tls_migrating") {
+      new Setting(containerEl)
+        .setName("TLS migration")
+        .setDesc(`${detail} — ${status.plainDeviceCount ?? 0} active device(s) still seen on legacy HTTP.`)
+        .addButton((button) =>
+          setDestructiveCompat(button.setButtonText("Enforce TLS"))
+            .onClick(async () => {
+              if (
+                !(await confirmModal(
+                  this.app,
+                  "Enforce TLS",
+                  "Disable the legacy HTTP/WS listener now? Devices that have not migrated will stop connecting.",
+                  "Enforce TLS"
+                ))
+              ) {
+                return;
+              }
+              await this.plugin.enforceTls();
+              this.refresh();
+            })
+        );
+      return;
+    }
+
+    new Setting(containerEl)
+      .setName("Pinned TLS")
+      .setDesc(detail)
+      .addButton((button) =>
+        setDestructiveCompat(button.setButtonText("Rotate server identity"))
+          .onClick(async () => {
+            if (
+              !(await confirmModal(
+                this.app,
+                "Rotate server identity",
+                "Rotate the pinned server identity and restart only the TLS listener? Connected TLS clients will verify the signed rotation before reconnecting.",
+                "Rotate identity"
+              ))
+            ) {
+              return;
+            }
+            await this.plugin.rotateIdentity();
+            this.refresh();
+          })
+      );
+  }
+}
+
+function chooseMigrationMode(app: App): Promise<MigrationMode | null> {
+  return new Promise((resolve) => {
+    class MigrationModeModal extends Modal {
+      private selected: MigrationMode | null = null;
+
+      onOpen(): void {
+        this.setTitle("Enable TLS migration");
+        this.contentEl.createEl("p", {
+          text: "Normal migration trusts one authenticated plaintext response to learn the new pin, so an active attacker on the local network could replace that first pin. Use Strict migration for sensitive teams; it requires a fresh pinned invite link from the owner."
+        });
+        new Setting(this.contentEl)
+          .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+          .addButton((button) =>
+            button.setButtonText("Normal").setCta().onClick(() => {
+              this.selected = "non_strict";
+              this.close();
+            })
+          )
+          .addButton((button) =>
+            button.setButtonText("Strict").onClick(() => {
+              this.selected = "strict";
+              this.close();
+            })
+          );
+      }
+
+      onClose(): void {
+        this.contentEl.empty();
+        resolve(this.selected);
+      }
+    }
+    new MigrationModeModal(app).open();
+  });
 }

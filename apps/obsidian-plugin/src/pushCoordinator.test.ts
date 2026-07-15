@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 
+// pushCoordinator's default timer fallback calls window.setTimeout/clearTimeout (see syncWsClient.test.ts
+// for the same shim) - vitest's "node" test environment has no window global otherwise.
+(globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
+
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
 

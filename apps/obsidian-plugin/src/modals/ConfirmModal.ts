@@ -1,4 +1,5 @@
 import { Modal, Setting, type App } from "obsidian";
+import { setDestructiveCompat } from "../obsidianCompat.js";
 
 /** Promise-based replacement for window.confirm() - the plugin review guidelines reject native
  *  confirm dialogs, and a Modal keeps keyboard focus inside Obsidian's own UI. Resolves true only
@@ -14,9 +15,7 @@ export function confirmModal(app: App, title: string, message: string, ctaText: 
         new Setting(this.contentEl)
           .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
           .addButton((button) =>
-            button
-              .setButtonText(ctaText)
-              .setDestructive()
+            setDestructiveCompat(button.setButtonText(ctaText))
               .onClick(() => {
                 this.confirmed = true;
                 this.close();

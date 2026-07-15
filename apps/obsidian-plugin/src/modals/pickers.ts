@@ -1,4 +1,5 @@
-import { App, SuggestModal, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, SuggestModal, TAbstractFile } from "obsidian";
+import { listFiles, listFolders } from "../vaultTraversal.js";
 
 export type PluginOption = {
   pluginId: string;
@@ -39,7 +40,7 @@ export class VaultPathSuggestModal extends SuggestModal<TAbstractFile> {
 
   getSuggestions(query: string): TAbstractFile[] {
     const needle = query.toLowerCase().trim();
-    const files = this.type === "folder" ? this.app.vault.getAllLoadedFiles().filter(isFolder) : this.app.vault.getFiles();
+    const files = this.type === "folder" ? listFolders(this.app.vault.getRoot()) : listFiles(this.app.vault.getRoot());
     return files
       .filter((file) => file.path && !file.path.startsWith(`${this.app.vault.configDir}/`))
       .filter((file) => !needle || file.path.toLowerCase().includes(needle))
@@ -54,12 +55,4 @@ export class VaultPathSuggestModal extends SuggestModal<TAbstractFile> {
   onChooseSuggestion(file: TAbstractFile): void {
     this.onChoose(file.path);
   }
-}
-
-function isFolder(file: TAbstractFile): file is TFolder {
-  return file instanceof TFolder;
-}
-
-export function isFile(file: TAbstractFile): file is TFile {
-  return file instanceof TFile;
 }

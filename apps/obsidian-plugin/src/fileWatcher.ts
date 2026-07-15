@@ -2,8 +2,12 @@ import { isEligiblePath } from "@vault-rooms/protocol";
 import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "./syncClient.js";
 
 /** Shared by isWatchableChange (single-path events) and classifyRenameEvent (each side of a
- *  rename/move) - one place that decides "is this vault-relative path something we sync at all". */
-function relativePathIfWatchable(path: string, room: MountedRoomState): string | null {
+ *  rename/move) - one place that decides "is this vault-relative path something we sync at all".
+ *  configDir is required (no fallback default) - a room mounted at the vault root needs the
+ *  caller's actual (possibly user-customized) Vault#configDir to filter out the real config
+ *  folder, so callers must always pass it explicitly rather than risk silently assuming a
+ *  default that may not match. */
+function relativePathIfWatchable(path: string, room: MountedRoomState, configDir: string): string | null {
   const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
   if (!path.startsWith(prefix)) {
     return null;
@@ -11,13 +15,13 @@ function relativePathIfWatchable(path: string, room: MountedRoomState): string |
   const relativePath = path.slice(prefix.length);
   if (
     !relativePath ||
-    relativePath.startsWith(".obsidian/") ||
+    relativePath.startsWith(`${configDir}/`) ||
     relativePath.startsWith(".git/") ||
     relativePath.startsWith("node_modules/") ||
     relativePath.endsWith(".tmp") ||
     relativePath.endsWith(".DS_Store") ||
     isConflictCopyPath(relativePath) ||
-    // Skip file types we don't sync at all (v0.1: text/markdown/canvas/json/csv plus common
+    // Skip file types we don't sync at all (text/markdown/canvas/json/csv plus common
     // image formats and PDF) - avoids a doomed round trip to the server on every keystroke/save
     // for files that were never eligible in the first place.
     !isEligiblePath(relativePath)
@@ -27,8 +31,8 @@ function relativePathIfWatchable(path: string, room: MountedRoomState): string |
   return relativePath;
 }
 
-export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomState): string | null {
-  return relativePathIfWatchable(event.path, room);
+export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomState, configDir: string): string | null {
+  return relativePathIfWatchable(event.path, room, configDir);
 }
 
 export type RenameClassification =
@@ -43,9 +47,9 @@ export type RenameClassification =
  * effectively a delete of the old path, old-out/new-in is effectively a create of the new path,
  * and both outside (or either side ineligible/a conflict copy) is ignored entirely.
  */
-export function classifyRenameEvent(oldPath: string, newPath: string, room: MountedRoomState): RenameClassification {
-  const oldRelativePath = relativePathIfWatchable(oldPath, room);
-  const newRelativePath = relativePathIfWatchable(newPath, room);
+export function classifyRenameEvent(oldPath: string, newPath: string, room: MountedRoomState, configDir: string): RenameClassification {
+  const oldRelativePath = relativePathIfWatchable(oldPath, room, configDir);
+  const newRelativePath = relativePathIfWatchable(newPath, room, configDir);
   if (oldRelativePath && newRelativePath) {
     return { kind: "rename", oldRelativePath, relativePath: newRelativePath };
   }
@@ -65,10 +69,15 @@ export function classifyRenameEvent(oldPath: string, newPath: string, room: Moun
  *  A rename/move is translated into a delete-of-old plus create-of-new (see classifyRenameEvent)
  *  so callers only ever need to handle the same "create" | "modify" | "delete" shape they already
  *  do for plain vault events - there is no separate "move" concept in the sync protocol. */
-export function registerMountedRoomWatcher(vault: VaultAdapter, room: MountedRoomState, cb: (event: VaultChangeEvent, relativePath: string) => void): () => void {
+export function registerMountedRoomWatcher(
+  vault: VaultAdapter,
+  room: MountedRoomState,
+  cb: (event: VaultChangeEvent, relativePath: string) => void,
+  configDir: string
+): () => void {
   return vault.onChange((event) => {
     if (event.type === "rename") {
-      const classification = classifyRenameEvent(event.oldPath, event.path, room);
+      const classification = classifyRenameEvent(event.oldPath, event.path, room, configDir);
       if (classification.kind === "rename") {
         cb({ type: "delete", path: event.oldPath }, classification.oldRelativePath);
         cb({ type: "create", path: event.path }, classification.relativePath);
@@ -79,7 +88,7 @@ export function registerMountedRoomWatcher(vault: VaultAdapter, room: MountedRoo
       }
       return;
     }
-    const relativePath = isWatchableChange(event, room);
+    const relativePath = isWatchableChange(event, room, configDir);
     if (relativePath) {
       cb(event, relativePath);
     }

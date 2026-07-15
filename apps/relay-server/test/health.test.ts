@@ -3,16 +3,16 @@ import { createApp } from "../src/app.js";
 
 describe("health", () => {
   it("returns Vault Rooms identity", async () => {
-    const app = await createApp();
+    const app = await createApp({ dbPath: ":memory:" });
     const response = await app.inject({ method: "GET", url: "/health" });
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["access-control-allow-origin"]).toBe("*");
-    expect(response.json()).toEqual({ ok: true, name: "vault-rooms", version: "0.1.0" });
+    expect(response.json()).toEqual({ ok: true, name: "vault-rooms", version: "0.2.0" });
   });
 
   it("handles browser preflight requests", async () => {
-    const app = await createApp();
+    const app = await createApp({ dbPath: ":memory:" });
     const response = await app.inject({ method: "OPTIONS", url: "/api/bootstrap" });
 
     expect(response.statusCode).toBe(204);
@@ -27,7 +27,7 @@ describe("health", () => {
     // enforce this, so a missing method here only breaks in production, never in this test suite,
     // unless asserted explicitly. PATCH is used by PUT /api/rooms/:roomId's update-room-settings
     // flow (apiClient.updateRoom); keep this list in sync with every app.<method>(...) registered.
-    const app = await createApp();
+    const app = await createApp({ dbPath: ":memory:" });
     const response = await app.inject({ method: "OPTIONS", url: "/api/rooms/room_x" });
 
     for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {

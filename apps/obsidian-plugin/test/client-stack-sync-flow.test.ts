@@ -165,7 +165,8 @@ function buildClient(input: {
     deviceName: input.deviceName,
     deviceToken: input.deviceToken,
     isServerOwner: false,
-    status: "active"
+    status: "active",
+    securityMode: "plain"
   };
   const api = new RelayApiClient(input.baseUrl, input.deviceToken);
   const syncEngine = new VaultSyncEngine(vault, api);
@@ -201,9 +202,14 @@ function buildClient(input: {
     debounceMs: 20,
     isStillMounted: () => true
   });
-  const unsubscribeWatcher = registerMountedRoomWatcher(vault, room, (event, relativePath) => {
-    coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
-  });
+  const unsubscribeWatcher = registerMountedRoomWatcher(
+    vault,
+    room,
+    (event, relativePath) => {
+      coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
+    },
+    ".obsidian"
+  );
   const client: Client = { vault, server, api, syncEngine, room, socket, coordinator, states, appliedCount: 0, unsubscribeWatcher };
   Object.defineProperty(client, "appliedCount", { get: () => appliedCount });
   clients.push(client);

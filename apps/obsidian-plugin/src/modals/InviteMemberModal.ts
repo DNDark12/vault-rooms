@@ -1,10 +1,10 @@
-import { Modal, Notice, Setting } from "obsidian";
+import { Modal, Notice } from "obsidian";
+import { copyInviteLink } from "../inviteClipboard.js";
 import type VaultRoomsPlugin from "../main.js";
 
 export class InviteMemberModal extends Modal {
   constructor(
     private readonly plugin: VaultRoomsPlugin,
-    private readonly inviteText: string,
     private readonly joinUrl: string
   ) {
     super(plugin.app);
@@ -13,19 +13,30 @@ export class InviteMemberModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
+    contentEl.addClass("vault-rooms-invite-modal");
     this.setTitle("Invite member");
     contentEl.createEl("p", {
+      cls: "vault-rooms-setting-hint",
       text: "Send this link to a teammate on the same LAN. Clicking it opens Obsidian and pre-fills the join form (Vault Rooms plugin must already be installed on their side)."
     });
-    contentEl.createEl("a", { text: this.joinUrl, href: this.joinUrl }).setAttr("style", "display: block; word-break: break-all; margin-bottom: 12px;");
-    new Setting(contentEl).addButton((button) =>
-      button.setButtonText("Copy invite link").onClick(async () => {
-        await navigator.clipboard.writeText(this.joinUrl);
+    const linkInput = contentEl.createEl("textarea", { text: this.joinUrl });
+    linkInput.readOnly = true;
+    linkInput.addClass("vault-rooms-invite-link");
+    const selectLink = () => {
+      linkInput.focus();
+      linkInput.select();
+      new Notice("Invite link selected.");
+    };
+    const linkActions = contentEl.createDiv({ cls: "vault-rooms-invite-actions" });
+    const copyButton = linkActions.createEl("button", { text: "Copy" });
+    copyButton.addClass("mod-cta");
+    copyButton.onClickEvent(async () => {
+      if (await copyInviteLink(this.joinUrl, navigator.clipboard, selectLink)) {
         new Notice("Invite link copied.");
-      })
-    );
-    contentEl.createEl("p", { text: "Full details (server URL, token, link):" });
-    contentEl.createEl("textarea", { text: this.inviteText }).setAttr("style", "width: 100%; min-height: 100px;");
-    new Setting(contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
+      }
+    });
+    linkActions.createEl("button", { text: "Select" }).onClickEvent(selectLink);
+    const footer = contentEl.createDiv({ cls: "vault-rooms-invite-actions is-footer" });
+    footer.createEl("button", { text: "Close" }).onClickEvent(() => this.close());
   }
 }

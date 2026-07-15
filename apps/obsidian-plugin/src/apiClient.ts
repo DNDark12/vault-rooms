@@ -1,3 +1,6 @@
+import { requestUrl, type RequestUrlParam } from "obsidian";
+import type { SecurityUpgradeInfo } from "@vault-rooms/protocol";
+import { pinnedRequest, type PinnedServerInfo } from "./pinnedTransport.js";
 import type { RelayFileApi } from "./syncClient.js";
 
 export type RoomSummary = {
@@ -48,6 +51,26 @@ export type FriendSummary = {
   teams: Array<{ id: string; role: "admin" | "member" }>;
 };
 
+export type BootstrapResponse = {
+  user: { id: string; displayName: string };
+  device: { id: string; displayName: string };
+  deviceToken: string;
+  isServerOwner: boolean;
+  team?: { id: string; slug: string; name: string };
+};
+
+export type InviteLinkResponse = { inviteId: string; inviteToken: string; serverUrl: string; joinUrl: string };
+
+export type InviteGrantResult =
+  | { inviteType: "team"; team: { id: string; slug: string; name: string } }
+  | { inviteType: "room"; room: { id: string; name: string } }
+  | { inviteType: "friend" };
+
+export type InviteJoinResponse = BootstrapResponse & InviteGrantResult;
+export type InviteAcceptanceResponse = (InviteGrantResult | { inviteType: "friend"; alreadyConnected: true }) & {
+  deviceToken?: string;
+};
+
 export type AclRuleSummary = {
   id: string;
   roomId: string;
@@ -71,25 +94,47 @@ export class RelayApiClient implements RelayFileApi {
      * itself isn't malformed, the server simply has no record of it. Lets the caller (the plugin)
      * flag the saved team as needing to be re-set-up/re-joined instead of just failing silently.
      */
-    private readonly onUnauthorized?: () => void
+    private readonly onUnauthorized?: () => void,
+    private readonly pinned?: PinnedServerInfo,
+    private readonly onAuthenticated?: () => void,
+    private readonly onPinnedTransportFailure?: (error: Error) => Promise<"retry" | "normal" | "stop">
   ) {}
 
   async testConnection(): Promise<{ ok: true; version: string }> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3_000);
-    try {
-      const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
-      const body = await response.json();
-      if (body.name !== "vault-rooms") {
-        throw new Error("Something answered, but it is not a Vault Rooms server.");
-      }
-      return { ok: true, version: body.version };
-    } finally {
-      clearTimeout(timeout);
-    }
+    return this.testConnectionAttempt(true);
   }
 
-  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; pin: string }) {
+  private async testConnectionAttempt(allowPinnedRecovery: boolean): Promise<{ ok: true; version: string }> {
+    let response: Awaited<ReturnType<typeof pinnedRequest>> | Awaited<ReturnType<typeof requestUrlWithTimeout>>;
+    try {
+      response = this.pinned
+        ? await pinnedRequest(this.pinned, { url: `${this.baseUrl}/health`, timeoutMs: 3_000 })
+        : await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, 3_000);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+        const decision = await this.onPinnedTransportFailure(normalized);
+        if (decision === "retry") {
+          return this.testConnectionAttempt(false);
+        }
+      }
+      throw normalized;
+    }
+    let body: { name?: string; version?: string };
+    try {
+      body = response.json as { name?: string; version?: string };
+    } catch {
+      // response.json is a synchronous getter that throws SyntaxError on invalid JSON - e.g. a
+      // router admin page or some other non-Vault-Rooms HTTP service answering on that host/port.
+      throw new Error("Something answered, but it is not a Vault Rooms server.");
+    }
+    if (body.name !== "vault-rooms") {
+      throw new Error("Something answered, but it is not a Vault Rooms server.");
+    }
+    return { ok: true, version: body.version ?? "unknown" };
+  }
+
+  async bootstrapServer(input: { displayName: string; deviceName: string; teamName?: string; pin: string }): Promise<BootstrapResponse> {
     return this.request("/api/bootstrap", {
       method: "POST",
       body: input
@@ -97,6 +142,7 @@ export class RelayApiClient implements RelayFileApi {
   }
 
   async me(): Promise<{
+    serverId?: string;
     user: { id: string; displayName: string };
     device: { id: string; displayName: string };
     isServerOwner: boolean;
@@ -105,10 +151,29 @@ export class RelayApiClient implements RelayFileApi {
     return this.request("/api/me");
   }
 
-  async acceptInvite(inviteToken: string): Promise<{ team: { id: string; slug: string; name: string } }> {
+  async securityUpgradeInfo(): Promise<SecurityUpgradeInfo> {
+    return this.request("/api/security/upgrade-info");
+  }
+
+  async completeTlsMigration(): Promise<{ deviceToken: string }> {
+    return this.request("/api/security/complete-tls-migration", { method: "POST" });
+  }
+
+  async acceptInvite(inviteToken: string): Promise<InviteAcceptanceResponse> {
     return this.request("/api/invites/accept", {
       method: "POST",
       body: { inviteToken }
+    });
+  }
+
+  async acceptInviteWithProof(input: {
+    inviteToken: string;
+    deviceId: string;
+    deviceProof: string;
+  }): Promise<InviteAcceptanceResponse> {
+    return this.request("/api/invites/accept", {
+      method: "POST",
+      body: input
     });
   }
 
@@ -144,10 +209,24 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async createInvite(teamId: string, role: "member" | "admin" = "member") {
+  async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<InviteLinkResponse> {
     return this.request(`/api/teams/${teamId}/invites`, {
       method: "POST",
       body: { role, expiresInMinutes: 60, maxUses: 1 }
+    });
+  }
+
+  async createRoomInvite(roomId: string, preset: "reader" | "editor"): Promise<InviteLinkResponse> {
+    return this.request(`/api/rooms/${roomId}/invites`, {
+      method: "POST",
+      body: { preset, expiresInMinutes: 60, maxUses: 1 }
+    });
+  }
+
+  async createFriendInvite(): Promise<InviteLinkResponse> {
+    return this.request("/api/invites", {
+      method: "POST",
+      body: { expiresInMinutes: 60, maxUses: 1 }
     });
   }
 
@@ -162,7 +241,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async join(inviteToken: string, displayName: string, deviceName: string) {
+  async join(inviteToken: string, displayName: string, deviceName: string): Promise<InviteJoinResponse> {
     return this.request("/api/join", {
       method: "POST",
       body: { inviteToken, displayName, deviceName }
@@ -180,7 +259,7 @@ export class RelayApiClient implements RelayFileApi {
     mountName: string;
     conflictPolicy?: "keep_both" | "owner_wins";
     capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
-  }) {
+  }): Promise<{ room: RoomSummary }> {
     return this.request("/api/rooms", {
       method: "POST",
       body: input
@@ -204,7 +283,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }) {
+  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }): Promise<{ aclRule: AclRuleSummary }> {
     return this.request(`/api/rooms/${roomId}/acl`, {
       method: "POST",
       body: input
@@ -249,42 +328,88 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  private async request(path: string, options: { method?: string; body?: unknown } = {}) {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: options.method ?? "GET",
-      headers: {
-        ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
-        ...(options.body ? { "content-type": "application/json" } : {})
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined
-    });
+  private async request<T = unknown>(
+    path: string,
+    options: { method?: string; body?: unknown } = {},
+    allowPinnedRecovery = true
+  ): Promise<T> {
+    const headers = {
+      ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+      ...(options.body ? { "content-type": "application/json" } : {})
+    };
+    let response: Awaited<ReturnType<typeof pinnedRequest>> | Awaited<ReturnType<typeof requestUrl>>;
+    try {
+      response = this.pinned
+        ? await pinnedRequest(this.pinned, {
+            url: `${this.baseUrl}${path}`,
+            method: options.method ?? "GET",
+            headers,
+            body: options.body ? JSON.stringify(options.body) : undefined
+          })
+        : await requestUrl({
+            url: `${this.baseUrl}${path}`,
+            method: options.method ?? "GET",
+            headers,
+            throw: false,
+            body: options.body ? JSON.stringify(options.body) : undefined
+          });
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+        const decision = await this.onPinnedTransportFailure(normalized);
+        if (decision === "retry") {
+          return this.request(path, options, false);
+        }
+      }
+      throw normalized;
+    }
     // A well-behaved relay always answers with JSON (success or error envelope), but a network-
     // level proxy, an empty response, or a truncated body could hand back something that isn't -
     // response.json() throws a raw SyntaxError for that, which would bypass toRelayError()'s
     // UNAUTHORIZED handling entirely and surface a confusing low-level error to the caller instead
     // of a clean, actionable one.
-    let body: any;
+    let body: unknown;
     try {
-      body = await response.json();
+      body = response.json;
     } catch {
       throw toRelayError(undefined, "Unexpected non-JSON response from relay");
     }
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       const error = toRelayError(body);
       if (error.code === "UNAUTHORIZED") {
         this.onUnauthorized?.();
       }
       throw error;
     }
-    return body;
+    this.onAuthenticated?.();
+    return body as T;
   }
 }
 
-function toRelayError(body: any, fallbackMessage = "Relay request failed"): Error & { code?: string } {
-  const error = new Error(body?.error?.message ?? fallbackMessage) as Error & Record<string, unknown>;
-  error.code = body?.error?.code;
-  if (body?.error?.details && typeof body.error.details === "object") {
-    Object.assign(error, body.error.details);
+export function requestUrlWithTimeout(request: RequestUrlParam, timeoutMs: number): Promise<Awaited<ReturnType<typeof requestUrl>>> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error("Request timed out.")), timeoutMs);
+    requestUrl(request).then(
+      (response) => {
+        window.clearTimeout(timeout);
+        resolve(response);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
+}
+
+type RelayErrorBody = { error?: { message?: string; code?: string; details?: Record<string, unknown> } };
+
+function toRelayError(body: unknown, fallbackMessage = "Relay request failed"): Error & { code?: string } {
+  const errorBody = body as RelayErrorBody | undefined;
+  const error = new Error(errorBody?.error?.message ?? fallbackMessage) as Error & Record<string, unknown>;
+  error.code = errorBody?.error?.code;
+  if (errorBody?.error?.details && typeof errorBody.error.details === "object") {
+    Object.assign(error, errorBody.error.details);
   }
   return error;
 }
