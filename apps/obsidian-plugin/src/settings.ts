@@ -102,7 +102,7 @@ export function migrateVaultRoomsSettings(
   const servers = recognizedServers.map((server) =>
     isLegacyServerConnection(server)
       ? migrateLegacyServerConnection(server)
-      : migrateServerConnectionSettings(server as ServerConnection)
+      : migrateServerConnectionSettings(server)
   );
   const activeServerId = loaded?.activeServerId;
   // v0.1 mounted-room records did not store their server. With exactly one saved server the
