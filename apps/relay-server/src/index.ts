@@ -5,7 +5,7 @@ import { detectLanIp, resolveRuntimeConfig } from "./config.js";
 import { openRelayDb } from "./db/db.js";
 import { createRelayCore } from "./relayCore.js";
 import { createFsIdentityStore } from "./security/fsIdentityStore.js";
-import { ensureServerIdentity } from "./security/identityLifecycle.js";
+import { ensureServerIdentity, resolveServerIdForIdentityStore } from "./security/identityLifecycle.js";
 import { tlsCertificateChainPem } from "./security/identity.js";
 
 export function serverIdentity(): string {
@@ -60,9 +60,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   const db = await openRelayDb("data/relay.sqlite");
   const core = createRelayCore(db, { maxFileBytes: config.maxFileBytes });
+  const identityStore = config.tlsMode === "pinned" ? createFsIdentityStore(config.identityDir) : null;
   // The identity store binds to this ID. Make it durable before any key file can be created so a
   // crash cannot leave identity.json referring to an ID that vanished with a delayed DB flush.
-  const stableServerId = await core.repo.durable(() => core.repo.getOrCreateServerId());
+  const stableServerId = identityStore
+    ? await resolveServerIdForIdentityStore(core.repo, identityStore)
+    : await core.repo.durable(() => core.repo.getOrCreateServerId());
   let bootstrapApp: Awaited<ReturnType<typeof createAppWithDb>>;
   const listeningUrls: string[] = [];
 
@@ -78,7 +81,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const serverId = stableServerId;
     const persisted = await ensureServerIdentity({
       serverId,
-      store: createFsIdentityStore(config.identityDir)
+      store: identityStore!
     });
     const currentState = core.repo.getSecurityState();
     const nextState = resolvePinnedStartupState(

@@ -69,6 +69,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     }
 
     const baseVersion = body.baseVersion ?? 0;
+    assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });
     assertRoomPermission({
       repo,
       principal,
@@ -113,6 +114,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "relativePath and baseVersion are required.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
+    assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });
     assertRoomPermission({ repo, principal, room, permission: "file:delete", relativePath });
     const result = repo.deleteFile({
       roomId: room.id,

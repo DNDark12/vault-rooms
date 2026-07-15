@@ -41,6 +41,8 @@ export type EmbeddedServerSettings = {
 
 export type VaultRoomsSettings = {
   servers: ServerConnection[];
+  /** Raw persisted entries that could not be safely interpreted; retained so a later version can recover them. */
+  unrecognizedServers?: unknown[];
   activeServerId?: string;
   mountRoot: string;
   debounceMs: number;
@@ -56,6 +58,7 @@ export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
 
 export const DEFAULT_SETTINGS: VaultRoomsSettings = {
   servers: [],
+  unrecognizedServers: [],
   mountRoot: "Vault Rooms",
   debounceMs: 300,
   mountedRooms: {},
@@ -78,20 +81,25 @@ export function migrateServerConnectionSettings<
 }
 
 export type PersistedVaultRoomsSettings = Partial<Omit<VaultRoomsSettings, "servers">> & {
-  servers?: object[];
+  servers?: unknown[];
 };
 
 export function migrateVaultRoomsSettings(
   loaded: PersistedVaultRoomsSettings | null
 ): { settings: VaultRoomsSettings; migratedLegacy: boolean } {
-  const persistedServers = loaded?.servers ?? [];
+  const persistedServers = Array.isArray(loaded?.servers) ? loaded.servers : [];
+  const recognizedServers = persistedServers.filter(isRecognizedServerConnection);
+  const unrecognizedServers = [
+    ...(Array.isArray(loaded?.unrecognizedServers) ? loaded.unrecognizedServers : []),
+    ...persistedServers.filter((server) => !isRecognizedServerConnection(server))
+  ];
   // Released v0.1 entries already used the current server shape, but predate both transport
   // security fields. Treat adding either default as a real migration so loadSettings persists it
   // immediately instead of recreating an empty appliedRotationIds list on every startup.
-  const migratedLegacy = persistedServers.some(
+  const migratedLegacy = unrecognizedServers.length > (loaded?.unrecognizedServers?.length ?? 0) || recognizedServers.some(
     (server) => isLegacyServerConnection(server) || !("securityMode" in server) || !("appliedRotationIds" in server)
   );
-  const servers = persistedServers.map((server) =>
+  const servers = recognizedServers.map((server) =>
     isLegacyServerConnection(server)
       ? migrateLegacyServerConnection(server)
       : migrateServerConnectionSettings(server as ServerConnection)
@@ -115,6 +123,7 @@ export function migrateVaultRoomsSettings(
       ...DEFAULT_SETTINGS,
       ...loaded,
       servers,
+      unrecognizedServers,
       activeServerId,
       mountedRooms,
       roomMountPaths: loaded?.roomMountPaths ?? DEFAULT_SETTINGS.roomMountPaths,
@@ -123,7 +132,7 @@ export function migrateVaultRoomsSettings(
   };
 }
 
-type LegacyServerConnection = {
+type LegacyServerConnection = Record<string, unknown> & {
   id: string;
   baseUrl: string;
   userId: string;
@@ -132,24 +141,42 @@ type LegacyServerConnection = {
   deviceName: string;
   deviceToken: string;
   status: "active" | "revoked";
+  isServerOwner?: boolean;
+  securityMode?: SecurityMode;
+  appliedRotationIds?: string[];
   role?: "owner" | "admin" | "member";
   teamId: string;
 };
 
-function isLegacyServerConnection(server: object): server is LegacyServerConnection {
-  return "teamId" in server;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLegacyServerConnection(server: Record<string, unknown>): server is LegacyServerConnection {
+  return typeof server.teamId === "string";
+}
+
+function isRecognizedServerConnection(server: unknown): server is ServerConnection | LegacyServerConnection {
+  if (!isRecord(server)) return false;
+  const hasCommonFields =
+    typeof server.id === "string" &&
+    typeof server.baseUrl === "string" &&
+    typeof server.userId === "string" &&
+    typeof server.userDisplayName === "string" &&
+    typeof server.deviceId === "string" &&
+    typeof server.deviceName === "string" &&
+    typeof server.deviceToken === "string" &&
+    (server.status === "active" || server.status === "revoked");
+  if (!hasCommonFields) return false;
+  return isLegacyServerConnection(server) || typeof server.isServerOwner === "boolean";
 }
 
 function migrateLegacyServerConnection(server: LegacyServerConnection): ServerConnection {
+  const migrated: Record<string, unknown> = { ...server };
+  delete migrated.teamId;
+  delete migrated.role;
   return migrateServerConnectionSettings({
-    id: server.id,
-    baseUrl: server.baseUrl,
-    userId: server.userId,
-    userDisplayName: server.userDisplayName,
-    deviceId: server.deviceId,
-    deviceName: server.deviceName,
-    deviceToken: server.deviceToken,
-    isServerOwner: server.role === "owner",
-    status: server.status
+    ...(migrated as unknown as ServerConnection),
+    isServerOwner: server.isServerOwner ?? server.role === "owner"
   });
 }

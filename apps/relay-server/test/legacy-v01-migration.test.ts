@@ -8,6 +8,42 @@ function columnNames(db: RelayDb, table: string): string[] {
 }
 
 describe("v0.1 database migration", () => {
+  it("preserves shares-only v0.1 rows when no rooms table exists", async () => {
+    const db = await openSqlJsDb(":memory:");
+    db.exec(`${LEGACY_V01_SCHEMA}
+      alter table acl_rules rename column room_id to share_id;
+      alter table files rename column room_id to share_id;
+      drop table rooms;
+      create table shares(id text primary key, team_id text not null, name text not null, type text not null, source_path text not null, mount_name text not null, owner_user_id text not null, created_at text not null, updated_at text not null, unique(team_id, mount_name));
+      create table share_capabilities(id text primary key, share_id text not null, plugin_id text not null, display_name text not null, mode text not null, min_version text);
+
+      insert into users values ('usr_owner', 'Owner', '2026-01-01', '2026-01-01');
+      insert into users values ('usr_member', 'Member', '2026-01-01', '2026-01-01');
+      insert into teams values ('team_a', 'alpha', 'Alpha', 'usr_owner', '2026-01-01', '2026-01-01');
+      insert into team_members values ('team_a', 'usr_owner', 'owner', null, '2026-01-01');
+      insert into devices values ('dev_owner', 'team_a', 'usr_owner', 'Mac', 'share-token-hash', null, null, '2026-01-01');
+      insert into shares values ('share_a', 'team_a', 'Shared docs', 'folder', 'Shared', 'Docs', 'usr_owner', '2026-01-01', '2026-01-01');
+      insert into share_capabilities values ('share_cap_a', 'share_a', 'canvas', 'Canvas', 'optional', null);
+      insert into acl_rules values ('share_acl_a', 'team_a', 'share_a', 'user', 'usr_member', 'allow', '["file:read"]', '**/*', '2026-01-01');
+      insert into files values ('share_file_a', 'share_a', 'note.md', 'file', 'markdown', 1, 'share-sha', 5, null, 'usr_owner', '2026-01-01', '2026-01-01');
+    `);
+
+    runMigrations(db);
+
+    expect(db.prepare("select id, owner_user_id, mount_name from rooms where id = 'share_a'").get()).toEqual({
+      id: "share_a",
+      owner_user_id: "usr_owner",
+      mount_name: "Docs"
+    });
+    expect(db.prepare("select room_id from room_capabilities where id = 'share_cap_a'").get()).toEqual({ room_id: "share_a" });
+    expect(db.prepare("select room_id from acl_rules where id = 'share_acl_a'").get()).toEqual({ room_id: "share_a" });
+    expect(db.prepare("select room_id, relative_path from files where id = 'share_file_a'").get()).toEqual({
+      room_id: "share_a",
+      relative_path: "note.md"
+    });
+    await db.close();
+  });
+
   it("preserves the earliest share-scoped v0.1 rows when empty room tables already coexist", async () => {
     const db = await openSqlJsDb(":memory:");
     db.exec(`${LEGACY_V01_SCHEMA}
@@ -219,7 +255,7 @@ describe("v0.1 database migration", () => {
       insert into rooms values ('room_b', 'team_b', 'B', 'folder', 'B', 'Same', 'usr_owner', '2026-01-02', '2026-01-02');
     `);
 
-    expect(() => runMigrations(db)).toThrow();
+    expect(() => runMigrations(db)).toThrow(/usr_owner.*Same/i);
     expect(columnNames(db, "devices")).toContain("team_id");
     expect(db.prepare("select count(*) as count from rooms").get()).toEqual({ count: 2 });
     expect(db.prepare("select count(*) as count from users").get()).toEqual({ count: 1 });

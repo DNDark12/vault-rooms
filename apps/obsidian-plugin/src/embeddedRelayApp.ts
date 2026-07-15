@@ -75,7 +75,9 @@ const MIN_WEBSOCKET_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const SOCKET_CLOSE_GRACE_MS = 500;
 const windowSyncTimerHost: SyncTimerHost = {
   setInterval: (callback, delayMs) => window.setInterval(callback, delayMs),
-  clearInterval: (handle) => window.clearInterval(handle as number)
+  clearInterval: (handle) => window.clearInterval(handle as number),
+  setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => window.clearTimeout(handle as number)
 };
 
 export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelayAppOptions = {}): Promise<EmbeddedRelayApp> {

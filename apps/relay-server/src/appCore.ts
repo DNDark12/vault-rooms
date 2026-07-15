@@ -1,6 +1,11 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
-import { clearInterval as clearNodeInterval, setInterval as setNodeInterval } from "node:timers";
+import {
+  clearInterval as clearNodeInterval,
+  clearTimeout as clearNodeTimeout,
+  setInterval as setNodeInterval,
+  setTimeout as setNodeTimeout
+} from "node:timers";
 import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
 import type { RelayDb } from "./db/sqlJsAdapter.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
@@ -16,7 +21,9 @@ import { registerSyncRoutes, type SyncTimerHost } from "./sync/syncServer.js";
 
 const nodeSyncTimerHost: SyncTimerHost = {
   setInterval: (callback, delayMs) => setNodeInterval(callback, delayMs),
-  clearInterval: (handle) => clearNodeInterval(handle as ReturnType<typeof setNodeInterval>)
+  clearInterval: (handle) => clearNodeInterval(handle as ReturnType<typeof setNodeInterval>),
+  setTimeout: (callback, delayMs) => setNodeTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearNodeTimeout(handle as ReturnType<typeof setNodeTimeout>)
 };
 
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
@@ -27,6 +34,8 @@ export type CreateAppCoreOptions = RelayCoreOptions & {
   https?: { key: string; cert: string };
   core?: ReturnType<typeof createRelayCore>;
   ownsDb?: boolean;
+  /** In-process test seam. Never derived from request-controlled data. */
+  transportOverrideForTests?: RequestTransport;
 };
 
 export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions = {}) {
@@ -57,7 +66,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
   // directly off this same object instead of ever sending it over the network unprompted.
 
   app.addHook("onRequest", (request, _reply, done) => {
-    const transport = fastifyRequestTransport(request);
+    const transport = fastifyRequestTransport(request, options.transportOverrideForTests);
     (request as typeof request & { transport: RequestTransport }).transport = transport;
     assertTransportAllowed(repo, transport, request.url);
     done();
@@ -92,7 +101,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     done();
   });
 
-  void app.register(websocket, { options: { maxPayload: maxFileBytes } });
+  void app.register(websocket, { options: { maxPayload: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) } });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof AppError) {
@@ -168,12 +177,9 @@ function inviteSecurityContext(
   };
 }
 
-function fastifyRequestTransport(request: { headers: Record<string, unknown>; raw: { socket?: unknown } }): RequestTransport {
-  if (process.env.NODE_ENV === "test") {
-    const testTransport = request.headers["x-test-transport"];
-    if (testTransport === "http" || testTransport === "https") {
-      return testTransport;
-    }
-  }
-  return (request.raw.socket as { encrypted?: boolean } | undefined)?.encrypted ? "https" : "http";
+function fastifyRequestTransport(
+  request: { raw: { socket?: unknown } },
+  overrideForTests?: RequestTransport
+): RequestTransport {
+  return overrideForTests ?? ((request.raw.socket as { encrypted?: boolean } | undefined)?.encrypted ? "https" : "http");
 }

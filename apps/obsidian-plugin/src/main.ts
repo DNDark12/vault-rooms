@@ -546,6 +546,19 @@ export default class VaultRoomsPlugin extends Plugin {
       api.listTeamDirectory(),
       api.listFriends()
     ]);
+    const authoritativeServerId = me.serverId ?? server.serverId;
+    if (server.isServerOwner !== me.isServerOwner || server.serverId !== authoritativeServerId) {
+      const previous = { isServerOwner: server.isServerOwner, serverId: server.serverId };
+      server.isServerOwner = me.isServerOwner;
+      server.serverId = authoritativeServerId;
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        server.isServerOwner = previous.isServerOwner;
+        server.serverId = previous.serverId;
+        throw error;
+      }
+    }
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
     this.teamDirectory = directoryResult.teams;

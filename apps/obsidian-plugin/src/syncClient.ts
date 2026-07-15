@@ -171,10 +171,14 @@ export class VaultSyncEngine {
   async applyRemoteChange(
     room: MountedRoomState,
     remote: { relativePath: string; version: number; sha256: string; content: string },
-    deviceName: string
+    deviceName: string,
+    allowSameVersion = false
   ): Promise<void> {
     const path = mountedPath(room, remote.relativePath);
     const existingState = room.files[remote.relativePath];
+    if (existingState && (remote.version < existingState.serverVersion || (!allowSameVersion && remote.version === existingState.serverVersion))) {
+      return;
+    }
     if (existingState?.dirty && (await this.vault.exists(path))) {
       const local = await this.readContent(path, remote.relativePath);
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
@@ -191,10 +195,14 @@ export class VaultSyncEngine {
   async applyRemoteDelete(
     room: MountedRoomState,
     remote: { relativePath: string; version: number },
-    deviceName: string
+    deviceName: string,
+    allowSameVersion = false
   ): Promise<void> {
     const path = mountedPath(room, remote.relativePath);
     const existingState = room.files[remote.relativePath];
+    if (existingState && (remote.version < existingState.serverVersion || (!allowSameVersion && remote.version === existingState.serverVersion))) {
+      return;
+    }
     if (existingState?.dirty && (await this.vault.exists(path))) {
       const local = await this.readContent(path, remote.relativePath);
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);

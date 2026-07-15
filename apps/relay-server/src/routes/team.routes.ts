@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { timingSafeEqual } from "node:crypto";
 import { AppError, type TeamRole } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageTeam } from "../db/repositories/relayRepository.js";
@@ -43,7 +44,9 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     // Required even when allowRemoteBootstrap is true - that flag only relaxes the localhost
     // check above, it is not a PIN bypass. The PIN is the primary defense against drive-by/
     // DNS-rebinding bootstrap: without it, satisfying isLocalAddress() alone would be enough.
-    if (!body.pin || body.pin !== options.bootstrapPin) {
+    const suppliedPin = Buffer.from(body.pin ?? "", "utf8");
+    const expectedPin = Buffer.from(options.bootstrapPin, "utf8");
+    if (suppliedPin.length !== expectedPin.length || !timingSafeEqual(suppliedPin, expectedPin)) {
       throw new AppError("PERMISSION_DENIED", "Missing or incorrect bootstrap PIN.", 403);
     }
     if (repo.getServerOwnerId()) {

@@ -95,18 +95,21 @@ export class RelayRepository {
     this.db.prepare("insert or replace into server_meta(key, value) values ('owner_user_id', ?)").run(userId);
   }
 
+  getServerId(): string | null {
+    const row = this.db.prepare("select value from server_meta where key = 'server_id'").get() as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
   getOrCreateServerId(): string {
-    const existing = this.db.prepare("select value from server_meta where key = 'server_id'").get() as { value: string } | undefined;
-    if (existing) {
-      return existing.value;
-    }
+    const existing = this.getServerId();
+    if (existing) return existing;
     const serverId = createId("srv");
     this.db.prepare("insert into server_meta(key, value) values ('server_id', ?)").run(serverId);
     return serverId;
   }
 
-  setServerId(serverId: string): void {
-    this.db.prepare("insert or replace into server_meta(key, value) values ('server_id', ?)").run(serverId);
+  setServerIdIfMissing(serverId: string): void {
+    this.db.prepare("insert or ignore into server_meta(key, value) values ('server_id', ?)").run(serverId);
   }
 
   wasMigratedFromLegacyV01(): boolean {
@@ -1010,8 +1013,8 @@ export class RelayRepository {
       throw new Error("Invite cannot target both a team and a room");
     }
     if (invite.team_id) {
-      if (!invite.role) {
-        throw new Error("Team invite role is missing");
+      if (invite.role !== "admin" && invite.role !== "member") {
+        throw new Error(`Unsupported team invite role: ${invite.role ?? "missing"}`);
       }
       const team = this.getTeam(invite.team_id);
       if (!team) {

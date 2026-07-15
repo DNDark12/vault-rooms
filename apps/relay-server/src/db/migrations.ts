@@ -1,4 +1,21 @@
-import type { RelayDb } from "./sqlJsAdapter.js";
+import type { RelayDb, RelayDbReader } from "./sqlJsAdapter.js";
+
+const CURRENT_ROOMS_COLUMNS_SQL = `
+  id text primary key,
+  name text not null,
+  type text not null,
+  source_path text not null,
+  mount_name text not null,
+  owner_user_id text not null,
+  conflict_policy text not null default 'keep_both',
+  created_at text not null,
+  updated_at text not null,
+  unique(owner_user_id, mount_name)
+`;
+
+function currentRoomsTableSql(ifNotExists = false): string {
+  return `create table ${ifNotExists ? "if not exists " : ""}rooms(${CURRENT_ROOMS_COLUMNS_SQL})`;
+}
 
 export function runMigrations(db: RelayDb): void {
   // Capture this before any ALTER/CREATE statements. Released v0.1 databases did not have
@@ -67,18 +84,7 @@ export function runMigrations(db: RelayDb): void {
       created_at text not null
     );
 
-    create table if not exists rooms(
-      id text primary key,
-      name text not null,
-      type text not null,
-      source_path text not null,
-      mount_name text not null,
-      owner_user_id text not null,
-      conflict_policy text not null default 'keep_both',
-      created_at text not null,
-      updated_at text not null,
-      unique(owner_user_id, mount_name)
-    );
+    ${currentRoomsTableSql(true)};
 
     create table if not exists room_capabilities(
       id text primary key,
@@ -161,7 +167,7 @@ export function runMigrations(db: RelayDb): void {
   }
 }
 
-export function isV01Schema(db: RelayDb): boolean {
+export function isV01Schema(db: RelayDbReader): boolean {
   const columns = db.prepare("pragma table_info(devices)").all() as Array<{ name: string }>;
   const names = new Set(columns.map((column) => column.name));
   return (
@@ -176,6 +182,7 @@ function migrateLegacyV01Schema(db: RelayDb): void {
   }
 
   assertNoLegacyShareConflicts(db);
+  assertLegacyMountNamesRepresentable(db);
 
   const aclResourceColumn = columnExists(db, "acl_rules", "room_id") ? "room_id" : "share_id";
   const addUserRevocationColumnSql = columnExists(db, "users", "revoked_at")
@@ -184,18 +191,7 @@ function migrateLegacyV01Schema(db: RelayDb): void {
   const roomsMigrationSql = columnExists(db, "rooms", "team_id")
     ? `
       alter table rooms rename to rooms_v01_source;
-      create table rooms(
-        id text primary key,
-        name text not null,
-        type text not null,
-        source_path text not null,
-        mount_name text not null,
-        owner_user_id text not null,
-        conflict_policy text not null default 'keep_both',
-        created_at text not null,
-        updated_at text not null,
-        unique(owner_user_id, mount_name)
-      );
+      ${currentRoomsTableSql()};
       insert into rooms(
         id, name, type, source_path, mount_name, owner_user_id,
         conflict_policy, created_at, updated_at
@@ -205,7 +201,9 @@ function migrateLegacyV01Schema(db: RelayDb): void {
       from rooms_v01_source;
       drop table rooms_v01_source;
     `
-    : "";
+    : tableExists(db, "shares") && !tableExists(db, "rooms")
+      ? `${currentRoomsTableSql()};`
+      : "";
   const sharesMigrationSql = tableExists(db, "shares")
     ? `
       insert into rooms(
@@ -284,7 +282,8 @@ function migrateLegacyV01Schema(db: RelayDb): void {
         token_hash, role, expires_at, max_uses, use_count, revoked_at, created_at
       )
       select id, team_id, null, null, created_by_user_id,
-             token_hash, role, expires_at, max_uses, use_count, revoked_at, created_at
+             token_hash, case when role = 'owner' then 'admin' else role end,
+             expires_at, max_uses, use_count, revoked_at, created_at
       from invites_v01_source;
       drop table invites_v01_source;
     `;
@@ -472,6 +471,35 @@ function assertNoLegacyShareConflicts(db: RelayDb): void {
   }
 }
 
+function assertLegacyMountNamesRepresentable(db: RelayDb): void {
+  const resources = new Map<string, { ownerUserId: string; mountName: string }>();
+  const collect = (table: "rooms" | "shares"): void => {
+    if (!tableExists(db, table)) return;
+    const rows = db.prepare(`select id, owner_user_id, mount_name from ${table}`).all() as Array<{
+      id: string;
+      owner_user_id: string;
+      mount_name: string;
+    }>;
+    for (const row of rows) {
+      resources.set(row.id, { ownerUserId: row.owner_user_id, mountName: row.mount_name });
+    }
+  };
+  collect("rooms");
+  collect("shares");
+
+  const mounts = new Map<string, string>();
+  for (const [id, resource] of resources) {
+    const key = `${resource.ownerUserId}\u0000${resource.mountName}`;
+    const existingId = mounts.get(key);
+    if (existingId && existingId !== id) {
+      throw new Error(
+        `Legacy rooms for owner ${resource.ownerUserId} use duplicate mount name "${resource.mountName}" (${existingId}, ${id}).`
+      );
+    }
+    mounts.set(key, id);
+  }
+}
+
 function rebuildLegacyInvitesTable(db: RelayDb): void {
   const columns = db.prepare("pragma table_info(invites)").all() as Array<{ name: string }>;
   if (columns.some((column) => column.name === "room_id")) {
@@ -499,7 +527,8 @@ function rebuildLegacyInvitesTable(db: RelayDb): void {
         token_hash, role, expires_at, max_uses, use_count, revoked_at, created_at
       )
       select id, team_id, null, null, created_by_user_id,
-             token_hash, role, expires_at, max_uses, use_count, revoked_at, created_at
+             token_hash, case when role = 'owner' then 'admin' else role end,
+             expires_at, max_uses, use_count, revoked_at, created_at
       from invites_pre_room_invites;
       drop table invites_pre_room_invites;
     `);

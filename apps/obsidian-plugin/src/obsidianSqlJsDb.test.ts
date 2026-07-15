@@ -206,6 +206,42 @@ describe("openObsidianSqlJsDb - legacy archive detection (A1)", () => {
     }
   });
 
+  it("quarantines a different valid v0.1 backup before archiving the active legacy bytes", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const activeBytes = bytesFromSchema(SQL, `${LEGACY_V01_SCHEMA}
+      insert into users values ('usr_owner', 'Owner', '2026-01-01', '2026-01-01');
+      insert into teams values ('team_a', 'alpha', 'Alpha', 'usr_owner', '2026-01-01', '2026-01-01');
+      insert into devices values ('dev_owner', 'team_a', 'usr_owner', 'Mac', 'active-hash', null, null, '2026-01-01');
+    `);
+    const foreignBytes = bytesFromSchema(SQL, RELEASED_V01_SCHEMA);
+    await adapter.writeBinary(dbPath, activeBytes);
+    await adapter.writeBinary(`${dbPath}.bak-v1`, foreignBytes);
+
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    await db.close();
+
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(activeBytes));
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1.invalid`)!)).toEqual(new Uint8Array(foreignBytes));
+  });
+
+  it("quarantines an unparsable canonical backup and continues from valid active legacy bytes", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const activeBytes = bytesFromSchema(SQL, LEGACY_V01_SCHEMA);
+    const corruptBytes = new TextEncoder().encode("not a sqlite database").buffer;
+    await adapter.writeBinary(dbPath, activeBytes);
+    await adapter.writeBinary(`${dbPath}.bak-v1`, corruptBytes);
+
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    await db.close();
+
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(activeBytes));
+    expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1.invalid`)!)).toEqual(new Uint8Array(corruptBytes));
+  });
+
   it("recovers an already-archived v0.1 database when the active replacement is empty", async () => {
     const { SQL, wasmBinary } = await loadSqlJs();
     const adapter = new FakeDataAdapter();
@@ -286,6 +322,31 @@ describe("openObsidianSqlJsDb - legacy archive detection (A1)", () => {
     expect(new Uint8Array(adapter.store.get(dbPath)!)).toEqual(new Uint8Array(activeBytes));
     expect(new Uint8Array(adapter.store.get(`${dbPath}.bak-v1`)!)).toEqual(new Uint8Array(legacyBytes));
     expect(new Uint8Array(adapter.store.get(`${dbPath}.pre-v01-restore`)!)).toEqual(new Uint8Array(activeBytes));
+  });
+});
+
+describe("openObsidianSqlJsDb - sql.js initialization", () => {
+  it("retries after an initialization promise rejects", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    vi.resetModules();
+    const initSqlJsMock = vi.fn()
+      .mockRejectedValueOnce(new Error("simulated initialization failure"))
+      .mockResolvedValue(SQL);
+    vi.doMock("sql.js/dist/sql-wasm-browser.js", () => ({ default: initSqlJsMock }));
+    const module = await import("./obsidianSqlJsDb.js");
+    const adapter = new FakeDataAdapter();
+
+    await expect(
+      module.openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary })
+    ).rejects.toThrow("simulated initialization failure");
+
+    try {
+      const db = await module.openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary });
+      db.exec("create table retry_ok(id integer primary key)");
+      await db.close();
+    } finally {
+      vi.doUnmock("sql.js/dist/sql-wasm-browser.js");
+    }
   });
 });
 

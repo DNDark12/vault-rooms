@@ -10,6 +10,8 @@ import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } fr
 export type SyncTimerHost = {
   setInterval(callback: () => void, delayMs: number): unknown;
   clearInterval(handle: unknown): void;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
 };
 
 export function registerSyncRoutes(
@@ -45,6 +47,19 @@ export function handleSyncSocket(
   };
   registry.add(connection);
 
+  let helloTimeout: unknown = options.timerHost.setTimeout(() => {
+    helloTimeout = undefined;
+    if (!connection.principal) {
+      socket.close(1008, "Authentication timeout");
+    }
+  }, 10_000);
+  const clearHelloTimeout = (): void => {
+    if (helloTimeout !== undefined) {
+      options.timerHost.clearTimeout(helloTimeout);
+      helloTimeout = undefined;
+    }
+  };
+
   const ping = options.timerHost.setInterval(() => {
     if (socket.readyState === socket.OPEN) {
       socket.ping();
@@ -58,7 +73,7 @@ export function handleSyncSocket(
     // plugin's own process, risks taking down more than just this one connection. Every
     // message-type branch below also has its own try/catch for a clean client-facing
     // rejection; this is the last-resort backstop for anything that slips past those.
-    handleMessage(repo, registry, connection, options, raw.toString()).catch((error) => {
+    handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString()).catch((error) => {
       console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
       try {
         connection.socket.close();
@@ -68,6 +83,7 @@ export function handleSyncSocket(
     });
   });
   socket.on("close", () => {
+    clearHelloTimeout();
     options.timerHost.clearInterval(ping);
     if (connection.principal) {
       try {
@@ -92,7 +108,7 @@ async function handleMessage(
   repo: RelayRepository,
   registry: ConnectionRegistry,
   connection: SyncConnection,
-  options: { maxFileBytes: number; transport: RequestTransport },
+  options: { maxFileBytes: number; transport: RequestTransport; onAuthenticated: () => void },
   raw: string
 ): Promise<void> {
   let message: SyncClientMessage;
@@ -108,6 +124,7 @@ async function handleMessage(
       const principal = authenticateActiveDeviceToken(repo, message.token);
       repo.markDeviceTransport(principal.deviceId, options.transport);
       connection.principal = principal;
+      options.onAuthenticated();
       repo.audit({
         teamId: null,
         actorType: "device",

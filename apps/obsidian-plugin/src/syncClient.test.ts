@@ -165,6 +165,25 @@ describe("plugin sync core", () => {
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe("# local draft\n");
   });
 
+  it("ignores remote changes and deletes that are not newer than tracked state", async () => {
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi());
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: {
+        "Board.md": { serverVersion: 3, serverSha256: "sha-3", localSha256: "sha-3", dirty: false }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "newest");
+
+    await engine.applyRemoteChange(room, { relativePath: "Board.md", version: 2, sha256: "sha-2", content: "stale" }, "B laptop");
+    await engine.applyRemoteDelete(room, { relativePath: "Board.md", version: 3 }, "B laptop");
+
+    expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("newest");
+    expect(room.files["Board.md"]).toMatchObject({ serverVersion: 3, serverSha256: "sha-3" });
+  });
+
   it("keeps dirty deleted files as conflict copies and deletes canonical file", async () => {
     const vault = new FakeVaultAdapter();
     const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));

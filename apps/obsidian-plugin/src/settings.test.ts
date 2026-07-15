@@ -2,6 +2,31 @@ import { describe, expect, it } from "vitest";
 import { migrateVaultRoomsSettings } from "./settings.js";
 
 describe("v0.1 plugin settings migration", () => {
+  it("quarantines malformed server entries without dropping valid connections", () => {
+    const valid = {
+      id: "dev_valid",
+      baseUrl: "http://127.0.0.1:8787",
+      userId: "usr_owner",
+      userDisplayName: "Owner",
+      deviceId: "dev_valid",
+      deviceName: "Mac",
+      deviceToken: "token",
+      isServerOwner: true,
+      status: "active" as const
+    };
+    const missingBaseUrl = { ...valid, id: "dev_invalid", deviceId: "dev_invalid" } as Record<string, unknown>;
+    delete missingBaseUrl.baseUrl;
+
+    const result = migrateVaultRoomsSettings({
+      servers: [valid, null, 42, missingBaseUrl]
+    });
+
+    expect(result.migratedLegacy).toBe(true);
+    expect(result.settings.servers).toHaveLength(1);
+    expect(result.settings.servers[0]).toEqual(expect.objectContaining({ id: "dev_valid", securityMode: "plain" }));
+    expect(result.settings.unrecognizedServers).toEqual([null, 42, missingBaseUrl]);
+  });
+
   it("persists the security defaults added to an exact released v0.1 server entry", () => {
     const result = migrateVaultRoomsSettings({
       servers: [
@@ -134,6 +159,43 @@ describe("v0.1 plugin settings migration", () => {
       pinnedIdentitySpkiSha256: "pin",
       appliedRotationIds: ["rot_1"]
     }));
+  });
+
+  it("preserves current TLS identity and rotation fields on a team-scoped legacy entry", () => {
+    const result = migrateVaultRoomsSettings({
+      servers: [
+        {
+          id: "dev_tls_legacy",
+          baseUrl: "https://127.0.0.1:8788",
+          teamId: "team_old",
+          role: "owner",
+          userId: "usr_owner",
+          userDisplayName: "Owner",
+          deviceId: "dev_tls_legacy",
+          deviceName: "Mac",
+          deviceToken: "tls-token",
+          status: "active",
+          securityMode: "pinned-tls",
+          serverId: "srv_stable",
+          pinnedIdentitySpkiSha256: "sha256:pin",
+          identityCertificateDer: "certificate",
+          tlsName: "srv-stable.vault-rooms.internal",
+          appliedRotationIds: ["rot_1"]
+        }
+      ]
+    });
+
+    expect(result.settings.servers[0]).toEqual(expect.objectContaining({
+      isServerOwner: true,
+      securityMode: "pinned-tls",
+      serverId: "srv_stable",
+      pinnedIdentitySpkiSha256: "sha256:pin",
+      identityCertificateDer: "certificate",
+      tlsName: "srv-stable.vault-rooms.internal",
+      appliedRotationIds: ["rot_1"]
+    }));
+    expect(result.settings.servers[0]).not.toHaveProperty("teamId");
+    expect(result.settings.servers[0]).not.toHaveProperty("role");
   });
 
   it("preserves but pauses a legacy mount when multiple old server entries make ownership ambiguous", () => {

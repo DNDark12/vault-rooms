@@ -311,7 +311,7 @@ function chooseMigrationMode(app: App): Promise<MigrationMode | null> {
       onOpen(): void {
         this.setTitle("Enable TLS migration");
         this.contentEl.createEl("p", {
-          text: "Normal migration lets authenticated legacy devices learn the new pin over their existing HTTP connection. Strict migration requires a fresh pinned invite link from the owner."
+          text: "Normal migration trusts one authenticated plaintext response to learn the new pin, so an active attacker on the local network could replace that first pin. Use Strict migration for sensitive teams; it requires a fresh pinned invite link from the owner."
         });
         new Setting(this.contentEl)
           .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))

@@ -1,13 +1,25 @@
 import { normalizePath, type DataAdapter } from "obsidian";
 import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic } from "sql.js/dist/sql-wasm-browser.js";
 import type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "vault-rooms-relay/embedded-core";
-import { recoverDataAdapterFileReplacement, replaceDataAdapterFile } from "./dataAdapterFileReplace.js";
+import {
+  createDataAdapterFile,
+  recoverDataAdapterFileReplacement,
+  replaceDataAdapterFile
+} from "./dataAdapterFileReplace.js";
 
 let sqlJsPromise: Promise<SqlJsStatic> | null = null;
 
 function loadSqlJs(locator?: SqlJsLocator): Promise<SqlJsStatic> {
   if (!sqlJsPromise) {
-    sqlJsPromise = initSqlJs(locator?.wasmBinary ? { wasmBinary: locator.wasmBinary } : undefined);
+    const initialization = initSqlJs(locator?.wasmBinary ? { wasmBinary: locator.wasmBinary } : undefined);
+    let retryable!: Promise<SqlJsStatic>;
+    retryable = initialization.catch((error: unknown) => {
+      if (sqlJsPromise === retryable) {
+        sqlJsPromise = null;
+      }
+      throw error;
+    });
+    sqlJsPromise = retryable;
   }
   return sqlJsPromise;
 }
@@ -252,21 +264,47 @@ async function loadInitialDatabaseBytes(adapter: DataAdapter, dbPath: string, SQ
   const activeBytes = (await adapter.exists(dbPath)) ? new Uint8Array(await adapter.readBinary(dbPath)) : undefined;
   const backupBytes = (await adapter.exists(backupPath)) ? new Uint8Array(await adapter.readBinary(backupPath)) : undefined;
 
-  if (backupBytes && inspectRawDatabase(SQL, backupBytes).v01) {
-    if (!activeBytes || inspectRawDatabase(SQL, activeBytes).emptyCurrent) {
+  const activeInspection = activeBytes ? inspectRawDatabaseSafe(SQL, activeBytes) : undefined;
+  const backupInspection = backupBytes ? inspectRawDatabaseSafe(SQL, backupBytes) : undefined;
+
+  if (backupBytes && backupInspection?.v01) {
+    if (!activeBytes || activeInspection?.emptyCurrent) {
       return backupBytes;
     }
   }
   if (!activeBytes) {
     return undefined;
   }
-  if (inspectRawDatabase(SQL, activeBytes).v01 && !backupBytes) {
-    await ensureParentFolder(adapter, backupPath);
-    const backup = new ArrayBuffer(activeBytes.byteLength);
-    new Uint8Array(backup).set(activeBytes);
-    await adapter.writeBinary(backupPath, backup);
+  if (activeInspection?.v01) {
+    if (backupBytes && (!backupInspection?.v01 || !bytesEqual(activeBytes, backupBytes))) {
+      await adapter.rename(backupPath, await nextAvailableBackupPath(adapter, `${backupPath}.invalid`));
+    }
+    if (!backupBytes || !backupInspection?.v01 || !bytesEqual(activeBytes, backupBytes)) {
+      await ensureParentFolder(adapter, backupPath);
+      await createDataAdapterFile(adapter, backupPath, async (temporaryPath) => {
+        const backup = new ArrayBuffer(activeBytes.byteLength);
+        new Uint8Array(backup).set(activeBytes);
+        await adapter.writeBinary(temporaryPath, backup);
+      });
+    }
   }
   return activeBytes;
+}
+
+function inspectRawDatabaseSafe(
+  SQL: SqlJsStatic,
+  bytes: Uint8Array
+): { v01: boolean; emptyCurrent: boolean } | undefined {
+  try {
+    return inspectRawDatabase(SQL, bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  return left.every((byte, index) => byte === right[index]);
 }
 
 function inspectRawDatabase(SQL: SqlJsStatic, bytes: Uint8Array): { v01: boolean; emptyCurrent: boolean } {

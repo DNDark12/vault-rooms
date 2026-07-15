@@ -1,6 +1,23 @@
-import { copyFileSync, existsSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { isV01Schema, runMigrations } from "./migrations.js";
-import { openSqlJsDb, type RelayDb, type SqlJsLocator } from "./sqlJsAdapter.js";
+import {
+  inspectSqlJsDatabaseBytes,
+  openSqlJsDb,
+  type RelayDb,
+  type RelayDbReader,
+  type SqlJsLocator
+} from "./sqlJsAdapter.js";
 
 export type { RelayDb } from "./sqlJsAdapter.js";
 
@@ -30,20 +47,23 @@ export async function openRelayDb(dbPath: string, locator?: SqlJsLocator): Promi
 }
 
 async function backupLegacyDbIfNeeded(dbPath: string, locator?: SqlJsLocator): Promise<void> {
-  const probeDb = await openSqlJsDb(dbPath, locator);
-  let isLegacy: boolean;
-  try {
-    isLegacy = isV01Schema(probeDb);
-  } finally {
-    void probeDb.close();
-  }
-  if (!isLegacy) {
+  const activeBytes = readFileSync(dbPath);
+  if (!(await inspectDatabaseBytes(activeBytes, locator)).v01) {
     return;
   }
   const backupPath = `${dbPath}.bak-v1`;
-  if (!existsSync(backupPath)) {
-    copyFileSync(dbPath, backupPath);
+  if (existsSync(backupPath)) {
+    const backupBytes = readFileSync(backupPath);
+    let matchingLegacyBackup = false;
+    try {
+      matchingLegacyBackup = (await inspectDatabaseBytes(backupBytes, locator)).v01 && backupBytes.equals(activeBytes);
+    } catch {
+      // Preserve the unparsable file under a quarantine name below.
+    }
+    if (matchingLegacyBackup) return;
+    renameSync(backupPath, nextInvalidBackupPath(backupPath));
   }
+  writeCreateOnlyAtomic(backupPath, activeBytes);
 }
 
 async function recoverArchivedLegacyDbIfEmpty(dbPath: string, locator?: SqlJsLocator): Promise<void> {
@@ -51,7 +71,12 @@ async function recoverArchivedLegacyDbIfEmpty(dbPath: string, locator?: SqlJsLoc
   if (!existsSync(backupPath)) {
     return;
   }
-  const backup = await inspectDatabase(backupPath, locator);
+  let backup: { v01: boolean; emptyCurrent: boolean };
+  try {
+    backup = await inspectDatabaseBytes(readFileSync(backupPath), locator);
+  } catch {
+    return;
+  }
   if (!backup.v01) {
     return;
   }
@@ -59,15 +84,22 @@ async function recoverArchivedLegacyDbIfEmpty(dbPath: string, locator?: SqlJsLoc
     copyFileSync(backupPath, dbPath);
     return;
   }
-  const active = await inspectDatabase(dbPath, locator);
+  let active: { v01: boolean; emptyCurrent: boolean };
+  try {
+    active = await inspectDatabaseBytes(readFileSync(dbPath), locator);
+  } catch {
+    return;
+  }
   if (active.emptyCurrent) {
     copyFileSync(backupPath, dbPath);
   }
 }
 
-async function inspectDatabase(dbPath: string, locator?: SqlJsLocator): Promise<{ v01: boolean; emptyCurrent: boolean }> {
-  const db = await openSqlJsDb(dbPath, locator);
-  try {
+async function inspectDatabaseBytes(
+  bytes: Uint8Array,
+  locator?: SqlJsLocator
+): Promise<{ v01: boolean; emptyCurrent: boolean }> {
+  return inspectSqlJsDatabaseBytes(bytes, (db) => {
     const v01 = isV01Schema(db);
     if (v01 || !tableExists(db, "users") || !tableExists(db, "server_meta")) {
       return { v01, emptyCurrent: false };
@@ -75,11 +107,34 @@ async function inspectDatabase(dbPath: string, locator?: SqlJsLocator): Promise<
     const userCount = db.prepare("select count(*) as count from users").get() as { count: number };
     const owner = db.prepare("select value from server_meta where key = 'owner_user_id'").get();
     return { v01: false, emptyCurrent: userCount.count === 0 && !owner };
-  } finally {
-    await db.close();
-  }
+  }, locator);
 }
 
-function tableExists(db: RelayDb, table: string): boolean {
+function tableExists(db: RelayDbReader, table: string): boolean {
   return Boolean(db.prepare("select 1 from sqlite_master where type = 'table' and name = ?").get(table));
+}
+
+function nextInvalidBackupPath(backupPath: string): string {
+  const base = `${backupPath}.invalid`;
+  if (!existsSync(base)) return base;
+  let suffix = 2;
+  while (existsSync(`${base}.${suffix}`)) suffix += 1;
+  return `${base}.${suffix}`;
+}
+
+function writeCreateOnlyAtomic(targetPath: string, bytes: Uint8Array): void {
+  const temporaryPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(descriptor, bytes);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    // A hard link is an atomic create-only promotion: it fails instead of replacing targetPath.
+    linkSync(temporaryPath, targetPath);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    rmSync(temporaryPath, { force: true });
+  }
 }

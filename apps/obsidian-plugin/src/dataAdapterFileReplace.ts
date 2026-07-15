@@ -62,3 +62,27 @@ export async function replaceDataAdapterFile(
     await adapter.remove(backupPath).catch(() => {});
   }
 }
+
+/** Create a new file through a complete sibling temporary without moving or deleting a destination. */
+export async function createDataAdapterFile(
+  adapter: DataAdapter,
+  targetPath: string,
+  writeTemporaryFile: (temporaryPath: string) => Promise<void>
+): Promise<boolean> {
+  if (await adapter.exists(targetPath)) return false;
+  const temporaryPath = `${targetPath}.create-tmp`;
+  if (await adapter.exists(temporaryPath)) await adapter.remove(temporaryPath);
+  try {
+    await writeTemporaryFile(temporaryPath);
+    if (await adapter.exists(targetPath)) {
+      await adapter.remove(temporaryPath).catch(() => {});
+      return false;
+    }
+    await adapter.rename(temporaryPath, targetPath);
+    return true;
+  } catch (error) {
+    await adapter.remove(temporaryPath).catch(() => {});
+    if (await adapter.exists(targetPath)) return false;
+    throw error;
+  }
+}

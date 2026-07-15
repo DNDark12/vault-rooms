@@ -7,6 +7,24 @@ import { createRotationRecord } from "./rotation.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
+type ServerIdRepository = {
+  durable<T>(operation: () => T): Promise<T>;
+  getOrCreateServerId(): string;
+  setServerIdIfMissing(serverId: string): void;
+};
+
+/** Bind a recovered DB without an ID to its existing identity; a conflicting DB ID remains untouched and fails closed later. */
+export async function resolveServerIdForIdentityStore(
+  repo: ServerIdRepository,
+  store: IdentityStore
+): Promise<string> {
+  const persisted = await store.load();
+  return repo.durable(() => {
+    if (persisted) repo.setServerIdIfMissing(persisted.serverId);
+    return repo.getOrCreateServerId();
+  });
+}
+
 export async function ensureServerIdentity(input: {
   serverId: string;
   store: IdentityStore;

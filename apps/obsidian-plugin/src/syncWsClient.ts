@@ -35,6 +35,7 @@ export type RoomSyncSocketDeps = {
 const MIN_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const HEALTH_PROBE_TIMEOUT_MS = 2500;
+const HELLO_ACK_TIMEOUT_MS = 10_000;
 
 /**
  * Keeps a live WebSocket connection to the relay's /sync endpoint so remote edits made by
@@ -47,9 +48,11 @@ export class RoomSyncSocket {
   private helloAcked = false;
   private closedByUser = true;
   private reconnectTimer: number | null = null;
+  private helloAckTimer: number | null = null;
   private reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
-  private readonly pendingSubscriptions = new Set<string>();
-  private readonly subscribedRooms = new Set<string>();
+  private readonly desiredSubscriptions = new Set<string>();
+  private socketGeneration = 0;
+  private remoteApplyChain: Promise<void> = Promise.resolve();
   private state: SyncConnectionState = "offline";
   private handlingPinnedFailure = false;
   private upgradeProbeRequested = false;
@@ -79,29 +82,36 @@ export class RoomSyncSocket {
 
   disconnect(): void {
     this.closedByUser = true;
+    this.socketGeneration += 1;
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.socket?.close();
+    this.clearHelloAckTimer();
+    const socket = this.socket;
     this.socket = null;
+    socket?.close();
     this.helloAcked = false;
     this.upgradeProbeRequested = false;
     this.setState("offline");
   }
 
   subscribe(roomId: string): void {
-    if (this.subscribedRooms.has(roomId)) {
+    if (this.desiredSubscriptions.has(roomId)) {
       return;
     }
+    this.desiredSubscriptions.add(roomId);
     if (this.helloAcked) {
       this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
-    } else {
-      this.pendingSubscriptions.add(roomId);
     }
   }
 
   private async open(): Promise<void> {
+    const generation = ++this.socketGeneration;
+    this.clearHelloAckTimer();
+    const previousSocket = this.socket;
+    this.socket = null;
+    previousSocket?.close();
     try {
       const healthUrl = `${this.server.baseUrl.replace(/\/+$/, "")}/health`;
       const pinned = pinnedInfoForServer(this.server);
@@ -112,12 +122,12 @@ export class RoomSyncSocket {
         throw new Error(`Health probe failed with status ${response.status}.`);
       }
     } catch (error) {
-      if (this.closedByUser) {
+      if (!this.isCurrentGeneration(generation)) {
         return;
       }
       if (this.server.securityMode === "pinned-tls" && this.deps.onPinnedTransportFailure) {
         const decision = await this.deps.onPinnedTransportFailure(toError(error));
-        if (this.closedByUser) return;
+        if (!this.isCurrentGeneration(generation)) return;
         if (decision === "stop") {
           this.closedByUser = true;
           this.setState("offline");
@@ -131,7 +141,7 @@ export class RoomSyncSocket {
       this.scheduleReconnect();
       return;
     }
-    if (this.closedByUser) {
+    if (!this.isCurrentGeneration(generation)) {
       return;
     }
 
@@ -142,30 +152,54 @@ export class RoomSyncSocket {
       this.scheduleReconnect();
       return;
     }
+    if (!this.isCurrentGeneration(generation)) {
+      socket.close();
+      return;
+    }
     this.socket = socket;
+    let messageChain: Promise<void> = Promise.resolve();
     socket.addEventListener("open", () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       this.send({
         type: "hello",
         requestId: createRequestId(),
         token: this.server.deviceToken,
         client: { kind: "obsidian-plugin", version: PRODUCT_VERSION, deviceName: this.server.deviceName }
       });
+      this.clearHelloAckTimer();
+      this.helloAckTimer = window.setTimeout(() => {
+        if (this.isCurrentSocket(socket, generation) && !this.helloAcked) {
+          socket.close();
+        }
+      }, HELLO_ACK_TIMEOUT_MS);
     });
     socket.addEventListener("message", (event) => {
-      void this.handleMessage(String(event.data));
+      if (!this.isCurrentSocket(socket, generation)) return;
+      messageChain = messageChain
+        .then(async () => {
+          if (this.isCurrentSocket(socket, generation)) {
+            await this.handleMessage(String(event.data));
+          }
+        })
+        .catch((error: unknown) => {
+          console.error("Vault Rooms: failed to process a live sync message", toError(error));
+        });
     });
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      this.clearHelloAckTimer();
+      this.socket = null;
       this.helloAcked = false;
       this.upgradeProbeRequested = false;
-      // Re-queue whatever was subscribed so the next successful hello resubscribes it. Without
-      // this, an automatic reconnect (server restart, brief network drop) re-established the
-      // socket and said hello, but every room silently stopped getting real-time updates forever
-      // after - pendingSubscriptions was already drained from the first connect, and nothing ever
-      // refilled it.
-      for (const roomId of this.subscribedRooms) {
-        this.pendingSubscriptions.add(roomId);
+      const code = (event as CloseEvent | undefined)?.code;
+      if (code === 4001 || code === 4002) {
+        // The server deliberately invalidated this credential. The workflow that caused the
+        // rotation/enforcement owns the next connection; retrying this socket would authenticate
+        // with the now-invalid token and falsely classify the device as revoked.
+        this.closedByUser = true;
+        this.setState("offline");
+        return;
       }
-      this.subscribedRooms.clear();
       if (this.handlingPinnedFailure) {
         return;
       }
@@ -180,7 +214,12 @@ export class RoomSyncSocket {
     // schedules the reconnect above - no need to (and must not) force-close here too, since
     // re-closing an already-failing socket can re-enter this handler synchronously.
     socket.addEventListener("error", (event) => {
-      if (this.server.securityMode !== "pinned-tls" || !this.deps.onPinnedTransportFailure || this.handlingPinnedFailure) {
+      if (
+        !this.isCurrentSocket(socket, generation) ||
+        this.server.securityMode !== "pinned-tls" ||
+        !this.deps.onPinnedTransportFailure ||
+        this.handlingPinnedFailure
+      ) {
         return;
       }
       this.handlingPinnedFailure = true;
@@ -189,10 +228,14 @@ export class RoomSyncSocket {
       void this.deps.onPinnedTransportFailure(error).then(
         (decision) => {
           this.handlingPinnedFailure = false;
-          if (this.closedByUser) return;
-          this.socket = null;
+          // A failed WebSocket normally emits close before this async classification resolves.
+          // The close handler clears this.socket while deliberately deferring reconnect here, so
+          // generation ownership—not socket field identity—is the correct stale-result guard.
+          if (!this.isCurrentGeneration(generation)) return;
           if (decision === "stop") {
             this.closedByUser = true;
+            this.socket = null;
+            this.clearHelloAckTimer();
             this.setState("offline");
           } else if (decision === "retry") {
             void this.open();
@@ -202,7 +245,7 @@ export class RoomSyncSocket {
         },
         () => {
           this.handlingPinnedFailure = false;
-          if (!this.closedByUser) this.scheduleReconnect();
+          if (this.isCurrentGeneration(generation)) this.scheduleReconnect();
         }
       );
     });
@@ -225,6 +268,21 @@ export class RoomSyncSocket {
     }
   }
 
+  private isCurrentGeneration(generation: number): boolean {
+    return !this.closedByUser && generation === this.socketGeneration;
+  }
+
+  private isCurrentSocket(socket: WebSocket, generation: number): boolean {
+    return this.isCurrentGeneration(generation) && this.socket === socket;
+  }
+
+  private clearHelloAckTimer(): void {
+    if (this.helloAckTimer !== null) {
+      window.clearTimeout(this.helloAckTimer);
+      this.helloAckTimer = null;
+    }
+  }
+
   private async handleMessage(raw: string): Promise<void> {
     let message: SyncServerMessage;
     try {
@@ -235,6 +293,7 @@ export class RoomSyncSocket {
 
     switch (message.type) {
       case "hello_ok": {
+        this.clearHelloAckTimer();
         this.helloAcked = true;
         this.reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
         this.setState("connected");
@@ -243,10 +302,9 @@ export class RoomSyncSocket {
           this.upgradeProbeRequested = true;
           this.deps.onSecurityUpgradeAvailable?.();
         }
-        for (const roomId of this.pendingSubscriptions) {
+        for (const roomId of this.desiredSubscriptions) {
           this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
         }
-        this.pendingSubscriptions.clear();
         return;
       }
       case "security_upgrade_available": {
@@ -262,45 +320,58 @@ export class RoomSyncSocket {
         return;
       }
       case "room_snapshot": {
-        this.subscribedRooms.add(message.roomId);
-        await this.reconcileSnapshot(message.roomId, message.files);
+        await this.enqueueRemoteApply(() => this.reconcileSnapshot(message.roomId, message.files));
         return;
       }
       case "remote_file_change": {
-        const room = this.deps.getMountedRoom(message.roomId);
-        if (!room) {
-          return;
-        }
-        await this.deps.syncEngine.applyRemoteChange(
-          room,
-          { relativePath: message.relativePath, version: message.version, sha256: message.sha256, content: message.content },
-          message.updatedBy.displayName
-        );
-        this.deps.onApplied();
+        await this.enqueueRemoteApply(async () => {
+          const room = this.deps.getMountedRoom(message.roomId);
+          if (!room) return;
+          await this.deps.syncEngine.applyRemoteChange(
+            room,
+            { relativePath: message.relativePath, version: message.version, sha256: message.sha256, content: message.content },
+            message.updatedBy.displayName
+          );
+          this.deps.onApplied();
+        });
         return;
       }
       case "remote_file_delete": {
-        const room = this.deps.getMountedRoom(message.roomId);
-        if (!room) {
-          return;
-        }
-        await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: message.relativePath, version: message.version }, message.deletedBy.displayName);
-        this.deps.onApplied();
+        await this.enqueueRemoteApply(async () => {
+          const room = this.deps.getMountedRoom(message.roomId);
+          if (!room) return;
+          await this.deps.syncEngine.applyRemoteDelete(
+            room,
+            { relativePath: message.relativePath, version: message.version },
+            message.deletedBy.displayName
+          );
+          this.deps.onApplied();
+        });
         return;
       }
       case "room_deleted": {
-        this.subscribedRooms.delete(message.roomId);
-        this.deps.onRoomDeleted(message.roomId);
+        await this.enqueueRemoteApply(async () => {
+          this.desiredSubscriptions.delete(message.roomId);
+          this.deps.onRoomDeleted(message.roomId);
+        });
         return;
       }
       case "room_access_revoked": {
-        this.subscribedRooms.delete(message.roomId);
-        this.deps.onAccessRevoked(message.roomId);
+        await this.enqueueRemoteApply(async () => {
+          this.desiredSubscriptions.delete(message.roomId);
+          this.deps.onAccessRevoked(message.roomId);
+        });
         return;
       }
       default:
         return;
     }
+  }
+
+  private enqueueRemoteApply(operation: () => Promise<void>): Promise<void> {
+    const execution = this.remoteApplyChain.then(operation);
+    this.remoteApplyChain = execution.catch(() => undefined);
+    return execution;
   }
 
   private async reconcileSnapshot(
@@ -314,24 +385,28 @@ export class RoomSyncSocket {
     const api = this.deps.getApi();
     let changed = false;
     for (const file of files) {
-      const local = room.files[file.relativePath];
-      if (local?.dirty || local?.localDeleted) {
-        // A local edit or delete is pending push; let the normal push/conflict path reconcile
-        // this file instead of auto-applying the remote state over it (which would otherwise
-        // silently resurrect a file the user just deleted, or clobber an unpushed edit).
-        continue;
-      }
-      if (file.deleted) {
-        if (local && local.serverSha256 !== null) {
-          await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync");
+      try {
+        const local = room.files[file.relativePath];
+        if (local?.dirty || local?.localDeleted) {
+          // A local edit or delete is pending push; let the normal push/conflict path reconcile
+          // this file instead of auto-applying the remote state over it (which would otherwise
+          // silently resurrect a file the user just deleted, or clobber an unpushed edit).
+          continue;
+        }
+        if (file.deleted) {
+          if (local && local.serverSha256 !== null) {
+            await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync", true);
+            changed = true;
+          }
+          continue;
+        }
+        if (!local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {
+          const content = await api.readFile(roomId, file.relativePath);
+          await this.deps.syncEngine.applyRemoteChange(room, content, "sync", true);
           changed = true;
         }
-        continue;
-      }
-      if (!local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {
-        const content = await api.readFile(roomId, file.relativePath);
-        await this.deps.syncEngine.applyRemoteChange(room, content, "sync");
-        changed = true;
+      } catch (error) {
+        console.error(`Vault Rooms: failed to reconcile snapshot file "${file.relativePath}"`, toError(error));
       }
     }
     if (changed) {

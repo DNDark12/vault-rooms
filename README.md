@@ -69,7 +69,7 @@ Whoever's device is running the relay (embedded or standalone) is "the server." 
 
 See [SECURITY.md](SECURITY.md) for the full threat model, token storage, revocation limitations, and how to report a vulnerability. Summary below.
 
-Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes, are generated with a CSPRNG (`crypto.randomBytes`), and only SHA-256 token hashes are stored in SQLite. Per-path `file:read` is enforced on every channel that carries file content - the REST download endpoint, live WebSocket broadcasts, **and** the initial room snapshot a device gets on subscribe/reconnect - so a member whose access list only grants some paths never receives the content (or even the filenames/hashes) of the paths they can't read.
+Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes, are generated with a CSPRNG (`crypto.randomBytes`), and only SHA-256 token hashes are stored in SQLite. Per-path `file:read` is enforced on every channel that carries file content - the REST download endpoint, live WebSocket broadcasts, **and** the initial room snapshot a device gets on subscribe/reconnect - so a member whose access list only grants some paths never receives the content (or even the filenames/hashes) of the paths they can't read. File writes and deletes require `sync:push` consistently over both REST and WebSocket, in addition to their file-specific permission.
 
 Access can be withdrawn at three granularities: remove a single ACL rule from a room, remove a user from a team, or revoke a user server-wide. A single lost/compromised device can also be revoked on its own (server owner → `POST /api/friends/:userId/devices/:deviceId/revoke`) without kicking that user's other devices - the revoked device's token stops working on its next request and its live WebSocket session is closed immediately.
 
@@ -92,7 +92,7 @@ CORS is intentionally permissive (`*`): the client talks to the relay from Obsid
 An embedded server created before pinned TLS remains in **Plaintext legacy** mode until its owner explicitly migrates it:
 
 1. On the hosting device, open Settings → Vault Rooms → Relay server → **Enable TLS migration**.
-2. Choose **Normal** if the current LAN is trusted. Authenticated clients learn the pin once over their existing HTTP connection, switch to verified HTTPS/WSS, rotate their device token, and persist the pinned connection. This transition is convenient but cannot detect an active attacker that replaces the pin in that one plaintext response.
+2. Choose **Normal** only if the current LAN is trusted. Authenticated clients learn the pin from one plaintext response, switch to verified HTTPS/WSS, rotate their device token, and persist the pinned connection. An active attacker on the LAN can replace that first pin; use Strict for sensitive teams.
 3. Choose **Strict** if the old network may be hostile or the team requires independently delivered fingerprints. Legacy clients cannot fetch the pin over HTTP; create and send each member a fresh pinned invite through a trusted channel instead.
 4. Wait until Settings reports zero active devices last seen on legacy HTTP, or knowingly accept that remaining devices must rejoin. Click **Enforce TLS** to disable the HTTP/WS listener and close every authenticated socket still using a legacy token, including WSS sessions opened during migration. Real plaintext connections are then refused because no HTTP listener remains; `TLS_REQUIRED` is retained as defense-in-depth for any plaintext request that reaches the shared handler, and later legacy-token authentication over TLS also fails with `TLS_REQUIRED`.
 
@@ -132,7 +132,8 @@ This is not character-level realtime (no shared cursor, no live keystrokes). The
 
 - **Push side (debounced, not per-keystroke).** When you edit a mounted file, the plugin waits for `debounceMs` (Settings → Vault Rooms → Sync, default **300ms**) of no further local writes to that file before pushing it to the relay. This avoids pushing a partial file on every keystroke while still keeping the delay small and predictable - not "no delay," but not "wait for a manual sync" either.
 - **Pull side (live, not polled).** Every mounted room keeps an open WebSocket subscription to the relay. The moment the relay accepts a write (from REST push or another device's WebSocket push), it broadcasts the change to every other subscribed device immediately - there is no polling interval on this side. Combined with the push-side debounce, a teammate's edit typically lands on your machine well under a second after they stop typing.
-- **Reconnect catch-up.** If your Obsidian was closed, the connection dropped, or the host restarted its server, the plugin automatically reconnects (with backoff) and re-subscribes to every previously-mounted room, then reconciles against a fresh snapshot from the server - you don't need to manually remount or reload Obsidian to start receiving live updates again. The Rooms panel's "Connection" section shows a live badge (connected / reconnecting / offline) so you can tell at a glance whether you're actually getting real-time updates right now.
+- **Reconnect catch-up.** If your Obsidian was closed, the connection dropped, or the host restarted its server, the plugin automatically reconnects (with backoff) and re-subscribes to every previously-mounted room, including a room whose prior subscription was interrupted before its snapshot arrived. It then reconciles against a fresh snapshot - you don't need to manually remount or reload Obsidian to start receiving live updates again. Each socket processes messages in receive order, and stale callbacks from a replaced socket are ignored, so an older async file operation cannot overwrite a newer event. The Rooms panel's "Connection" section shows a live badge (connected / reconnecting / offline) so you can tell at a glance whether you're actually getting real-time updates right now.
+- **Bounded handshake.** A client that receives no `hello_ok` within 10 seconds closes and follows the normal reconnect policy. The relay also closes a socket that has not authenticated within 10 seconds, so silent unauthenticated upgrades cannot retain connection slots indefinitely.
 - **No ping-pong.** Applying a remote change updates the local file's known server version/hash, so the local file watcher recognizes the resulting "modify" event as already-in-sync and does not push it back.
 
 ## Plugin capability model
@@ -173,18 +174,22 @@ plugin `data.json` and the entire `server-data/` directory. v0.2 migrates v0.1 s
 data in place: saved server/device credentials, active selection, mounted-room file state, users,
 teams, rooms, files/version history, invite hashes, and audit events are retained. Before changing a
 v0.1 SQLite schema, the relay writes a one-time byte-for-byte `relay.sqlite.bak-v1` safety copy;
-the active database is not moved or replaced with an empty one. Regression fixtures cover the
+read-only probes never rewrite that copy or the active database. A corrupt or unrelated file already
+using the backup name is preserved under the next `.bak-v1.invalid*` name before the canonical backup
+is created. The active database is not moved or replaced with an empty one. Regression fixtures cover the
 schema shipped by tags 0.1.0-0.1.5 (0.1.6 already contains the invite-table rebuild) as well as both
 older team-scoped layouts: the room-based shape and the earliest `shares`/`share_id` shape. Legacy
 shares, capabilities, ACL targets, files, blobs, and version history are mapped to rooms inside the
-same rollback-safe migration transaction.
+same rollback-safe migration transaction, even when the earliest database contains `shares` but no
+`rooms` table.
 
 An upgraded v0.1 server intentionally remains on its legacy HTTP/WS transport until the owner runs
 the TLS migration described above. Existing v0.1 device tokens are marked plaintext because that is
 how they were issued; the server never trusts a client-supplied token-security value.
 
 If an interim development build already moved the old database to `.bak-v1`, start the embedded
-server. An empty replacement database is repaired automatically. If the replacement already has
+server. An empty replacement database is repaired automatically while retaining the existing
+`identity.json`, server ID, and SPKI pin. If the replacement already has
 data, the panel shows **Restore v0.1 data** instead of overwriting it silently; restoration first
 copies that replacement to `.pre-v01-restore`, keeps `.bak-v1`, migrates the old database, and
 recovers a new credential for the existing owner through an in-process-only lifecycle method. Do

@@ -12,6 +12,15 @@ export interface PreparedStatement {
   all(...params: unknown[]): unknown[];
 }
 
+export interface ReadonlyPreparedStatement {
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+}
+
+export interface RelayDbReader {
+  prepare(sql: string): ReadonlyPreparedStatement;
+}
+
 export interface RelayDb {
   prepare(sql: string): PreparedStatement;
   exec(sql: string): void;
@@ -57,9 +66,58 @@ function loadSqlJs(locator?: SqlJsLocator): Promise<SqlJsStatic> {
       : locator?.locateFile
         ? { locateFile: locator.locateFile }
         : undefined;
-    sqlJsPromise = initSqlJs(config);
+    const initialization = initSqlJs(config);
+    let retryable!: Promise<SqlJsStatic>;
+    retryable = initialization.catch((error: unknown) => {
+      if (sqlJsPromise === retryable) {
+        sqlJsPromise = null;
+      }
+      throw error;
+    });
+    sqlJsPromise = retryable;
   }
   return sqlJsPromise;
+}
+
+/** Inspect an existing database image without opening its source path or scheduling a flush. */
+export async function inspectSqlJsDatabaseBytes<T>(
+  bytes: Uint8Array,
+  inspect: (db: RelayDbReader) => T,
+  locator?: SqlJsLocator
+): Promise<T> {
+  const SQL = await loadSqlJs(locator);
+  const sqlDb = new SQL.Database(bytes);
+  const reader: RelayDbReader = {
+    prepare(sql: string): ReadonlyPreparedStatement {
+      return {
+        get(...params: unknown[]) {
+          const stmt = sqlDb.prepare(sql);
+          try {
+            stmt.bind(normalizeParams(params));
+            return stmt.step() ? stmt.getAsObject() : undefined;
+          } finally {
+            stmt.free();
+          }
+        },
+        all(...params: unknown[]) {
+          const stmt = sqlDb.prepare(sql);
+          const rows: SqlRow[] = [];
+          try {
+            stmt.bind(normalizeParams(params));
+            while (stmt.step()) rows.push(stmt.getAsObject());
+            return rows;
+          } finally {
+            stmt.free();
+          }
+        }
+      };
+    }
+  };
+  try {
+    return inspect(reader);
+  } finally {
+    sqlDb.close();
+  }
 }
 
 function normalizeParams(params: unknown[]): (number | string | Uint8Array | null)[] {

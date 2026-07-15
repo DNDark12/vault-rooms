@@ -1,5 +1,7 @@
+import { hashToken } from "@vault-rooms/protocol";
 import { describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrations.js";
+import { RelayRepository } from "../src/db/repositories/relayRepository.js";
 import { openSqlJsDb } from "../src/db/sqlJsAdapter.js";
 
 describe("invite schema migration", () => {
@@ -35,7 +37,7 @@ describe("invite schema migration", () => {
       );
       insert into teams values ('team_1', 'demo', 'Demo', 'usr_1', 'now', 'now');
       insert into users values ('usr_1', 'Owner', null, 'now', 'now');
-      insert into invites values ('inv_1', 'team_1', 'usr_1', 'hash', 'member', 'later', 1, 0, null, 'now');
+      insert into invites values ('inv_1', 'team_1', 'usr_1', 'hash', 'owner', 'later', 1, 0, null, 'now');
     `);
 
     runMigrations(db);
@@ -61,12 +63,36 @@ describe("invite schema migration", () => {
       id: "inv_1",
       team_id: "team_1",
       room_id: null,
-      role: "member",
+      role: "admin",
       token_hash: "hash"
     });
     expect(db.prepare("select id from teams").get()).toEqual({ id: "team_1" });
     expect(db.prepare("select id from users").get()).toEqual({ id: "usr_1" });
 
+    await db.close();
+  });
+
+  it("rejects unsupported stored team roles before consuming the invite or inserting a user", async () => {
+    const db = await openSqlJsDb(":memory:");
+    runMigrations(db);
+    db.exec(`
+      insert into users values ('usr_owner', 'Owner', null, 'now', 'now');
+      insert into teams values ('team_1', 'demo', 'Demo', 'usr_owner', 'now', 'now');
+      insert into invites values (
+        'inv_bad', 'team_1', null, null, 'usr_owner', '${hashToken("bad-invite")}',
+        'viewer', '2099-01-01', 1, 0, null, 'now'
+      );
+    `);
+    const repo = new RelayRepository(db);
+
+    expect(() => repo.joinInvite({
+      inviteToken: "bad-invite",
+      displayName: "New user",
+      deviceName: "Laptop",
+      tokenSecurity: "plain"
+    })).toThrow(/unsupported team invite role/i);
+    expect(db.prepare("select count(*) as count from users").get()).toEqual({ count: 1 });
+    expect(db.prepare("select use_count from invites where id = 'inv_bad'").get()).toEqual({ use_count: 0 });
     await db.close();
   });
 });

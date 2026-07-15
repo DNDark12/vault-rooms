@@ -11,7 +11,7 @@ Vault Rooms is designed for **trusted people on a trusted local network** - a ho
 - Protecting data from other people who already have legitimate LAN access but aren't invited to a given room - the ACL model deny-by-defaults them from Vault Rooms' own rooms, but it cannot stop them from, say, port-scanning your machine.
 - Protecting against a malicious or compromised member you've already invited and granted access to. Once someone has read access to a room, nothing prevents them from keeping a local copy of everything they could read before being revoked (see "Revocation limitations" below).
 
-Within that scope, Vault Rooms enforces: per-path, deny-by-default access control (`file:read`/`file:write`/`file:create`/`file:delete`, individually grantable to a user or a whole team); per-server identity (a device only has power on the one server it registered with); and server-side enforcement of every permission check on both REST and WebSocket paths, so client-side UI state is never the actual gate.
+Within that scope, Vault Rooms enforces: per-path, deny-by-default access control (`file:read`/`file:write`/`file:create`/`file:delete`, individually grantable to a user or a whole team); per-server identity (a device only has power on the one server it registered with); and server-side enforcement of every permission check on both REST and WebSocket paths, so client-side UI state is never the actual gate. REST and WebSocket writes/deletes both require the shared `sync:push` permission as well as the file-specific permission.
 
 ## Transport security modes
 
@@ -26,14 +26,16 @@ Pinned TLS is transport encryption and server authentication, not end-to-end enc
 ### Migrating a legacy server
 
 The v0.1-to-v0.2 data upgrade is non-destructive. The relay makes a one-time
-`relay.sqlite.bak-v1` copy and migrates the active database in place. This covers both the exact
+byte-identical `relay.sqlite.bak-v1` copy and migrates the active database in place. Read-only schema
+inspection does not flush either file. A corrupt or unrelated file at the canonical backup path is
+quarantined without deletion before a create-only atomic backup is installed. This covers both the exact
 schema shipped by 0.1.0-0.1.6 and the older team-scoped development shapes, including the earliest
 `shares`/`share_id` layout; the structural conversion is transactional. The plugin converts its saved server entries without
 discarding plaintext device tokens or mounted-room state.
 Those historical tokens are classified as `plain` from server-side migration context. If a prior
 development build already archived the database, automatic recovery is limited to an empty
-replacement; restoring over a non-empty replacement is an explicit owner action that first keeps a
-separate `.pre-v01-restore` copy.
+replacement and retains an existing identity's server ID and pin. Restoring over a non-empty
+replacement is an explicit owner action that first keeps a separate `.pre-v01-restore` copy.
 
 An erased local owner credential is not a reason to reopen `POST /api/bootstrap`. The embedded
 plugin can create a replacement device only for the already-recorded server owner through an
@@ -43,10 +45,12 @@ write failure revokes the temporary recovery device. There is no public recovery
 
 The embedded owner chooses one of two migration ceremonies:
 
-- **Normal migration** keeps HTTP/WS and HTTPS/WSS available together. An already-authenticated legacy client may obtain the new server identity over its existing HTTP connection, pin it, complete migration over verified HTTPS, and receive a replacement device token. The old token is invalidated and every authenticated socket using it is closed. This is convenient, but its one-time trust-on-first-use step cannot prove that an active attacker did not replace the pin while it crossed plaintext HTTP. It protects subsequent traffic only if that first upgrade response was not intercepted.
+- **Normal migration** keeps HTTP/WS and HTTPS/WSS available together. An already-authenticated legacy client may obtain the new server identity over its existing HTTP connection, pin it, complete migration over verified HTTPS, and receive a replacement device token. The old token is invalidated and every authenticated socket using it is closed. This is convenient, but it trusts one authenticated plaintext response: an active LAN attacker can replace that first pin. Use Strict for sensitive teams. Normal protects subsequent traffic only if that first response was not intercepted.
 - **Strict migration** never delivers pin material over HTTP. Each client must use a fresh fingerprint-carrying invite from the owner, transferred through a channel the team trusts. This is the correct choice when the existing LAN may already be hostile or when the fingerprint needs independent verification.
 
 The owner can see how many active devices were last observed on legacy HTTP before enforcing TLS. Enforcement disables the plaintext listener and closes every authenticated socket still using a legacy token, including one opened over WSS during migration; the same shared authentication check rejects that token on later REST and WebSocket attempts with `TLS_REQUIRED`. A device that did not migrate must rejoin using a fresh pinned invite.
+
+WebSocket admission is bounded at both ends: the relay closes a connection that does not authenticate within 10 seconds, and the plugin closes/retries when `hello_ok` does not arrive within 10 seconds. On reconnect the plugin re-subscribes every desired room and processes messages in receive order; socket replacement invalidates stale callbacks from the old generation.
 
 For the standalone runtime, dual-stack is an explicit operator transition: start an existing plaintext server with `TLS_MODE=pinned`, `TLS_DUAL_STACK=true`, and `TLS_MIGRATION_MODE=non_strict|strict`; after clients migrate, stop it and restart with `TLS_DUAL_STACK=false`. That restart durably advances `tls_migrating` to `tls_enforced` and starts only HTTPS/WSS. A fresh pinned server and an already pinned/enforced server reject dual-stack instead of exposing an unnecessary plaintext listener.
 

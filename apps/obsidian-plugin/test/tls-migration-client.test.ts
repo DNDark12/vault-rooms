@@ -104,6 +104,46 @@ describe("embedded TLS listeners", () => {
 });
 
 describe("embedded TLS startup state", () => {
+  it("keeps the stored identity serverId when automatic v0.1 recovery replaces an empty database", async () => {
+    const adapter = new FakeDataAdapter();
+    const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
+    const stableServerId = "srv_recovered_identity";
+    const identity = await generateServerIdentity(stableServerId);
+    const empty = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
+    const emptyCore = createRelayCore(empty);
+    emptyCore.repo.setServerIdIfMissing(stableServerId);
+    await empty.close();
+    await adapter.write(
+      "plugins/vault-rooms/server-data/identity.json",
+      `${JSON.stringify({ serverId: stableServerId, identity, rotations: [] })}\n`
+    );
+
+    const SQL = await initSqlJs({ wasmBinary: toArrayBuffer(sqlWasmBinary) });
+    const legacy = new SQL.Database();
+    legacy.exec(`${LEGACY_V01_SCHEMA}${LEGACY_V01_DATA}`);
+    const legacyExport = legacy.export();
+    legacy.close();
+    await adapter.writeBinary(`${dbPath}.bak-v1`, toArrayBuffer(legacyExport));
+
+    const settings: EmbeddedServerSettings = {
+      port: await findAvailablePortBlock(),
+      maxFileBytes: 1024,
+      autoStart: false
+    };
+    const server = new EmbeddedRelayServer(asDataAdapter(adapter), dbPath);
+    embeddedServers.push(server);
+    const recovered = await server.start(settings);
+    expect(recovered).toMatchObject({ running: true, serverId: stableServerId, bootstrapped: true });
+
+    const migrating = await server.enableTlsMigration("non_strict");
+    expect(migrating).toMatchObject({
+      running: true,
+      serverId: stableServerId,
+      securityMode: "pinned-tls",
+      pinnedInfo: { pinnedIdentitySpkiSha256: identity.identitySpkiSha256 }
+    });
+  });
+
   it("explicitly restores a non-empty reset database from v0.1 without losing either file", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
@@ -488,6 +528,74 @@ describe("same-process embedded TLS ownership lifecycle", () => {
 
     const restarted = await server.start(settings);
     expect(restarted.running && restarted.pinnedInfo?.pinnedIdentitySpkiSha256).toBe(initialPin);
+  });
+
+  it("publishes the rotated runtime identity before audit and restores every identity surface if audit fails", async () => {
+    const adapter = new FakeDataAdapter();
+    const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
+    const settings: EmbeddedServerSettings = { port: await getFreePort(), maxFileBytes: 1024, autoStart: false };
+    const server = new EmbeddedRelayServer(asDataAdapter(adapter), dbPath);
+    embeddedServers.push(server);
+    const initial = await server.start(settings);
+    if (!initial.running || !initial.pinnedInfo || !settings.tlsPort) throw new Error("Expected pinned embedded server");
+    const runningApp = (server as unknown as { app: EmbeddedRelayApp }).app;
+    const store = (server as unknown as { identityStore: IdentityStore }).identityStore;
+    const runtime = (server as unknown as {
+      securityRuntimeState: { persisted: NonNullable<Awaited<ReturnType<IdentityStore["load"]>>> };
+    }).securityRuntimeState;
+    const previous = await store.load();
+    if (!previous) throw new Error("Expected persisted embedded identity");
+    let rejectAudit!: (error: Error) => void;
+    const auditFailure = new Promise<void>((_resolve, reject) => {
+      rejectAudit = reject;
+    });
+    const recordAudit = vi
+      .spyOn(runningApp.securityAdmin, "recordIdentityRotation")
+      .mockImplementationOnce(() => auditFailure);
+
+    const rotation = server.rotateIdentity();
+    await vi.waitFor(() => expect(recordAudit).toHaveBeenCalledTimes(1));
+
+    let duringRotationError: unknown;
+    const rotated = runtime.persisted;
+    try {
+      expect(rotated.identity.identitySpkiSha256).not.toBe(previous.identity.identitySpkiSha256);
+      expect(
+        (
+          await pinnedGet(
+            settings.tlsPort,
+            rotated.identity.tlsName,
+            rotated.identity.identityCertPem
+          )
+        ).status
+      ).toBe(200);
+    } catch (error) {
+      duringRotationError = error;
+    }
+
+    rejectAudit(new Error("rotation audit failed"));
+    await expect(rotation).rejects.toThrow("rotation audit failed");
+    if (duringRotationError) throw duringRotationError;
+
+    const restored = await store.load();
+    expect(restored?.identity.identitySpkiSha256).toBe(previous.identity.identitySpkiSha256);
+    expect(runtime.persisted.identity.identitySpkiSha256).toBe(previous.identity.identitySpkiSha256);
+    expect(
+      (
+        await pinnedGet(
+          settings.tlsPort,
+          previous.identity.tlsName,
+          previous.identity.identityCertPem
+        )
+      ).status
+    ).toBe(200);
+    await expect(
+      pinnedGet(
+        settings.tlsPort,
+        rotated.identity.tlsName,
+        rotated.identity.identityCertPem
+      )
+    ).rejects.toThrow();
   });
 
   it("stops honestly when replacement closes the old listener and durable rollback then fails", async () => {

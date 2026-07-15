@@ -39,7 +39,8 @@ afterEach(async () => {
 
 async function createSecurityApp(
   rotations: IdentityRotationRecord[] = [],
-  rateLimit?: { rotationProbeMax?: number; rotationProbeWindowMs?: number }
+  rateLimit?: { rotationProbeMax?: number; rotationProbeWindowMs?: number },
+  transportOverrideForTests: "http" | "https" = "https"
 ) {
   const db = await openRelayDb(":memory:");
   databases.push(db);
@@ -54,6 +55,7 @@ async function createSecurityApp(
   const app = await createAppWithDb(db, {
     publicUrl: "http://127.0.0.1:8787",
     rateLimit,
+    transportOverrideForTests,
     security: {
       runtime: {
         getIdentity: () => persisted,
@@ -311,14 +313,8 @@ describe("shared REST and WebSocket transport enforcement", () => {
   });
 
   it("serves authenticated upgrade info and blocks strict migration over HTTP", async () => {
-    const { app, repo, persisted, httpsUrl } = await createSecurityApp();
-    const owner = (
-      await injectBootstrap(
-        app,
-        { displayName: "Owner", deviceName: "Laptop" },
-        { headers: { "x-test-transport": "https" } }
-      )
-    ).json();
+    const { app, db, repo, persisted, httpsUrl } = await createSecurityApp([], undefined, "http");
+    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
 
     const unauthenticated = await app.inject({ method: "GET", url: "/api/security/upgrade-info" });
     expect(unauthenticated.statusCode).toBe(401);
@@ -349,10 +345,22 @@ describe("shared REST and WebSocket transport enforcement", () => {
     });
     expect(strictHttp.statusCode).toBe(403);
 
-    const strictHttps = await app.inject({
+    const httpsApp = await createAppWithDb(db, {
+      publicUrl: "http://127.0.0.1:8787",
+      ownsDb: false,
+      transportOverrideForTests: "https",
+      security: {
+        runtime: {
+          getIdentity: () => persisted,
+          httpsUrl: () => httpsUrl
+        }
+      }
+    });
+    apps.push(httpsApp);
+    const strictHttps = await httpsApp.inject({
       method: "GET",
       url: "/api/security/upgrade-info",
-      headers: { authorization: `Bearer ${owner.deviceToken}`, "x-test-transport": "https" }
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
     expect(strictHttps.statusCode).toBe(200);
   });
@@ -360,7 +368,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
   it("rotates a token over HTTPS and closes an already-authenticated socket", async () => {
     const { app, repo } = await createSecurityApp();
     const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
-    const socket = await connect(app, { "x-test-transport": "https" });
+    const socket = await connect(app);
     socket.send(
       JSON.stringify({
         type: "hello",
@@ -375,7 +383,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
     const completed = await app.inject({
       method: "POST",
       url: "/api/security/complete-tls-migration",
-      headers: { authorization: `Bearer ${owner.deviceToken}`, "x-test-transport": "https" }
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
     expect(completed.statusCode).toBe(200);
     expect(completed.json().deviceToken).toMatch(/^tr_dev_/);
@@ -388,7 +396,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
   it("does not return a rotated credential or close its socket until the security mutation is durable", async () => {
     const { app, db } = await createSecurityApp();
     const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
-    const socket = await connect(app, { "x-test-transport": "https" });
+    const socket = await connect(app);
     socket.send(
       JSON.stringify({
         type: "hello",
@@ -414,7 +422,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
       .inject({
         method: "POST",
         url: "/api/security/complete-tls-migration",
-        headers: { authorization: `Bearer ${owner.deviceToken}`, "x-test-transport": "https" }
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
       })
       .finally(() => {
         settled = true;
@@ -433,17 +441,17 @@ describe("shared REST and WebSocket transport enforcement", () => {
 
   it("rejects a legacy token through the same helper for REST and WSS once TLS is enforced", async () => {
     const { app, repo } = await createSecurityApp();
-    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
+    const owner = repo.bootstrapServer({ displayName: "Owner", deviceName: "Laptop", tokenSecurity: "plain" });
     repo.setSecurityState("tls_enforced");
 
     const rest = await app.inject({
       method: "GET",
       url: "/api/me",
-      headers: { authorization: `Bearer ${owner.deviceToken}`, "x-test-transport": "https" }
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
     });
     expect(rest.statusCode).toBe(426);
 
-    const socket = await connect(app, { "x-test-transport": "https" });
+    const socket = await connect(app);
     socket.send(
       JSON.stringify({
         type: "hello",
@@ -458,18 +466,11 @@ describe("shared REST and WebSocket transport enforcement", () => {
 
   it("issues TLS tokens for HTTPS join and rotates plain invite acceptance", async () => {
     const { app, repo } = await createSecurityApp();
-    const owner = (
-      await injectBootstrap(
-        app,
-        { displayName: "Owner", deviceName: "Laptop" },
-        { headers: { "x-test-transport": "https" } }
-      )
-    ).json();
+    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
     const friendInvite = repo.createInvite({ createdByUserId: owner.user.id, expiresInMinutes: 60, maxUses: 1 });
     const joined = await app.inject({
       method: "POST",
       url: "/api/join",
-      headers: { "x-test-transport": "https" },
       payload: { inviteToken: friendInvite.inviteToken, displayName: "TLS member", deviceName: "TLS laptop" }
     });
     expect(repo.authenticateDeviceToken(joined.json().deviceToken)?.tokenSecurity).toBe("tls");
@@ -485,7 +486,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
     const accepted = await app.inject({
       method: "POST",
       url: "/api/invites/accept",
-      headers: { authorization: `Bearer ${plainMember.deviceToken}`, "x-test-transport": "https" },
+      headers: { authorization: `Bearer ${plainMember.deviceToken}` },
       payload: { inviteToken: acceptInvite.inviteToken }
     });
     expect(accepted.statusCode).toBe(200);
@@ -495,7 +496,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
 
   it("accepts strict migration with an invite-bound proof and no bearer credential", async () => {
     const { app, repo, persisted } = await createSecurityApp();
-    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
+    const owner = repo.bootstrapServer({ displayName: "Owner", deviceName: "Laptop", tokenSecurity: "plain" });
     repo.setSecurityState("tls_migrating");
     repo.setMigrationMode("strict");
     const invite = repo.createInvite({ createdByUserId: owner.user.id, expiresInMinutes: 60, maxUses: 1 });
@@ -509,7 +510,6 @@ describe("shared REST and WebSocket transport enforcement", () => {
     const accepted = await app.inject({
       method: "POST",
       url: "/api/invites/accept",
-      headers: { "x-test-transport": "https" },
       payload: {
         inviteToken: invite.inviteToken,
         deviceId: owner.device.id,
@@ -525,7 +525,7 @@ describe("shared REST and WebSocket transport enforcement", () => {
 
   it("rejects a strict proof copied from another pinned identity without consuming the invite", async () => {
     const { app, repo, persisted } = await createSecurityApp();
-    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Laptop" })).json();
+    const owner = repo.bootstrapServer({ displayName: "Owner", deviceName: "Laptop", tokenSecurity: "plain" });
     repo.setSecurityState("tls_migrating");
     repo.setMigrationMode("strict");
     const invite = repo.createInvite({ createdByUserId: owner.user.id, expiresInMinutes: 60, maxUses: 1 });
@@ -539,7 +539,6 @@ describe("shared REST and WebSocket transport enforcement", () => {
     const rejected = await app.inject({
       method: "POST",
       url: "/api/invites/accept",
-      headers: { "x-test-transport": "https" },
       payload: { inviteToken: invite.inviteToken, deviceId: owner.device.id, deviceProof: attackerBoundProof }
     });
 
@@ -548,7 +547,6 @@ describe("shared REST and WebSocket transport enforcement", () => {
     const accepted = await app.inject({
       method: "POST",
       url: "/api/invites/accept",
-      headers: { "x-test-transport": "https" },
       payload: {
         inviteToken: invite.inviteToken,
         deviceId: owner.device.id,
@@ -573,7 +571,6 @@ describe("shared REST and WebSocket transport enforcement", () => {
     const rejected = await app.inject({
       method: "POST",
       url: "/api/invites/accept",
-      headers: { "x-test-transport": "https" },
       payload: {
         inviteToken: invite.inviteToken,
         deviceId: owner.device.id,
@@ -611,21 +608,15 @@ describe("shared REST and WebSocket transport enforcement", () => {
     expect(audit.count).toBe(2);
   });
 
-  it("honors x-test-transport only in the test environment", async () => {
-    const { app, repo } = await createSecurityApp();
+  it("ignores x-test-transport even in the test environment", async () => {
+    const { app, repo } = await createSecurityApp([], undefined, "http");
     repo.setSecurityState("tls_enforced");
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
-    try {
-      const response = await app.inject({
-        method: "GET",
-        url: "/health",
-        headers: { "x-test-transport": "https" }
-      });
-      expect(response.statusCode).toBe(426);
-    } finally {
-      process.env.NODE_ENV = originalNodeEnv;
-    }
+    const response = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { "x-test-transport": "https" }
+    });
+    expect(response.statusCode).toBe(426);
   });
 });
 

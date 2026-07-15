@@ -5,14 +5,22 @@ import { join } from "node:path";
 import * as x509 from "@peculiar/x509";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFsIdentityStore } from "../src/security/fsIdentityStore.js";
+import { openRelayDb } from "../src/db/db.js";
+import { openSqlJsDb } from "../src/db/sqlJsAdapter.js";
+import { createRelayCore } from "../src/relayCore.js";
 import {
   certPemToDerBase64Url,
   generateServerIdentity,
   spkiSha256FromCertDer,
   spkiSha256FromCertPem
 } from "../src/security/identity.js";
-import { ensureServerIdentity, rotateServerIdentity } from "../src/security/identityLifecycle.js";
+import {
+  ensureServerIdentity,
+  resolveServerIdForIdentityStore,
+  rotateServerIdentity
+} from "../src/security/identityLifecycle.js";
 import { createRotationRecord, rotationCanonicalPayload, verifyRotationRecord } from "../src/security/rotation.js";
+import { LEGACY_V01_SCHEMA, seedLegacyV01Data } from "./fixtures/legacyV01.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -99,6 +107,34 @@ describe("server TLS identity", () => {
 });
 
 describe("server identity persistence", () => {
+  it("seeds a recovered v0.1 database from the existing standalone identity before generating an ID", async () => {
+    const directory = await createTemporaryDirectory();
+    const dbPath = join(directory, "relay.sqlite");
+    const stableServerId = "srv_standalone_recovery";
+    const active = await openRelayDb(dbPath);
+    createRelayCore(active).repo.setServerIdIfMissing(stableServerId);
+    await active.close();
+    const store = createFsIdentityStore(directory);
+    const persisted = {
+      serverId: stableServerId,
+      identity: await generateServerIdentity(stableServerId),
+      rotations: []
+    };
+    await store.save(persisted);
+    const backup = await openSqlJsDb(`${dbPath}.bak-v1`);
+    backup.exec(LEGACY_V01_SCHEMA);
+    seedLegacyV01Data(backup);
+    await backup.close();
+
+    const recovered = await openRelayDb(dbPath);
+    const repo = createRelayCore(recovered).repo;
+    expect(repo.getServerId()).toBeNull();
+    expect(await resolveServerIdForIdentityStore(repo, store)).toBe(stableServerId);
+    expect(repo.getServerId()).toBe(stableServerId);
+    expect(await ensureServerIdentity({ serverId: stableServerId, store })).toEqual(persisted);
+    await recovered.close();
+  });
+
   it("saves and loads atomically with private material restricted to mode 0600", async () => {
     const directory = await createTemporaryDirectory();
     const store = createFsIdentityStore(directory);

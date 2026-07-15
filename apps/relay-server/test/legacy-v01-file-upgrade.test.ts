@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -77,13 +77,46 @@ describe("standalone v0.1 file upgrade", () => {
 
   it("recovers an already-archived legacy database when the replacement database is empty", async () => {
     const dbPath = temporaryDbPath();
-    await writeLegacyDb(`${dbPath}.bak-v1`);
     const empty = await openRelayDb(dbPath);
     await empty.close();
+    await writeLegacyDb(`${dbPath}.bak-v1`);
+    const fixedBackupTime = new Date("2000-01-01T00:00:00.000Z");
+    utimesSync(`${dbPath}.bak-v1`, fixedBackupTime, fixedBackupTime);
+    const backupMtimeBefore = statSync(`${dbPath}.bak-v1`).mtimeMs;
 
     const recovered = await openRelayDb(dbPath);
     expect(recovered.prepare("select token_hash from devices where id = 'dev_owner'").get()).toEqual({ token_hash: "owner-token-hash" });
     expect(recovered.prepare("select count(*) as count from files").get()).toEqual({ count: 1 });
     await recovered.close();
+    expect(statSync(`${dbPath}.bak-v1`).mtimeMs).toBe(backupMtimeBefore);
+  });
+
+  it("quarantines a different valid v0.1 backup and creates the byte-identical active backup", async () => {
+    const dbPath = temporaryDbPath();
+    await writeLegacyDb(dbPath);
+    const activeBytes = readFileSync(dbPath);
+    await writeReleasedV01Db(`${dbPath}.bak-v1`);
+    const foreignBackupBytes = readFileSync(`${dbPath}.bak-v1`);
+
+    const migrated = await openRelayDb(dbPath);
+    await migrated.close();
+
+    expect(readFileSync(`${dbPath}.bak-v1`)).toEqual(activeBytes);
+    expect(readFileSync(`${dbPath}.bak-v1.invalid`)).toEqual(foreignBackupBytes);
+  });
+
+  it("quarantines an unparsable canonical backup and continues upgrading the valid active database", async () => {
+    const dbPath = temporaryDbPath();
+    await writeLegacyDb(dbPath);
+    const activeBytes = readFileSync(dbPath);
+    const corruptBackup = Buffer.from("not a sqlite database");
+    writeFileSync(`${dbPath}.bak-v1`, corruptBackup);
+
+    const migrated = await openRelayDb(dbPath);
+    expect(migrated.prepare("select token_hash from devices where id = 'dev_owner'").get()).toEqual({ token_hash: "owner-token-hash" });
+    await migrated.close();
+
+    expect(readFileSync(`${dbPath}.bak-v1`)).toEqual(activeBytes);
+    expect(readFileSync(`${dbPath}.bak-v1.invalid`)).toEqual(corruptBackup);
   });
 });

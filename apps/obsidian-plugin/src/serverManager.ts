@@ -5,6 +5,7 @@ import {
   certPemToDerBase64Url,
   createRelayCore,
   ensureServerIdentity,
+  resolveServerIdForIdentityStore,
   rotateServerIdentity,
   tlsCertificateChainPem,
   type IdentityStore,
@@ -104,18 +105,19 @@ export class EmbeddedRelayServer {
       const freshUnbootstrapped = serverOwnerId === null && !core.repo.hasExplicitSecurityState();
       const legacyV01BackupAvailable =
         (await this.adapter.exists(`${this.dbPath}.bak-v1`)) && !core.repo.wasMigratedFromLegacyV01();
-      // Persist the stable server ID before identity.json can be created. Otherwise a crash between
-      // those two writes could leave the DB generating a new ID that no longer matches its key file.
+      const identityStore = createObsidianIdentityStore(this.adapter, parentDirectory(this.dbPath));
+      // If automatic v0.1 recovery replaced an empty current DB, bind the migrated image back to
+      // its already-durable identity before any random ID can be generated.
+      const serverId = await resolveServerIdForIdentityStore(core.repo, identityStore);
       const startup = await core.repo.durable(() => {
-        const serverId = core.repo.getOrCreateServerId();
         let securityState = core.repo.getSecurityState();
         if (freshUnbootstrapped) {
           securityState = "pinned_tls";
           core.repo.setSecurityState(securityState);
         }
-        return { securityState, serverId };
+        return { securityState };
       });
-      const { securityState, serverId } = startup;
+      const { securityState } = startup;
       const plainListenerEnabled = securityState === "plain_legacy" || securityState === "tls_migrating";
       // The legacy port is checked only when an HTTP listener will actually use it. Once enforcement
       // disables that listener, an unrelated process occupying the old port must not prevent HTTPS
@@ -131,7 +133,6 @@ export class EmbeddedRelayServer {
       let tlsKey: string | undefined;
       let tlsCert: string | undefined;
       let publicUrl: string;
-      const identityStore = createObsidianIdentityStore(this.adapter, parentDirectory(this.dbPath));
       const persisted = await ensureServerIdentity({ serverId, store: identityStore });
       const runtimeState = { persisted, httpsUrl: null as string | null };
       const security: { runtime: SecurityRuntime } = {
@@ -257,7 +258,7 @@ export class EmbeddedRelayServer {
       const db = await openObsidianSqlJsDb(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
       try {
         const core = createRelayCore(db, { maxFileBytes: settings.maxFileBytes });
-        await core.repo.durable(() => core.repo.setServerId(stableServerId));
+        await core.repo.durable(() => core.repo.setServerIdIfMissing(stableServerId));
       } finally {
         await db.close();
       }
@@ -382,6 +383,7 @@ export class EmbeddedRelayServer {
         key: rotated.identity.leafKeyPem,
         cert: tlsCertificateChainPem(rotated.identity)
       });
+      running.runtime.persisted = rotated;
       await running.app.securityAdmin.recordIdentityRotation(rotated.serverId, record);
     } catch (error) {
       const rollback = await Promise.allSettled([
@@ -414,7 +416,6 @@ export class EmbeddedRelayServer {
         "Identity rotation failed and rollback was incomplete; the embedded relay was stopped."
       );
     }
-    running.runtime.persisted = rotated;
     this.status = { ...running.status, pinnedInfo: toPinnedInfo(rotated) };
     return this.status;
   }
