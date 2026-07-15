@@ -32,6 +32,7 @@ import { ObsidianVaultAdapter } from "./vaultAdapter.js";
 import { VAULT_ROOMS_VIEW_TYPE, VaultRoomsView } from "./views/VaultRoomsView.js";
 import { withInstalledCapabilities } from "./pluginCapabilities.js";
 import { inviteAcceptanceNotice, inviteJoinNotice } from "./inviteNotices.js";
+import type { LanShareReachability } from "./lanShareReachability.js";
 import type { PluginContext } from "./controllers/PluginContext.js";
 import { ServerConnectionManager } from "./controllers/ServerConnectionManager.js";
 import { RoomMountController, type RoomMountControllerDeps } from "./controllers/RoomMountController.js";
@@ -275,6 +276,14 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.serverConnectionManager.getServerStatus();
   }
 
+  getLanShareReachability(): LanShareReachability {
+    return this.serverConnectionManager.getLanShareReachability();
+  }
+
+  refreshLanShareReachability(force = false): void {
+    this.serverConnectionManager.refreshLanShareReachability(force);
+  }
+
   /** Live-sync WebSocket state - separate from getServerStatus(), which is about *hosting* the embedded server. */
   getSyncState(): SyncConnectionState {
     return this.syncState;
@@ -329,6 +338,11 @@ export default class VaultRoomsPlugin extends Plugin {
    *  to this device's embedded server. */
   private isOwnEmbeddedServerConnection(server: ServerConnection): boolean {
     return server.isServerOwner && isLoopbackUrl(server.baseUrl);
+  }
+
+  activeServerIsOwnEmbeddedServer(): boolean {
+    const server = this.getActiveServer();
+    return Boolean(server && this.isOwnEmbeddedServerConnection(server));
   }
 
   /** Used to skip live-sync WebSocket creation and REST refreshes when there is genuinely nothing
@@ -502,32 +516,28 @@ export default class VaultRoomsPlugin extends Plugin {
 
   async createInvite(teamId: string, role: "member" | "admin" = "member"): Promise<void> {
     const server = this.requireActiveServer();
-    this.warnIfInviteIsLoopback();
+    await this.assertInviteServerReachable(server);
     const invite = await this.apiFor(server).createInvite(teamId, role);
     new InviteMemberModal(this, invite.joinUrl).open();
   }
 
   async createRoomInvite(roomId: string, preset: "reader" | "editor"): Promise<void> {
     const server = this.requireActiveServer();
-    this.warnIfInviteIsLoopback();
+    await this.assertInviteServerReachable(server);
     const invite = await this.apiFor(server).createRoomInvite(roomId, preset);
     new InviteMemberModal(this, invite.joinUrl).open();
   }
 
   async createFriendInvite(): Promise<void> {
     const server = this.requireActiveServer();
-    this.warnIfInviteIsLoopback();
+    await this.assertInviteServerReachable(server);
     const invite = await this.apiFor(server).createFriendInvite();
     new InviteMemberModal(this, invite.joinUrl).open();
   }
 
-  private warnIfInviteIsLoopback(): void {
-    const status = this.getServerStatus();
-    if (status.running && status.lanDetectionFailed) {
-      new Notice(
-        "Warning: this invite link still points at 127.0.0.1 and will NOT work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, restart the server, then create a new invite.",
-        12_000
-      );
+  private async assertInviteServerReachable(server: ServerConnection): Promise<void> {
+    if (this.isOwnEmbeddedServerConnection(server)) {
+      await this.serverConnectionManager.assertLanShareReachable();
     }
   }
 

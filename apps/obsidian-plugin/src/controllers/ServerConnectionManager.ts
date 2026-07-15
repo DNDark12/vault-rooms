@@ -3,6 +3,12 @@ import { createInviteAcceptanceProof, type IdentityRotationRecord, type Migratio
 import { verifyRotationRecord } from "vault-rooms-relay/embedded-core";
 import { RelayApiClient } from "../apiClient.js";
 import {
+  LanShareReachabilityMonitor,
+  probeLanShareTarget,
+  type LanShareProbeTarget,
+  type LanShareReachability
+} from "../lanShareReachability.js";
+import {
   assertPinMaterial,
   fetchRotationProbe,
   InvalidPinMaterialError,
@@ -23,8 +29,16 @@ type ServerConnectionManagerContext = Pick<
 /** Owns the embedded relay server lifecycle and per-server RelayApiClient construction/revocation. */
 export class ServerConnectionManager {
   private embeddedServer: EmbeddedRelayServer | null = null;
+  private readonly lanShareReachability: LanShareReachabilityMonitor;
+  private suppressLanShareRender = false;
 
-  constructor(private readonly ctx: ServerConnectionManagerContext) {}
+  constructor(private readonly ctx: ServerConnectionManagerContext) {
+    this.lanShareReachability = new LanShareReachabilityMonitor(probeLanShareTarget, () => {
+      if (!this.suppressLanShareRender) {
+        this.ctx.renderOpenRoomsViews();
+      }
+    });
+  }
 
   getServerStatus(): EmbeddedServerStatus {
     return this.embeddedServer?.getStatus() ?? { running: false };
@@ -57,38 +71,71 @@ export class ServerConnectionManager {
         );
       }
       new Notice(`Vault Rooms server running at ${status.localUrl}`);
+      this.refreshLanShareReachability();
     }
     return status;
   }
 
   async stopEmbeddedServer(): Promise<void> {
     await this.embeddedServer?.stop();
-    this.ctx.renderOpenRoomsViews();
+    this.lanShareReachability.clear();
     new Notice("Vault Rooms server stopped.");
   }
 
   /** Best-effort teardown for plugin unload - unlike stopEmbeddedServer(), does not render views or show a Notice (see VaultRoomsPlugin.onunload's doc comment). */
   async stopSilently(): Promise<void> {
     await this.embeddedServer?.stop();
+    this.suppressLanShareRender = true;
+    try {
+      this.lanShareReachability.clear();
+    } finally {
+      this.suppressLanShareRender = false;
+    }
   }
 
   async enableTlsMigration(mode: MigrationMode): Promise<EmbeddedServerStatus> {
     const status = await this.getOrCreateEmbeddedServer().enableTlsMigration(mode);
     await this.ctx.saveSettings();
     this.ctx.renderOpenRoomsViews();
+    this.refreshLanShareReachability();
     return status;
   }
 
   async enforceTls(): Promise<EmbeddedServerStatus> {
     const status = await this.getOrCreateEmbeddedServer().enforceTls();
     this.ctx.renderOpenRoomsViews();
+    this.refreshLanShareReachability();
     return status;
   }
 
   async rotateIdentity(): Promise<EmbeddedServerStatus> {
     const status = await this.getOrCreateEmbeddedServer().rotateIdentity();
     this.ctx.renderOpenRoomsViews();
+    this.refreshLanShareReachability();
     return status;
+  }
+
+  getLanShareReachability(): LanShareReachability {
+    return this.lanShareReachability.getState();
+  }
+
+  refreshLanShareReachability(force = false): void {
+    this.lanShareReachability.check(this.getLanShareProbeTarget(), force);
+  }
+
+  async assertLanShareReachable(): Promise<void> {
+    await this.lanShareReachability.require(this.getLanShareProbeTarget());
+  }
+
+  private getLanShareProbeTarget(): LanShareProbeTarget | undefined {
+    const status = this.getServerStatus();
+    if (!status.running || !status.lanUrl) {
+      return undefined;
+    }
+    return {
+      baseUrl: status.lanUrl,
+      pin: status.pinnedInfo
+    };
   }
 
   private getOrCreateEmbeddedServer(): EmbeddedRelayServer {
@@ -342,6 +389,7 @@ export class ServerConnectionManager {
   async restoreEmbeddedLegacyV01Backup(): Promise<EmbeddedServerStatus> {
     const status = await this.getOrCreateEmbeddedServer().restoreLegacyV01Backup();
     this.ctx.renderOpenRoomsViews();
+    this.refreshLanShareReachability();
     return status;
   }
 
