@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RelayApiClient } from "./apiClient.js";
 import {
   LanShareReachabilityMonitor,
+  lanSharePresentation,
   probeLanShareTarget,
   type LanShareProbeTarget
 } from "./lanShareReachability.js";
@@ -117,6 +118,24 @@ describe("LanShareReachabilityMonitor", () => {
     expect(monitor.getState()).toEqual({ status: "unavailable" });
     await expect(monitor.require(undefined)).rejects.toThrow("Public URL override");
     expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe("lanSharePresentation", () => {
+  it("renders a reachable LAN endpoint separately from local sync", () => {
+    expect(lanSharePresentation({ key: "k", baseUrl: "http://lan", status: "reachable" })).toEqual({
+      label: "LAN share: reachable from this device",
+      className: "is-running"
+    });
+  });
+
+  it("renders an unreachable LAN endpoint as stopped", () => {
+    expect(
+      lanSharePresentation({ key: "k", baseUrl: "http://bad", status: "unreachable", error: "offline" })
+    ).toMatchObject({
+      label: "LAN share: unreachable",
+      className: "is-stopped"
+    });
   });
 });
 

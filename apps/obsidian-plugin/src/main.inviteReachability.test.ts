@@ -71,6 +71,19 @@ describe("VaultRoomsPlugin invite LAN reachability gate", () => {
     expect(api.createFriendInvite).toHaveBeenCalledOnce();
     expect(modalMocks.open).toHaveBeenCalledOnce();
   });
+
+  it("issues an own-server invite after the fresh LAN assertion succeeds", async () => {
+    const server = serverConnection("http://127.0.0.1:8787", true);
+    const api = inviteApi();
+    const assertLanShareReachable = vi.fn().mockResolvedValue(undefined);
+    const plugin = createPlugin(server, api, assertLanShareReachable);
+
+    await plugin.createFriendInvite();
+
+    expect(assertLanShareReachable).toHaveBeenCalledOnce();
+    expect(api.createFriendInvite).toHaveBeenCalledOnce();
+    expect(modalMocks.open).toHaveBeenCalledOnce();
+  });
 });
 
 function createPlugin(
@@ -92,15 +105,11 @@ function createPlugin(
   const internals = plugin as unknown as {
     serverConnectionManager: {
       assertLanShareReachable: () => Promise<void>;
-      getServerStatus: () => { running: true; lanDetectionFailed: false };
     };
     requireActiveServer: () => ServerConnection;
     apiFor: () => RelayApiClient;
   };
-  internals.serverConnectionManager = {
-    assertLanShareReachable,
-    getServerStatus: () => ({ running: true, lanDetectionFailed: false })
-  };
+  internals.serverConnectionManager = { assertLanShareReachable };
   internals.requireActiveServer = () => server;
   internals.apiFor = () => api as unknown as RelayApiClient;
   return plugin;

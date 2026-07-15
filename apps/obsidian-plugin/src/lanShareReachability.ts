@@ -12,6 +12,24 @@ export type LanShareReachability =
   | { key: string; baseUrl: string; status: "reachable" }
   | { key: string; baseUrl: string; status: "unreachable"; error: string };
 
+export type LanSharePresentation = {
+  label: string;
+  className: "is-running" | "is-connecting" | "is-stopped";
+};
+
+export function lanSharePresentation(state: LanShareReachability): LanSharePresentation | null {
+  switch (state.status) {
+    case "checking":
+      return { label: "LAN share: checking…", className: "is-connecting" };
+    case "reachable":
+      return { label: "LAN share: reachable from this device", className: "is-running" };
+    case "unreachable":
+      return { label: "LAN share: unreachable", className: "is-stopped" };
+    case "unavailable":
+      return null;
+  }
+}
+
 export async function probeLanShareTarget(target: LanShareProbeTarget): Promise<void> {
   await new RelayApiClient(target.baseUrl, undefined, undefined, target.pin).testConnection();
 }

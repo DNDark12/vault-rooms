@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-15
 
+**Status:** Implemented and locally verified on 2026-07-15. Release publication remains pending the post-merge verification and tag workflow.
+
 ## Problem
 
 The embedded relay owner correctly connects to its own server through the loopback URL. The Vault Rooms panel currently presents that local live-sync connection next to the configured LAN share URL without independently checking the LAN URL. A stale or mistyped Public URL override can therefore produce a green `Live sync: connected` badge even though invite recipients cannot reach the advertised address.
