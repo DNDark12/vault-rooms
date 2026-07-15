@@ -1,7 +1,10 @@
-import { Notice, PluginSettingTab, Setting } from "obsidian";
+import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
+import type { MigrationMode } from "@vault-rooms/protocol";
 import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
+import { pinnedInfoForServer } from "./controllers/ServerConnectionManager.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
+import { refreshSettingTab, setDestructiveCompat } from "./obsidianCompat.js";
 import { isRestrictedPort } from "./restrictedPorts.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
@@ -15,11 +18,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         name: "Vault Rooms settings",
         searchable: false,
         render: (setting) => {
-          const { settingEl } = setting;
-          settingEl.empty();
-          this.renderServerSettings(settingEl);
-          this.renderSyncSettings(settingEl);
-          this.renderServersSettings(settingEl);
+          this.renderSettings(setting.settingEl);
         }
       }
     ];
@@ -31,11 +30,18 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
    *  in sync with getSettingDefinitions()'s render callback above; only one of the two runs on any
    *  given Obsidian version, per Obsidian's own SettingTab#display() doc. */
   display(): void {
-    const { containerEl } = this;
+    this.renderSettings(this.containerEl);
+  }
+
+  private renderSettings(containerEl: HTMLElement): void {
     containerEl.empty();
     this.renderServerSettings(containerEl);
     this.renderSyncSettings(containerEl);
     this.renderServersSettings(containerEl);
+  }
+
+  private refresh(): void {
+    refreshSettingTab(this, (containerEl) => this.renderSettings(containerEl));
   }
 
   private renderServerSettings(containerEl: HTMLElement): void {
@@ -75,9 +81,13 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             } catch (error) {
               new Notice(error instanceof Error ? error.message : "Vault Rooms server action failed");
             }
-            this.display();
+            this.refresh();
           })
       );
+
+    if (status.running) {
+      this.renderTransportSecurity(containerEl, status);
+    }
 
     new Setting(containerEl)
       .setName("Public URL override")
@@ -193,7 +203,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         button.setButtonText("Use").setDisabled(active).onClick(async () => {
           try {
             await this.plugin.activateServer(server.id);
-            this.display();
+            this.refresh();
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "Server switch failed");
           }
@@ -202,24 +212,128 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       setting.addButton((button) =>
         button.setButtonText("Test").onClick(async () => {
           try {
-            await this.plugin.testConnection(server.baseUrl);
+            await this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server));
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "Connection failed");
           }
         })
       );
       setting.addButton((button) =>
-        button
-          .setButtonText("Forget")
-          .setWarning()
+        setDestructiveCompat(button.setButtonText("Forget"))
           .onClick(async () => {
             if (!(await confirmModal(this.app, "Forget server", `Remove "${server.baseUrl}" from this device? This only forgets it locally - it does not delete anything on the server.`, "Forget"))) {
               return;
             }
             await this.plugin.forgetServer(server.id);
-            this.display();
+            this.refresh();
           })
       );
     }
   }
+
+  private renderTransportSecurity(
+    containerEl: HTMLElement,
+    status: Extract<ReturnType<VaultRoomsPlugin["getServerStatus"]>, { running: true }>
+  ): void {
+    if (status.securityState === "plain_legacy") {
+      new Setting(containerEl)
+        .setName("Transport security")
+        .setDesc(
+          "This team is using legacy plaintext HTTP/WS. Tokens and content are not encrypted on the LAN. Enable TLS migration to protect future traffic."
+        )
+        .addButton((button) =>
+          button.setButtonText("Enable TLS migration").onClick(async () => {
+            const mode = await chooseMigrationMode(this.app);
+            if (!mode) return;
+            await this.plugin.enableTlsMigration(mode);
+            this.refresh();
+          })
+        );
+      return;
+    }
+
+    const identity = status.pinnedInfo;
+    const detail = identity
+      ? `${identity.tlsName} — fingerprint ${identity.pinnedIdentitySpkiSha256}${status.httpsUrl ? ` — ${status.httpsUrl}` : ""}`
+      : "Pinned identity unavailable";
+    if (status.securityState === "tls_migrating") {
+      new Setting(containerEl)
+        .setName("TLS migration")
+        .setDesc(`${detail} — ${status.plainDeviceCount ?? 0} active device(s) still seen on legacy HTTP.`)
+        .addButton((button) =>
+          setDestructiveCompat(button.setButtonText("Enforce TLS"))
+            .onClick(async () => {
+              if (
+                !(await confirmModal(
+                  this.app,
+                  "Enforce TLS",
+                  "Disable the legacy HTTP/WS listener now? Devices that have not migrated will stop connecting.",
+                  "Enforce TLS"
+                ))
+              ) {
+                return;
+              }
+              await this.plugin.enforceTls();
+              this.refresh();
+            })
+        );
+      return;
+    }
+
+    new Setting(containerEl)
+      .setName("Pinned TLS")
+      .setDesc(detail)
+      .addButton((button) =>
+        setDestructiveCompat(button.setButtonText("Rotate server identity"))
+          .onClick(async () => {
+            if (
+              !(await confirmModal(
+                this.app,
+                "Rotate server identity",
+                "Rotate the pinned server identity and restart only the TLS listener? Connected TLS clients will verify the signed rotation before reconnecting.",
+                "Rotate identity"
+              ))
+            ) {
+              return;
+            }
+            await this.plugin.rotateIdentity();
+            this.refresh();
+          })
+      );
+  }
+}
+
+function chooseMigrationMode(app: App): Promise<MigrationMode | null> {
+  return new Promise((resolve) => {
+    class MigrationModeModal extends Modal {
+      private selected: MigrationMode | null = null;
+
+      onOpen(): void {
+        this.setTitle("Enable TLS migration");
+        this.contentEl.createEl("p", {
+          text: "Normal migration trusts one authenticated plaintext response to learn the new pin, so an active attacker on the local network could replace that first pin. Use Strict migration for sensitive teams; it requires a fresh pinned invite link from the owner."
+        });
+        new Setting(this.contentEl)
+          .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+          .addButton((button) =>
+            button.setButtonText("Normal").setCta().onClick(() => {
+              this.selected = "non_strict";
+              this.close();
+            })
+          )
+          .addButton((button) =>
+            button.setButtonText("Strict").onClick(() => {
+              this.selected = "strict";
+              this.close();
+            })
+          );
+      }
+
+      onClose(): void {
+        this.contentEl.empty();
+        resolve(this.selected);
+      }
+    }
+    new MigrationModeModal(app).open();
+  });
 }

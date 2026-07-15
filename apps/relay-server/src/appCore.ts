@@ -1,34 +1,76 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
+import {
+  clearInterval as clearNodeInterval,
+  clearTimeout as clearNodeTimeout,
+  setInterval as setNodeInterval,
+  setTimeout as setNodeTimeout
+} from "node:timers";
 import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
 import type { RelayDb } from "./db/sqlJsAdapter.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
 import { registerFileRoutes } from "./routes/file.routes.js";
 import { registerFriendRoutes } from "./routes/friend.routes.js";
+import type { InviteSecurityContext } from "./routes/inviteResponse.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
+import { assertTransportAllowed, registerSecurityRoutes, type RequestTransport } from "./routes/security.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
 import { createRelayCore, type RelayCoreOptions } from "./relayCore.js";
-import { registerSyncRoutes } from "./sync/syncServer.js";
+import { certPemToDerBase64Url } from "./security/identity.js";
+import { registerSyncRoutes, type SyncTimerHost } from "./sync/syncServer.js";
+
+const nodeSyncTimerHost: SyncTimerHost = {
+  setInterval: (callback, delayMs) => setNodeInterval(callback, delayMs),
+  clearInterval: (handle) => clearNodeInterval(handle as ReturnType<typeof setNodeInterval>),
+  setTimeout: (callback, delayMs) => setNodeTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearNodeTimeout(handle as ReturnType<typeof setNodeTimeout>)
+};
 
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
 
 export type CreateAppCoreOptions = RelayCoreOptions & {
   publicUrl?: string;
   allowRemoteBootstrap?: boolean;
+  https?: { key: string; cert: string };
+  core?: ReturnType<typeof createRelayCore>;
+  ownsDb?: boolean;
+  /** In-process test seam. Never derived from request-controlled data. */
+  transportOverrideForTests?: RequestTransport;
 };
 
 export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions = {}) {
-  const { repo, connectionRegistry, bootstrapPin, bootstrapRateLimiter, maxFileBytes, maxConnections } = createRelayCore(db, options);
+  const core = options.core ?? createRelayCore(db, options);
+  const {
+    repo,
+    connectionRegistry,
+    bootstrapPin,
+    bootstrapRateLimiter,
+    rotationProbeRateLimiter,
+    maxFileBytes,
+    maxConnections
+  } = core;
+  const security = options.security ?? core.security;
   // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
   // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
   // maxFileBytes - otherwise a file just under the configured limit can still be rejected at the
   // HTTP layer before the friendlier FILE_TOO_LARGE check even runs.
-  const app = Fastify({ logger: false, bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) });
+  const app = Fastify({
+    logger: false,
+    bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024),
+    ...(options.https ? { https: options.https } : {})
+  });
   // Bootstrap PIN (see security/bootstrapPin.ts): required by POST /api/bootstrap in addition to
   // the existing localhost-only check, so a DNS-rebound "local-looking" request from a malicious
   // web page still can't provision a server owner. Exposed in-process only (decorated below, plus
   // printed to the console by the standalone CLI in index.ts) - the embedded plugin reads it
   // directly off this same object instead of ever sending it over the network unprompted.
+
+  app.addHook("onRequest", (request, _reply, done) => {
+    const transport = fastifyRequestTransport(request, options.transportOverrideForTests);
+    (request as typeof request & { transport: RequestTransport }).transport = transport;
+    assertTransportAllowed(repo, transport, request.url);
+    done();
+  });
 
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("access-control-allow-origin", "*");
@@ -59,7 +101,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     done();
   });
 
-  void app.register(websocket, { options: { maxPayload: maxFileBytes } });
+  void app.register(websocket, { options: { maxPayload: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) } });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof AppError) {
@@ -75,27 +117,35 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     version: PRODUCT_VERSION
   }));
 
-  registerAuthRoutes(app, repo);
+  const currentInviteSecurity = () => inviteSecurityContext(repo.getSecurityState(), security?.runtime.getIdentity() ?? null);
+  const inviteSecurity = currentInviteSecurity();
+  registerAuthRoutes(app, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity });
   registerTeamRoutes(app, repo, {
     publicUrl: options.publicUrl ?? "http://127.0.0.1:8787",
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
     bootstrapPin,
-    connectionRegistry
+    connectionRegistry,
+    security: inviteSecurity
   });
   const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
-  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry });
-  registerFriendRoutes(app, repo, { publicUrl, connectionRegistry });
+  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity });
+  registerFriendRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity });
   registerFileRoutes(app, repo, {
     maxFileBytes,
     connectionRegistry
   });
+  if (security) {
+    registerSecurityRoutes(app, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
+  }
   void app.register(async (syncApp) => {
-    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections });
+    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections, timerHost: nodeSyncTimerHost });
   });
 
-  app.addHook("onClose", async () => {
-    await db.close();
-  });
+  if (options.ownsDb !== false) {
+    app.addHook("onClose", async () => {
+      await db.close();
+    });
+  }
 
   // In-process bootstrap PIN access (not test-only): the embedded plugin (serverManager.ts) reads
   // this directly off the running app instance - same process, no network round-trip - to supply
@@ -110,4 +160,26 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
   app.decorate("testConnectionRegistry", connectionRegistry);
 
   return app;
+}
+
+function inviteSecurityContext(
+  state: ReturnType<ReturnType<typeof createRelayCore>["repo"]["getSecurityState"]>,
+  persisted: ReturnType<NonNullable<CreateAppCoreOptions["security"]>["runtime"]["getIdentity"]>
+): InviteSecurityContext | undefined {
+  if (state === "plain_legacy" || !persisted) {
+    return undefined;
+  }
+  return {
+    serverId: persisted.serverId,
+    tlsName: persisted.identity.tlsName,
+    identitySpkiSha256: persisted.identity.identitySpkiSha256,
+    identityCertificateDer: certPemToDerBase64Url(persisted.identity.identityCertPem)
+  };
+}
+
+function fastifyRequestTransport(
+  request: { raw: { socket?: unknown } },
+  overrideForTests?: RequestTransport
+): RequestTransport {
+  return overrideForTests ?? ((request.raw.socket as { encrypted?: boolean } | undefined)?.encrypted ? "https" : "http");
 }

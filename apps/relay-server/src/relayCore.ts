@@ -4,6 +4,7 @@ import type { RelayDb } from "./db/sqlJsAdapter.js";
 import { generateBootstrapPin } from "./security/bootstrapPin.js";
 import { FixedWindowRateLimiter } from "./security/rateLimiter.js";
 import { ConnectionRegistry } from "./sync/connectionRegistry.js";
+import type { SecurityRuntime } from "./routes/security.routes.js";
 
 export type RelayCoreOptions = {
   maxFileBytes?: number;
@@ -11,6 +12,11 @@ export type RelayCoreOptions = {
   rateLimit?: {
     bootstrapMax?: number;
     bootstrapWindowMs?: number;
+    rotationProbeMax?: number;
+    rotationProbeWindowMs?: number;
+  };
+  security?: {
+    runtime: SecurityRuntime;
   };
 };
 
@@ -24,13 +30,19 @@ export function createRelayCore(db: RelayDb, options: RelayCoreOptions = {}) {
   const connectionRegistry = new ConnectionRegistry();
   const bootstrapPin = generateBootstrapPin();
   const bootstrapRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.bootstrapMax ?? 5, options.rateLimit?.bootstrapWindowMs ?? 60_000);
+  const rotationProbeRateLimiter = new FixedWindowRateLimiter(
+    options.rateLimit?.rotationProbeMax ?? 30,
+    options.rateLimit?.rotationProbeWindowMs ?? 60_000
+  );
 
   return {
     repo,
     connectionRegistry,
     bootstrapPin,
     bootstrapRateLimiter,
+    rotationProbeRateLimiter,
     maxFileBytes,
-    maxConnections
+    maxConnections,
+    security: options.security
   };
 }

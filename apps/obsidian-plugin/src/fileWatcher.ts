@@ -21,7 +21,7 @@ function relativePathIfWatchable(path: string, room: MountedRoomState, configDir
     relativePath.endsWith(".tmp") ||
     relativePath.endsWith(".DS_Store") ||
     isConflictCopyPath(relativePath) ||
-    // Skip file types we don't sync at all (v0.1: text/markdown/canvas/json/csv plus common
+    // Skip file types we don't sync at all (text/markdown/canvas/json/csv plus common
     // image formats and PDF) - avoids a doomed round trip to the server on every keystroke/save
     // for files that were never eligible in the first place.
     !isEligiblePath(relativePath)

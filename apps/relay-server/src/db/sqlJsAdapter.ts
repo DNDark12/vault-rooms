@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "node:timers";
 import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic } from "sql.js";
 
 export type SqlRow = Record<string, unknown>;
@@ -11,6 +12,15 @@ export interface PreparedStatement {
   all(...params: unknown[]): unknown[];
 }
 
+export interface ReadonlyPreparedStatement {
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+}
+
+export interface RelayDbReader {
+  prepare(sql: string): ReadonlyPreparedStatement;
+}
+
 export interface RelayDb {
   prepare(sql: string): PreparedStatement;
   exec(sql: string): void;
@@ -18,6 +28,12 @@ export interface RelayDb {
   transaction<Args extends unknown[], R>(fn: (...args: Args) => R): (...args: Args) => R;
   /** Force any pending writes to disk immediately. No-op for in-memory databases. */
   flush(): void | Promise<void>;
+  /**
+   * Run a security/integrity-sensitive synchronous mutation and expose its result only after the
+   * resulting database image is durable. A failed write restores the prior in-memory image too, so
+   * the caller never observes a credential/state transition that only half happened.
+   */
+  durable<T>(operation: () => T): Promise<T>;
   close(): void | Promise<void>;
 }
 
@@ -29,8 +45,19 @@ export type SqlJsLocator = {
 };
 
 let sqlJsPromise: Promise<SqlJsStatic> | null = null;
-const timerHost = typeof window !== "undefined" ? window : globalThis;
-type FlushTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
+type FlushTimer = number | ReturnType<typeof setNodeTimeout>;
+
+function setFlushTimeout(callback: () => void, delayMs: number): FlushTimer {
+  return typeof window !== "undefined" ? window.setTimeout(callback, delayMs) : setNodeTimeout(callback, delayMs);
+}
+
+function clearFlushTimeout(timer: FlushTimer): void {
+  if (typeof timer === "number") {
+    window.clearTimeout(timer);
+  } else {
+    clearNodeTimeout(timer);
+  }
+}
 
 function loadSqlJs(locator?: SqlJsLocator): Promise<SqlJsStatic> {
   if (!sqlJsPromise) {
@@ -39,9 +66,58 @@ function loadSqlJs(locator?: SqlJsLocator): Promise<SqlJsStatic> {
       : locator?.locateFile
         ? { locateFile: locator.locateFile }
         : undefined;
-    sqlJsPromise = initSqlJs(config);
+    const initialization = initSqlJs(config);
+    let retryable!: Promise<SqlJsStatic>;
+    retryable = initialization.catch((error: unknown) => {
+      if (sqlJsPromise === retryable) {
+        sqlJsPromise = null;
+      }
+      throw error;
+    });
+    sqlJsPromise = retryable;
   }
   return sqlJsPromise;
+}
+
+/** Inspect an existing database image without opening its source path or scheduling a flush. */
+export async function inspectSqlJsDatabaseBytes<T>(
+  bytes: Uint8Array,
+  inspect: (db: RelayDbReader) => T,
+  locator?: SqlJsLocator
+): Promise<T> {
+  const SQL = await loadSqlJs(locator);
+  const sqlDb = new SQL.Database(bytes);
+  const reader: RelayDbReader = {
+    prepare(sql: string): ReadonlyPreparedStatement {
+      return {
+        get(...params: unknown[]) {
+          const stmt = sqlDb.prepare(sql);
+          try {
+            stmt.bind(normalizeParams(params));
+            return stmt.step() ? stmt.getAsObject() : undefined;
+          } finally {
+            stmt.free();
+          }
+        },
+        all(...params: unknown[]) {
+          const stmt = sqlDb.prepare(sql);
+          const rows: SqlRow[] = [];
+          try {
+            stmt.bind(normalizeParams(params));
+            while (stmt.step()) rows.push(stmt.getAsObject());
+            return rows;
+          } finally {
+            stmt.free();
+          }
+        }
+      };
+    }
+  };
+  try {
+    return inspect(reader);
+  } finally {
+    sqlDb.close();
+  }
 }
 
 function normalizeParams(params: unknown[]): (number | string | Uint8Array | null)[] {
@@ -60,7 +136,7 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
     }
   }
 
-  const sqlDb: SqlJsDatabase = new SQL.Database(initialBytes);
+  let sqlDb: SqlJsDatabase = new SQL.Database(initialBytes);
 
   let closed = false;
   function assertOpen(): void {
@@ -76,21 +152,35 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
       return;
     }
     if (flushTimer) {
-      timerHost.clearTimeout(flushTimer);
+      clearFlushTimeout(flushTimer);
       flushTimer = null;
     }
-    writeFileSync(dbPath, Buffer.from(sqlDb.export()));
+    const temporaryPath = `${dbPath}.tmp`;
+    try {
+      writeFileSync(temporaryPath, Buffer.from(sqlDb.export()));
+      renameSync(temporaryPath, dbPath);
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+
+  function restore(snapshot: Uint8Array): void {
+    sqlDb.close();
+    sqlDb = new SQL.Database(snapshot);
   }
 
   function scheduleFlush(): void {
     if (isMemory || flushTimer) {
       return;
     }
-    flushTimer = timerHost.setTimeout(() => {
+    flushTimer = setFlushTimeout(() => {
       flushTimer = null;
       flush();
     }, 25);
-    flushTimer.unref?.();
+    if (typeof flushTimer !== "number") {
+      flushTimer.unref();
+    }
   }
 
   function prepare(sql: string): PreparedStatement {
@@ -170,6 +260,18 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
         return;
       }
       flush();
+    },
+    async durable<T>(operation: () => T): Promise<T> {
+      flush();
+      const snapshot = sqlDb.export();
+      try {
+        const result = operation();
+        flush();
+        return result;
+      } catch (error) {
+        restore(snapshot);
+        throw error;
+      }
     },
     close() {
       if (closed) {

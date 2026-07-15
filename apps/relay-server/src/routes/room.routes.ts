@@ -7,7 +7,7 @@ import type { RoomRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
-import { toInviteResponse } from "./inviteResponse.js";
+import { toInviteResponse, type InviteSecurityContext } from "./inviteResponse.js";
 
 const LISTED_PERMISSIONS: Permission[] = [
   "room:read",
@@ -24,6 +24,7 @@ const LISTED_PERMISSIONS: Permission[] = [
 export type RoomRoutesOptions = {
   publicUrl: string;
   connectionRegistry?: ConnectionRegistry;
+  security?: InviteSecurityContext;
 };
 
 export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, options: RoomRoutesOptions): void {
@@ -80,14 +81,16 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     if (body.preset !== "reader" && body.preset !== "editor") {
       throw new AppError("VALIDATION_ERROR", "preset must be reader or editor.", 422);
     }
-    const invite = repo.createInvite({
-      roomId,
-      permissionPreset: body.preset,
-      createdByUserId: principal.userId,
-      expiresInMinutes: body.expiresInMinutes ?? 60,
-      maxUses: body.maxUses ?? 1
-    });
-    return toInviteResponse(invite, options.publicUrl);
+    const invite = await repo.durable(() =>
+      repo.createInvite({
+        roomId,
+        permissionPreset: body.preset!,
+        createdByUserId: principal.userId,
+        expiresInMinutes: body.expiresInMinutes ?? 60,
+        maxUses: body.maxUses ?? 1
+      })
+    );
+    return toInviteResponse(invite, options.publicUrl, repo.getSecurityState() === "plain_legacy" ? undefined : options.security);
   });
 
   app.patch("/api/rooms/:roomId", async (request) => {

@@ -1,10 +1,11 @@
 export const PRODUCT_NAME = "vault-rooms";
-export const PRODUCT_VERSION = "0.1.0";
+export const PRODUCT_VERSION = "0.2.0";
 
 export * from "./errors.js";
 export * from "./ids.js";
 export * from "./paths.js";
 export * from "./protocol.js";
+export * from "./security.js";
 export * from "./tokens.js";
 export * from "./types.js";
 

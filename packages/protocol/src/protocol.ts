@@ -15,4 +15,5 @@ export type SyncServerMessage =
   | { type: "file_change_rejected"; requestId: string; code: string; message: string; serverVersion?: number; serverSha256?: string | null; serverContent?: string }
   | { type: "revoked"; message: string }
   | { type: "room_deleted"; roomId: string }
-  | { type: "room_access_revoked"; roomId: string };
+  | { type: "room_access_revoked"; roomId: string }
+  | { type: "security_upgrade_available"; httpsUrl: string; wssUrl: string };

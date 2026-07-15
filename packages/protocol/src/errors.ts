@@ -9,7 +9,8 @@ export type ErrorCode =
   | "NOT_FOUND"
   | "VALIDATION_ERROR"
   | "ADAPTER_CONFLICT"
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  | "TLS_REQUIRED";
 
 export class AppError extends Error {
   constructor(

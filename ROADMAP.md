@@ -1,24 +1,26 @@
 # Roadmap
 
-This tracks what's next after v0.1, ordered by priority within each tier. See [README](README.md) for what v0.1 already does and [SECURITY.md](SECURITY.md) for the current threat model - nothing below changes either until it actually ships.
+This tracks work after the v0.2 transport-security release candidate, ordered by priority within each tier. See [README](README.md) for the implemented behavior and [SECURITY.md](SECURITY.md) for the current threat model; roadmap items are not product claims until they ship.
 
 ## Explicitly dropped - do not pick back up without a fresh decision
 
 - **QR invite code** (shipped in 0.1.5, reverted the same cycle). The invite modal briefly rendered a QR code alongside the plaintext link, framed as "scan with your phone and forward to your computer." Dropped after review: this plugin is `isDesktopOnly`, so a phone can never run it, and "scan, then manually get the link from your phone to your desktop anyway" is strictly more steps than just copying the link into whatever chat app you're already using to reach the recipient. Don't re-add without a concrete scenario where a camera-to-desktop hop is actually faster than copy/paste.
 - **MCP/AI agent access.** Considered (competitors like EVC Team Relay and Fast Note Sync have it), but rejected for now: giving an AI agent read/write access to shared rooms is a meaningfully larger security surface than anything else in this plugin (a compromised or over-permissioned agent could exfiltrate or corrupt everything it can reach), and this repo doesn't have anything close to that today. If this comes back, it needs its own dedicated security-integrity review and threat-model write-up *before* any code, not just a normal feature PR - don't scope-creep it into a "quick MCP endpoint."
 
-## P1 - next up, in priority order
+## P1 - v0.2 implementation complete, pending manual release verification
 
 ### 1. TLS/WSS + server fingerprint pinning
-The single biggest gap between "trusted-LAN toy" and "something a real team can rely on." Plaintext HTTP/WS today means every token and every file is readable to anyone who can observe LAN traffic (see SECURITY.md).
 
-This needs a design pass before any code, not a quick patch:
-- Where do certs come from? Self-signed generated on first bootstrap is the obvious default (no external CA dependency, matches the "no cloud, no account" positioning) - but that means clients must pin the server's certificate/public key on first connect (TOFU - trust-on-first-use) and warn loudly if it ever changes unexpectedly, the same way SSH host-key checking works. A silent "just trust whatever cert shows up" TLS setup would be security theater.
-- What happens when the host's cert changes (server reinstalled, `server-data` wiped, moved to standalone)? Needs a clear, documented re-pairing story, not a confusing "connection insecure" dead end.
-- Does this affect the embedded server's `0.0.0.0` bind story or the Public URL override flow? Probably not directly, but needs to be checked once the design exists.
-- Standalone and embedded runtimes need the same behavior here, same as everything else that's had to be kept in sync between `appCore.ts` and `embeddedRelayApp.ts`.
+Implemented for v0.2.0: new embedded servers default to self-managed pinned TLS/WSS; standalone supports pinned or OS-trusted TLS; invites carry the server identity/SPKI pin; legacy servers have owner-controlled normal and strict migration; enforcement covers the shared REST/WSS authentication path; and planned identity rotation uses signed, replay-protected chains with blocking mismatch UI.
 
-Do this before CRDT/live-editing (P2) - security fundamentals first, features on top of a shaky transport just means more valuable data crossing that same plaintext wire.
+The release candidate also includes zero-data-loss v0.1 upgrades across the tagged release schema
+and both older team-scoped layouts (including `shares`/`share_id`): relay data, plugin credentials,
+and mount tracking migrate in place, one-time safety backups are retained, and installations affected
+by the earlier reset prototype have explicit database and owner-credential recovery paths.
+
+The remaining release gate is the two-real-machine checklist in the implementation plan: fresh pinned join, normal migration, strict migration, unexpected wrong-server identity, and enforcement against an unmigrated client. Until those results are recorded and a release is explicitly cut, treat this checkout as a release candidate rather than a published release. See [SECURITY.md](SECURITY.md) for the trust model and limitations.
+
+## P1 - next up, in priority order
 
 ### 2. Standalone relay packaging
 Currently "standalone" means `pnpm dev:server` from a cloned repo - fine for the maintainer, real friction for a team that wants to run it on a NAS or an always-on machine without a dev toolchain.
@@ -37,7 +39,7 @@ Right now "why can't B join" is a manual checklist in the Troubleshooting README
 
 Ordered roughly by how much they depend on each other (CRDT is a prerequisite for live cursors) rather than strict priority - these are all genuinely large efforts and shouldn't be started opportunistically; each deserves its own design pass when its turn comes.
 
-1. **CRDT for Markdown files.** The current whole-file debounced-push + compare-and-swap model is a deliberate v0.1 simplification (see README "Sync latency"/"Concurrency model") - it's fine for "a few people editing occasionally," but two people actually typing in the same note at the same time will conflict-copy, not merge. Real concurrent editing needs a CRDT (Yjs is the de facto choice other Obsidian collab plugins already use) - this is a genuine rewrite of the sync core, not an incremental patch.
+1. **CRDT for Markdown files.** The current whole-file debounced-push + compare-and-swap model is deliberate (see README "Sync latency"/"Concurrency model") - it's fine for "a few people editing occasionally," but two people actually typing in the same note at the same time will conflict-copy, not merge. Real concurrent editing needs a CRDT (Yjs is the de facto choice other Obsidian collab plugins already use) - this is a genuine rewrite of the sync core, not an incremental patch and has no promised release number.
 2. **Live cursors / presence.** Only makes sense once CRDT exists - showing where someone else is typing requires the same real-time text-position model CRDT provides.
 3. **Binary blob transport instead of base64.** Images/PDFs currently travel as base64-encoded JSON (see README "Known limitations" - roughly 1.33x real size). A dedicated binary transport (multipart, or a raw-bytes WS frame type) would remove that overhead and raise the practical file-size ceiling. Independent of CRDT - could be picked up any time P1 is clear.
 4. **Rollback / version history UI.** The server already keeps file version numbers for compare-and-swap; a "show me the last N versions of this file and let me restore one" UI is a natural extension once there's room in the schedule, but it's genuinely new surface (storage growth policy, UI, permission model for who can roll back what).
@@ -59,6 +61,6 @@ mDNS discovery fundamentally requires binding a UDP socket and listening/broadca
 Carried over from a competitive review pass (comparing against Relay, EVC Team Relay, Collaborative Folders, Obsidian Live Share, Self-hosted LiveSync, LAN Vault Sync, and others) - these aren't technical roadmap items, they're constraints on how the project describes itself even as features above ship:
 
 - Vault Rooms' actual differentiator is "no cloud, no account, LAN-only, room/path-level ACL," not feature-for-feature parity with mature collaboration suites.
-- Don't use "real-time collaboration" or "live editing" language that implies Google-Docs-style character-level co-editing until CRDT (P2 #1) actually ships - "live file sync" is the accurate phrase for what v0.1-v0.1.5 do.
+- Don't use "real-time collaboration" or "live editing" language that implies Google-Docs-style character-level co-editing until CRDT (P2 #1) actually ships - "live file sync" is the accurate phrase for the current product.
 - Don't claim "version control" - no diff/merge UI exists yet (P2 #4 is a rollback viewer at most, not a Git-equivalent history/diff experience).
-- Don't claim E2EE or "secure" without qualification until TLS (P1 #1) ships, and even then, be precise about what's encrypted (transport) versus what isn't (server-side plaintext storage, client-side token storage - see SECURITY.md).
+- Don't claim E2EE or unqualified "secure." Be precise about what TLS protects (transport and server identity) versus what remains plaintext at authorized endpoints or at rest (server database, client token, server identity-key file - see SECURITY.md).

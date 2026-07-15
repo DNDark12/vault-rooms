@@ -2,9 +2,51 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { createAppWithDb } from "../src/appCore.js";
 import { openRelayDb } from "../src/db/db.js";
+import { createRelayCore } from "../src/relayCore.js";
+import { certPemToDerBase64Url, generateServerIdentity } from "../src/security/identity.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
 describe("room, team, and friend invites", () => {
+  it("includes pinned identity material on TLS invite links and keeps plain links compatible", async () => {
+    const db = await openRelayDb(":memory:");
+    const core = createRelayCore(db);
+    core.repo.setSecurityState("pinned_tls");
+    const serverId = core.repo.getOrCreateServerId();
+    const identity = await generateServerIdentity(serverId);
+    const persisted = { serverId, identity, rotations: [] };
+    const app = await createAppWithDb(db, {
+      core,
+      publicUrl: "https://relay.example:8788",
+      security: { runtime: { getIdentity: () => persisted, httpsUrl: () => "https://relay.example:8788" } }
+    });
+    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Owner laptop", teamName: "Demo" })).json();
+
+    const invite = await app.inject({
+      method: "POST",
+      url: `/api/teams/${owner.team.id}/invites`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: {}
+    });
+    const joinUrl = new URL(invite.json().joinUrl);
+    expect(joinUrl.searchParams.get("serverId")).toBe(serverId);
+    expect(joinUrl.searchParams.get("security")).toBe("pinned-tls");
+    expect(joinUrl.searchParams.get("tlsName")).toBe(identity.tlsName);
+    expect(joinUrl.searchParams.get("fp")).toBe(identity.identitySpkiSha256);
+    expect(joinUrl.searchParams.get("idc")).toBe(certPemToDerBase64Url(identity.identityCertPem));
+    await app.close();
+
+    const plainApp = await createApp({ dbPath: ":memory:", publicUrl: "http://relay.example:8787" });
+    const plainOwner = (await injectBootstrap(plainApp, { displayName: "Owner", deviceName: "Owner laptop", teamName: "Demo" })).json();
+    const plainInvite = await plainApp.inject({
+      method: "POST",
+      url: `/api/teams/${plainOwner.team.id}/invites`,
+      headers: { authorization: `Bearer ${plainOwner.deviceToken}` },
+      payload: {}
+    });
+    expect(new URL(plainInvite.json().joinUrl).searchParams.get("security")).toBeNull();
+    await plainApp.close();
+  });
+
   it("creates and accepts room invites with an idempotent preset upgrade", async () => {
     const db = await openRelayDb(":memory:");
     const app = await createAppWithDb(db, { publicUrl: "http://192.168.1.10:8788" });

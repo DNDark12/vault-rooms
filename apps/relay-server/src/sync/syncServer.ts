@@ -2,20 +2,26 @@ import type { FastifyInstance } from "fastify";
 import { AppError, isEligiblePath, normalizeRelativePath, type SyncClientMessage } from "@vault-rooms/protocol";
 import { createId } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
-import { isActivePrincipal } from "../db/repositories/relayRepository.js";
+import { requestTransport, type RequestTransport } from "../routes/security.routes.js";
+import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 
-const timerHost = typeof window !== "undefined" ? window : globalThis;
+export type SyncTimerHost = {
+  setInterval(callback: () => void, delayMs: number): unknown;
+  clearInterval(handle: unknown): void;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+};
 
 export function registerSyncRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number }
+  options: { maxFileBytes: number; maxConnections: number; timerHost: SyncTimerHost }
 ): void {
-  app.get("/sync", { websocket: true }, (socket) => {
-    handleSyncSocket(socket, repo, registry, options);
+  app.get("/sync", { websocket: true }, (socket, request) => {
+    handleSyncSocket(socket, repo, registry, { ...options, transport: requestTransport(request) });
   });
 }
 
@@ -26,7 +32,7 @@ export function handleSyncSocket(
   },
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number }
+  options: { maxFileBytes: number; maxConnections: number; transport: RequestTransport; timerHost: SyncTimerHost }
 ): void {
   if (registry.size() >= options.maxConnections) {
     socket.close(1013, "Too many connections");
@@ -41,7 +47,20 @@ export function handleSyncSocket(
   };
   registry.add(connection);
 
-  const ping = timerHost.setInterval(() => {
+  let helloTimeout: unknown = options.timerHost.setTimeout(() => {
+    helloTimeout = undefined;
+    if (!connection.principal) {
+      socket.close(1008, "Authentication timeout");
+    }
+  }, 10_000);
+  const clearHelloTimeout = (): void => {
+    if (helloTimeout !== undefined) {
+      options.timerHost.clearTimeout(helloTimeout);
+      helloTimeout = undefined;
+    }
+  };
+
+  const ping = options.timerHost.setInterval(() => {
     if (socket.readyState === socket.OPEN) {
       socket.ping();
     }
@@ -54,7 +73,7 @@ export function handleSyncSocket(
     // plugin's own process, risks taking down more than just this one connection. Every
     // message-type branch below also has its own try/catch for a clean client-facing
     // rejection; this is the last-resort backstop for anything that slips past those.
-    handleMessage(repo, registry, connection, options, raw.toString()).catch((error) => {
+    handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString()).catch((error) => {
       console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
       try {
         connection.socket.close();
@@ -64,7 +83,8 @@ export function handleSyncSocket(
     });
   });
   socket.on("close", () => {
-    timerHost.clearInterval(ping);
+    clearHelloTimeout();
+    options.timerHost.clearInterval(ping);
     if (connection.principal) {
       try {
         repo.audit({
@@ -88,7 +108,7 @@ async function handleMessage(
   repo: RelayRepository,
   registry: ConnectionRegistry,
   connection: SyncConnection,
-  options: { maxFileBytes: number },
+  options: { maxFileBytes: number; transport: RequestTransport; onAuthenticated: () => void },
   raw: string
 ): Promise<void> {
   let message: SyncClientMessage;
@@ -101,13 +121,10 @@ async function handleMessage(
 
   if (message.type === "hello") {
     try {
-      const principal = repo.authenticateDeviceToken(message.token);
-      if (!isActivePrincipal(principal)) {
-        sendJson(connection.socket, { type: "hello_error", requestId: message.requestId, code: "UNAUTHORIZED" });
-        connection.socket.close();
-        return;
-      }
+      const principal = authenticateActiveDeviceToken(repo, message.token);
+      repo.markDeviceTransport(principal.deviceId, options.transport);
       connection.principal = principal;
+      options.onAuthenticated();
       repo.audit({
         teamId: null,
         actorType: "device",
@@ -204,7 +221,7 @@ async function handleMessage(
       const room = requireRoom(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
       if (!isEligiblePath(relativePath)) {
-        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (v0.1 supports Markdown/text/canvas/JSON/CSV plus common image formats and PDF).", 422);
+        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (supported: Markdown/text/canvas/JSON/CSV, common image formats, and PDF).", 422);
       }
       if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
         throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);

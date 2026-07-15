@@ -43,6 +43,56 @@ async function setupFileFlow() {
 }
 
 describe("file REST API", () => {
+  it("requires sync:push for REST writes and deletes in addition to file permissions", async () => {
+    const { app, owner, member, room } = await setupFileFlow();
+    const created = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "Board.md", baseVersion: 0, content: "original" }
+    });
+    expect(created.statusCode).toBe(200);
+    const denied = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: {
+        subjectType: "user",
+        subjectId: member.user.id,
+        effect: "deny",
+        permissions: ["sync:push"],
+        pathPattern: "**/*"
+      }
+    });
+    expect(denied.statusCode).toBe(200);
+
+    const update = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${member.deviceToken}` },
+      payload: { relativePath: "Board.md", baseVersion: 1, content: "forbidden update" }
+    });
+    expect(update.statusCode).toBe(403);
+    expect(update.json().error.code).toBe("PERMISSION_DENIED");
+
+    const remove = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/files/delete`,
+      headers: { authorization: `Bearer ${member.deviceToken}` },
+      payload: { relativePath: "Board.md", baseVersion: 1 }
+    });
+    expect(remove.statusCode).toBe(403);
+    expect(remove.json().error.code).toBe("PERMISSION_DENIED");
+
+    const readBack = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=Board.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(readBack.json()).toMatchObject({ version: 1, content: "original" });
+    await app.close();
+  });
+
   it("stores versions, detects conflicts, tombstones deletes, revives creates, and rejects unsafe writes", async () => {
     const { app, owner, member, room } = await setupFileFlow();
 

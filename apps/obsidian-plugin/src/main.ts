@@ -10,7 +10,13 @@ import {
 } from "./apiClient.js";
 import { registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
-import { DEFAULT_SERVER_SETTINGS, DEFAULT_SETTINGS, type ServerConnection, type VaultRoomsSettings } from "./settings.js";
+import {
+  DEFAULT_SETTINGS,
+  migrateVaultRoomsSettings,
+  type PersistedVaultRoomsSettings,
+  type ServerConnection,
+  type VaultRoomsSettings
+} from "./settings.js";
 import type { EmbeddedServerStatus } from "./serverManager.js";
 import { VaultRoomsSettingTab } from "./VaultRoomsSettingTab.js";
 import { CreateRoomModal } from "./modals/CreateRoomModal.js";
@@ -29,6 +35,12 @@ import { inviteAcceptanceNotice, inviteJoinNotice } from "./inviteNotices.js";
 import type { PluginContext } from "./controllers/PluginContext.js";
 import { ServerConnectionManager } from "./controllers/ServerConnectionManager.js";
 import { RoomMountController, type RoomMountControllerDeps } from "./controllers/RoomMountController.js";
+import {
+  assertPinMaterial,
+  InvalidPinMaterialError,
+  type PinnedInviteInfo,
+  type PinnedServerInfo
+} from "./pinnedTransport.js";
 
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
@@ -57,6 +69,7 @@ export default class VaultRoomsPlugin extends Plugin {
   private roomCoordinators = new Map<string, RoomPushCoordinator>();
   private syncSocket: RoomSyncSocket | null = null;
   private syncState: SyncConnectionState = "offline";
+  private readonly securityMigrationsInFlight = new Set<string>();
   private roomMountController!: RoomMountController;
   /** Getter-backed facade passed to controllers so state reads stay live without exposing the plugin's full surface. */
   private readonly ctx: PluginContext & RoomMountControllerDeps = ((self: VaultRoomsPlugin): PluginContext & RoomMountControllerDeps => ({
@@ -72,6 +85,8 @@ export default class VaultRoomsPlugin extends Plugin {
     requireActiveServer: () => self.requireActiveServer(),
     saveSettings: () => self.saveSettings(),
     renderOpenRoomsViews: () => self.renderOpenRoomsViews(),
+    openJoinServer: () => self.openJoinTeamModal(),
+    removeSavedConnection: (server) => self.forgetServer(server.id),
     get vaultAdapter(): ObsidianVaultAdapter {
       return self.vaultAdapter;
     },
@@ -185,18 +200,26 @@ export default class VaultRoomsPlugin extends Plugin {
         new Notice("Vault Rooms invite link is missing server/token parameters.");
         return;
       }
-      // If this device already has an active identity on the exact server, accept the Team/Room/
-      // Friend invite against that existing user instead of trying to create a second identity.
-      const existing = this.settings.servers.find(
-        (server) => server.status === "active" && normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(inviteServer)
-      );
-      if (existing) {
-        this.acceptInviteForServer(existing, inviteToken).catch((error) => {
-          new Notice(error instanceof Error ? error.message : "Failed to accept invite");
-        });
+      let pin: PinnedInviteInfo | undefined;
+      try {
+        pin = pinnedInviteInfoFromParams(params);
+      } catch (error) {
+        new Notice(error instanceof Error ? error.message : "Invite contains invalid server identity material.");
         return;
       }
-      new JoinTeamModal(this, "join", inviteServer, inviteToken).open();
+      // If this device already has an active identity on the exact server, accept the Team/Room/
+      // Friend invite against that existing user instead of trying to create a second identity.
+      void this.serverConnectionManager
+        .resolveInviteServer(inviteServer, pin?.serverId)
+        .then((existing) => {
+          if (existing) {
+            return this.acceptInviteForServer(existing, inviteToken, inviteServer, pin);
+          }
+          new JoinTeamModal(this, "join", inviteServer, inviteToken, pin).open();
+        })
+        .catch((error) => {
+          new Notice(error instanceof Error ? error.message : "Failed to accept invite");
+        });
     };
     // Accept both obsidian://vault-rooms?mode=join&... and obsidian://vault-rooms/join?... link shapes.
     this.registerObsidianProtocolHandler("vault-rooms", handleJoinLink);
@@ -239,23 +262,12 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const loaded = (await this.loadData()) as (Partial<VaultRoomsSettings> & { servers?: Array<Record<string, unknown>> }) | null;
-    // v0.1 saved one server entry per TEAM (with a teamId/teamName/teamSlug/role). The redesign
-    // makes rooms/teams independent of the server connection, so any entry shaped like that is
-    // from before the upgrade and can't be reused - drop it and have the user set up/join again.
-    const isLegacy = loaded?.servers?.some((server) => "teamId" in server) ?? false;
-    this.settings = {
-      ...DEFAULT_SETTINGS,
-      ...loaded,
-      servers: isLegacy ? [] : (loaded?.servers ?? DEFAULT_SETTINGS.servers),
-      activeServerId: isLegacy ? undefined : loaded?.activeServerId,
-      mountedRooms: isLegacy ? {} : (loaded?.mountedRooms ?? DEFAULT_SETTINGS.mountedRooms),
-      roomMountPaths: isLegacy ? {} : (loaded?.roomMountPaths ?? DEFAULT_SETTINGS.roomMountPaths),
-      server: { ...DEFAULT_SERVER_SETTINGS, ...(loaded?.server ?? {}) }
-    };
-    if (isLegacy) {
+    const loaded = (await this.loadData()) as PersistedVaultRoomsSettings | null;
+    const migrated = migrateVaultRoomsSettings(loaded);
+    this.settings = migrated.settings;
+    if (migrated.migratedLegacy) {
       await this.saveSettings();
-      new Notice("Vault Rooms was upgraded — set up or join your server again.");
+      new Notice("Vault Rooms v0.1 data was upgraded in place. Your server, credentials, and mounts were preserved.");
     }
   }
 
@@ -288,6 +300,18 @@ export default class VaultRoomsPlugin extends Plugin {
     if (wasOwnEmbeddedServerConnection) {
       this.disconnectSyncSocket();
     }
+  }
+
+  async enableTlsMigration(mode: "non_strict" | "strict"): Promise<void> {
+    await this.serverConnectionManager.enableTlsMigration(mode);
+  }
+
+  async enforceTls(): Promise<void> {
+    await this.serverConnectionManager.enforceTls();
+  }
+
+  async rotateIdentity(): Promise<void> {
+    await this.serverConnectionManager.rotateIdentity();
   }
 
   async saveSettings(): Promise<void> {
@@ -326,8 +350,8 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.serverConnectionManager.hasOwnServer();
   }
 
-  async testConnection(baseUrl: string): Promise<void> {
-    return this.serverConnectionManager.testConnection(baseUrl);
+  async testConnection(baseUrl: string, pin?: PinnedServerInfo): Promise<void> {
+    return this.serverConnectionManager.testConnection(baseUrl, pin);
   }
 
   async setupServer(displayName: string, deviceName: string, teamName?: string): Promise<void> {
@@ -346,26 +370,111 @@ export default class VaultRoomsPlugin extends Plugin {
       throw new Error(status.error ?? "Could not start the relay server.");
     }
     const baseUrl = status.localUrl;
-    // Same-process read, no network round-trip - see EmbeddedRelayServer.getBootstrapPin(). This
-    // device is always the legitimate bootstrap caller (only the owner ever bootstraps; teammates
-    // join via invite token instead), so supplying the PIN here is transparent to the user.
-    const bootstrapPin = this.serverConnectionManager.getBootstrapPin();
-    if (!bootstrapPin) {
-      throw new Error("Could not read the relay server's bootstrap PIN.");
+    const pinnedInfo = status.pinnedInfo;
+    let recoveredDeviceId: string | undefined;
+    const response = status.bootstrapped
+      ? await this.serverConnectionManager.recoverEmbeddedOwnerDevice(deviceName).then((recovered) => {
+          recoveredDeviceId = recovered.device.id;
+          return recovered;
+        })
+      : await (async () => {
+          // Same-process read, no network round-trip. Only a genuinely fresh relay reaches this
+          // branch; an existing owner uses the recovery lifecycle above and bootstrap remains
+          // first-owner-wins.
+          const bootstrapPin = this.serverConnectionManager.getBootstrapPin();
+          if (!bootstrapPin) {
+            throw new Error("Could not read the relay server's bootstrap PIN.");
+          }
+          return new RelayApiClient(baseUrl, undefined, undefined, pinnedInfo).bootstrapServer({
+            displayName,
+            deviceName,
+            teamName,
+            pin: bootstrapPin
+          });
+        })();
+    const previousServers = this.settings.servers;
+    const previousActiveServerId = this.settings.activeServerId;
+    this.upsertServer(baseUrl, response, pinnedInfo);
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.settings.servers = previousServers;
+      this.settings.activeServerId = previousActiveServerId;
+      if (recoveredDeviceId) {
+        try {
+          await this.serverConnectionManager.revokeRecoveredEmbeddedOwnerDevice(recoveredDeviceId);
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], "Owner access recovery failed and its temporary device could not be revoked.");
+        }
+      }
+      throw error;
     }
-    const response = await new RelayApiClient(baseUrl).bootstrapServer({ displayName, deviceName, teamName, pin: bootstrapPin });
-    this.upsertServer(baseUrl, response);
-    await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     await this.openRoomsPanel();
     this.renderOpenRoomsViews();
-    new Notice(response.team ? `Set up server and team ${response.team.name}` : "Set up server");
+    new Notice(
+      recoveredDeviceId
+        ? "Recovered access to this device's existing Vault Rooms server."
+        : "team" in response && response.team
+          ? `Set up server and team ${response.team.name}`
+          : "Set up server"
+    );
   }
 
-  async joinServer(baseUrl: string, inviteToken: string, displayName: string, deviceName: string): Promise<void> {
-    const response = await new RelayApiClient(baseUrl).join(inviteToken, displayName, deviceName);
-    this.upsertServer(baseUrl, response);
+  async restoreLegacyV01Data(): Promise<void> {
+    const currentStatus = this.getServerStatus();
+    if (!currentStatus.running || !currentStatus.legacyV01BackupAvailable) {
+      throw new Error("No restorable v0.1 database backup is available for the running embedded server.");
+    }
+    if (
+      !(await confirmModal(
+        this.app,
+        "Restore v0.1 server data",
+        "Replace the current embedded relay database with the preserved v0.1 database? The current database will first be copied to a separate .pre-v01-restore backup. The v0.1 backup itself is kept.",
+        "Restore v0.1 data"
+      ))
+    ) {
+      return;
+    }
+
+    const previousServers = this.settings.servers;
+    const previousActiveServerId = this.settings.activeServerId;
+    const deviceName = this.getActiveServer()?.deviceName || "Obsidian desktop";
+    const restoredStatus = await this.serverConnectionManager.restoreEmbeddedLegacyV01Backup();
+    if (!restoredStatus.running) {
+      throw new Error(restoredStatus.error ?? "The restored v0.1 relay could not be started.");
+    }
+    const recovered = await this.serverConnectionManager.recoverEmbeddedOwnerDevice(deviceName);
+    this.upsertServer(restoredStatus.localUrl, recovered, restoredStatus.pinnedInfo);
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.settings.servers = previousServers;
+      this.settings.activeServerId = previousActiveServerId;
+      try {
+        await this.serverConnectionManager.revokeRecoveredEmbeddedOwnerDevice(recovered.device.id);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "v0.1 data was restored, but saving its owner credential and revoking the temporary device both failed.");
+      }
+      throw error;
+    }
+    this.connectSyncSocket();
+    await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
+    this.renderOpenRoomsViews();
+    new Notice("Restored v0.1 server data and recovered owner access. The previous database was retained as a pre-restore backup.");
+  }
+
+  async joinServer(
+    baseUrl: string,
+    inviteToken: string,
+    displayName: string,
+    deviceName: string,
+    pin?: PinnedInviteInfo
+  ): Promise<void> {
+    if (pin) assertPinMaterial(pin);
+    const response = await new RelayApiClient(baseUrl, undefined, undefined, pin).join(inviteToken, displayName, deviceName);
+    this.upsertServer(baseUrl, response, pin);
     await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
@@ -374,8 +483,16 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   /** Accepts a Team/Room/Friend invite for an identity already active on this exact server. */
-  private async acceptInviteForServer(server: ServerConnection, inviteToken: string): Promise<void> {
-    const result = await this.apiFor(server).acceptInvite(inviteToken);
+  private async acceptInviteForServer(
+    server: ServerConnection,
+    inviteToken: string,
+    baseUrl = server.baseUrl,
+    pin?: PinnedInviteInfo
+  ): Promise<void> {
+    const result = await this.serverConnectionManager.acceptInviteForServer(server, inviteToken, baseUrl, pin);
+    if ((pin || result.deviceToken) && this.getActiveServer()?.id === server.id) {
+      this.connectSyncSocket();
+    }
     if (result.inviteType !== "friend" && this.getActiveServer()?.id === server.id) {
       await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
       this.renderOpenRoomsViews();
@@ -429,6 +546,19 @@ export default class VaultRoomsPlugin extends Plugin {
       api.listTeamDirectory(),
       api.listFriends()
     ]);
+    const authoritativeServerId = me.serverId ?? server.serverId;
+    if (server.isServerOwner !== me.isServerOwner || server.serverId !== authoritativeServerId) {
+      const previous = { isServerOwner: server.isServerOwner, serverId: server.serverId };
+      server.isServerOwner = me.isServerOwner;
+      server.serverId = authoritativeServerId;
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        server.isServerOwner = previous.isServerOwner;
+        server.serverId = previous.serverId;
+        throw error;
+      }
+    }
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
     this.teamDirectory = directoryResult.teams;
@@ -908,6 +1038,13 @@ export default class VaultRoomsPlugin extends Plugin {
         }
         this.renderOpenRoomsViews();
       },
+      onSecurityUpgradeAvailable: () => {
+        void this.migrateConnection(server);
+      },
+      onPinnedTransportFailure: (error) => this.handlePinnedTransportFailure(server, error),
+      onHelloOk: () => {
+        this.serverConnectionManager.markSuccessfulPinnedConnection(server);
+      },
       onApplied: () => {
         void this.saveSettings();
         this.renderOpenRoomsViews();
@@ -949,6 +1086,56 @@ export default class VaultRoomsPlugin extends Plugin {
     this.syncSocket = socket;
   }
 
+  private async migrateConnection(server: ServerConnection): Promise<void> {
+    if (server.securityMode !== "plain" || this.securityMigrationsInFlight.has(server.id)) {
+      return;
+    }
+    this.securityMigrationsInFlight.add(server.id);
+    try {
+      const migrated = await this.serverConnectionManager.migrateConnection(server);
+      if (this.getActiveServer()?.id === migrated.id) {
+        this.connectSyncSocket();
+      }
+      new Notice("Vault Rooms connection upgraded to pinned TLS.");
+    } catch (error) {
+      const code = (error as { code?: string } | undefined)?.code;
+      if (code === "NOT_FOUND") {
+        return;
+      }
+      if (code === "PERMISSION_DENIED") {
+        new Notice("This server requires a fresh pinned invite link from its owner to complete strict TLS migration.");
+        return;
+      }
+      new Notice(error instanceof Error ? error.message : "TLS migration failed");
+    } finally {
+      this.securityMigrationsInFlight.delete(server.id);
+    }
+  }
+
+  private async handlePinnedTransportFailure(
+    server: ServerConnection,
+    originalError: Error
+  ): Promise<"retry" | "normal" | "stop"> {
+    if (originalError instanceof InvalidPinMaterialError) {
+      return "stop";
+    }
+    try {
+      const updated = await this.serverConnectionManager.handlePinnedConnectionFailure(server, originalError);
+      if (!updated) {
+        this.renderOpenRoomsViews();
+        return "stop";
+      }
+      this.renderOpenRoomsViews();
+      return "retry";
+    } catch (error) {
+      if (error === originalError) {
+        return "normal";
+      }
+      new Notice(error instanceof Error ? error.message : "Could not verify the server identity rotation.");
+      return "stop";
+    }
+  }
+
   private async openRoomsPanel(): Promise<void> {
     await this.app.workspace.getLeaf(true).setViewState({ type: VAULT_ROOMS_VIEW_TYPE, active: true });
   }
@@ -968,14 +1155,28 @@ export default class VaultRoomsPlugin extends Plugin {
       device: { id: string; displayName: string };
       deviceToken: string;
       isServerOwner: boolean;
-    }
+    },
+    pin?: PinnedInviteInfo
   ): void {
-    this.serverConnectionManager.upsertServer(baseUrl, response);
+    this.serverConnectionManager.upsertServer(baseUrl, response, pin);
   }
 }
 
-function normalizeBaseUrl(url: string): string {
-  return url.trim().replace(/\/+$/, "").toLowerCase();
+function pinnedInviteInfoFromParams(params: ObsidianProtocolData): PinnedInviteInfo | undefined {
+  if (params.security !== "pinned-tls") {
+    return undefined;
+  }
+  if (!params.serverId || !params.tlsName || !params.fp || !params.idc) {
+    throw new Error("Vault Rooms invite link is missing pinned server identity parameters.");
+  }
+  const pin = {
+    serverId: params.serverId,
+    tlsName: params.tlsName,
+    pinnedIdentitySpkiSha256: params.fp,
+    identityCertificateDer: params.idc
+  };
+  assertPinMaterial(pin);
+  return pin;
 }
 
 function isLoopbackUrl(url: string): boolean {

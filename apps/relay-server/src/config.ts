@@ -1,5 +1,6 @@
 import { createServer } from "node:net";
 import { networkInterfaces } from "node:os";
+import type { MigrationMode } from "@vault-rooms/protocol";
 
 export const DEFAULT_PORT = 8787;
 export const MAX_FALLBACK_PORT = 8797;
@@ -10,7 +11,16 @@ export type EnvLike = {
   PUBLIC_URL?: string;
   MAX_FILE_BYTES?: string;
   ALLOW_REMOTE_BOOTSTRAP?: string;
+  TLS_MODE?: string;
+  TLS_PORT?: string;
+  TLS_CERT_FILE?: string;
+  TLS_KEY_FILE?: string;
+  IDENTITY_DIR?: string;
+  TLS_DUAL_STACK?: string;
+  TLS_MIGRATION_MODE?: string;
 };
+
+export type TlsMode = "plain" | "pinned" | "os-trusted";
 
 export type ServerRuntimeConfig = {
   host: string;
@@ -18,6 +28,13 @@ export type ServerRuntimeConfig = {
   publicUrl: string;
   maxFileBytes: number;
   allowRemoteBootstrap: boolean;
+  tlsMode: TlsMode;
+  tlsPort?: number;
+  tlsCertFile?: string;
+  tlsKeyFile?: string;
+  identityDir: string;
+  tlsDualStack: boolean;
+  tlsMigrationMode: MigrationMode;
 };
 
 export async function choosePort(
@@ -49,15 +66,46 @@ export async function choosePort(
   throw new Error(`No free port found between ${DEFAULT_PORT} and ${MAX_FALLBACK_PORT}`);
 }
 
-export async function resolveRuntimeConfig(env: EnvLike = process.env, preferredPort?: number): Promise<ServerRuntimeConfig> {
+export async function resolveRuntimeConfig(
+  env: EnvLike = process.env,
+  preferredPort?: number,
+  isPortAvailable: (port: number) => Promise<boolean> = defaultIsPortAvailable
+): Promise<ServerRuntimeConfig> {
   const host = env.HOST ?? "127.0.0.1";
-  const port = await choosePort(env, defaultIsPortAvailable, preferredPort);
+  const tlsMode = parseTlsMode(env.TLS_MODE);
+  const tlsMigrationMode = parseTlsMigrationMode(env.TLS_MIGRATION_MODE);
+  if (tlsMode === "os-trusted" && env.TLS_DUAL_STACK === "true") {
+    throw new Error("TLS_DUAL_STACK is supported only with TLS_MODE=pinned");
+  }
+  const tlsDualStack = tlsMode === "pinned" && env.TLS_DUAL_STACK === "true";
+  let port: number;
+  let tlsPort: number | undefined;
+  if (tlsMode !== "plain" && !tlsDualStack && env.TLS_PORT) {
+    port = env.PORT ? parsePort(env.PORT) : (preferredPort ?? DEFAULT_PORT);
+    tlsPort = parsePort(env.TLS_PORT);
+    if (!(await isPortAvailable(tlsPort))) {
+      throw new Error(`TLS_PORT=${tlsPort} is already in use`);
+    }
+  } else {
+    port = await choosePort(env, isPortAvailable, preferredPort);
+    tlsPort = await resolveTlsPort(env, tlsMode, tlsDualStack, port, isPortAvailable);
+  }
+  const detectedPublicUrl = detectPublicUrl(host, tlsPort ?? port);
+  const publicUrl =
+    env.PUBLIC_URL ?? (tlsMode === "plain" ? detectedPublicUrl : detectedPublicUrl.replace(/^http:/, "https:"));
   return {
     host,
     port,
-    publicUrl: env.PUBLIC_URL ?? detectPublicUrl(host, port),
+    publicUrl,
     maxFileBytes: Number.parseInt(env.MAX_FILE_BYTES ?? "5242880", 10),
-    allowRemoteBootstrap: env.ALLOW_REMOTE_BOOTSTRAP === "true"
+    allowRemoteBootstrap: env.ALLOW_REMOTE_BOOTSTRAP === "true",
+    tlsMode,
+    ...(tlsPort === undefined ? {} : { tlsPort }),
+    ...(env.TLS_CERT_FILE ? { tlsCertFile: env.TLS_CERT_FILE } : {}),
+    ...(env.TLS_KEY_FILE ? { tlsKeyFile: env.TLS_KEY_FILE } : {}),
+    identityDir: env.IDENTITY_DIR ?? "data",
+    tlsDualStack,
+    tlsMigrationMode
   };
 }
 
@@ -97,4 +145,40 @@ function parsePort(value: string): number {
     throw new Error(`Invalid PORT value: ${value}`);
   }
   return port;
+}
+
+function parseTlsMode(value: string | undefined): TlsMode {
+  const mode = value ?? "plain";
+  if (mode !== "plain" && mode !== "pinned" && mode !== "os-trusted") {
+    throw new Error(`Invalid TLS_MODE value: ${mode}`);
+  }
+  return mode;
+}
+
+function parseTlsMigrationMode(value: string | undefined): MigrationMode {
+  const mode = value ?? "non_strict";
+  if (mode !== "non_strict" && mode !== "strict") {
+    throw new Error(`Invalid TLS_MIGRATION_MODE value: ${mode}`);
+  }
+  return mode;
+}
+
+async function resolveTlsPort(
+  env: EnvLike,
+  mode: TlsMode,
+  dualStack: boolean,
+  port: number,
+  isPortAvailable: (port: number) => Promise<boolean>
+): Promise<number | undefined> {
+  if (mode === "plain") {
+    return undefined;
+  }
+  const tlsPort = env.TLS_PORT ? parsePort(env.TLS_PORT) : dualStack ? port + 1 : port;
+  if (dualStack && tlsPort === port) {
+    throw new Error("TLS_PORT must differ from PORT when TLS_DUAL_STACK=true");
+  }
+  if (tlsPort !== port && !(await isPortAvailable(tlsPort))) {
+    throw new Error(`TLS_PORT=${tlsPort} is already in use`);
+  }
+  return tlsPort;
 }

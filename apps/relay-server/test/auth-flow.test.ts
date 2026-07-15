@@ -71,6 +71,7 @@ describe("server bootstrap and invite flow", () => {
       headers: { authorization: `Bearer ${b.deviceToken}` }
     });
     expect(me.statusCode).toBe(200);
+    expect(me.json().serverId).toMatch(/^srv_/);
     expect(me.json().user).toMatchObject({ id: b.user.id, displayName: "B" });
     expect(me.json().teams).toEqual([expect.objectContaining({ id: owner.team.id, role: "member" })]);
 

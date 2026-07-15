@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { createApp } from "../src/app.js";
+import type { RelayRepository } from "../src/db/repositories/relayRepository.js";
+import { ConnectionRegistry } from "../src/sync/connectionRegistry.js";
+import { handleSyncSocket, type SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
 const apps: Array<Awaited<ReturnType<typeof createApp>>> = [];
@@ -58,6 +61,41 @@ async function setupSyncFlow() {
 }
 
 describe("WebSocket sync", () => {
+  it("keeps websocket framing headroom above the application file-size limit", async () => {
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787", maxFileBytes: 32 });
+    apps.push(app);
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop" })).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [] }
+      })
+    ).json().room;
+    const socket = await connect(app);
+    socket.sendJson({
+      type: "hello",
+      requestId: "hello-small-limit",
+      token: owner.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.2.0", deviceName: "A laptop" }
+    });
+    expect(await nextMessage(socket, "hello_ok")).toMatchObject({ requestId: "hello-small-limit" });
+
+    socket.sendJson({
+      type: "file_change",
+      requestId: "oversized-file",
+      roomId: room.id,
+      relativePath: "Big.md",
+      baseVersion: 0,
+      content: "x".repeat(33)
+    });
+    expect(await nextMessage(socket, "file_change_rejected")).toMatchObject({
+      requestId: "oversized-file",
+      code: "FILE_TOO_LARGE"
+    });
+  });
+
   it("authenticates, broadcasts changes/deletes, rejects conflicts, snapshots on reconnect, and closes revoked sockets", async () => {
     const { app, owner, member, room } = await setupSyncFlow();
     const a = await connect(app);
@@ -645,6 +683,123 @@ describe("WebSocket sync", () => {
     expect(b.readyState).toBe(WebSocket.OPEN);
   });
 });
+
+describe("WebSocket admission timeout", () => {
+  it("closes unauthenticated sockets after 10 seconds and clears the timeout after hello", async () => {
+    const timers = new FakeSyncTimerHost();
+    const registry = new ConnectionRegistry();
+    const unauthenticated = new FakeSyncSocket();
+
+    handleSyncSocket(unauthenticated, {} as RelayRepository, registry, {
+      maxFileBytes: 1024,
+      maxConnections: 5,
+      transport: "http",
+      timerHost: timers
+    });
+
+    expect(registry.size()).toBe(1);
+    timers.runTimeout(10_000);
+    expect(unauthenticated.close).toHaveBeenCalledWith(1008, "Authentication timeout");
+    expect(registry.size()).toBe(0);
+
+    const authenticated = new FakeSyncSocket();
+    const repo = {
+      authenticateDeviceToken: () => ({
+        deviceId: "device_1",
+        deviceDisplayName: "Laptop",
+        deviceRevokedAt: null,
+        userId: "user_1",
+        userDisplayName: "Owner",
+        userRevokedAt: null,
+        isServerOwner: true,
+        tokenSecurity: "plain"
+      }),
+      getSecurityState: () => "plain_legacy",
+      isLegacyPlainToken: () => false,
+      markDeviceTransport: vi.fn(),
+      audit: vi.fn()
+    } as unknown as RelayRepository;
+    handleSyncSocket(authenticated, repo, registry, {
+      maxFileBytes: 1024,
+      maxConnections: 5,
+      transport: "http",
+      timerHost: timers
+    });
+    authenticated.emitMessage(JSON.stringify({
+      type: "hello",
+      requestId: "hello-1",
+      token: "token",
+      client: { kind: "obsidian-plugin", version: "0.2.0", deviceName: "Laptop" }
+    }));
+    await Promise.resolve();
+
+    expect(authenticated.sent).toEqual([expect.stringContaining('"type":"hello_ok"')]);
+    expect(timers.clearedTimeouts).toHaveLength(1);
+    authenticated.emitClose();
+  });
+});
+
+class FakeSyncTimerHost implements SyncTimerHost {
+  readonly clearedTimeouts: unknown[] = [];
+  private readonly timeouts = new Map<number, { callback: () => void; delayMs: number }>();
+  private nextHandle = 1;
+
+  setInterval(): unknown {
+    return "interval";
+  }
+
+  clearInterval(): void {}
+
+  setTimeout(callback: () => void, delayMs: number): unknown {
+    const handle = this.nextHandle++;
+    this.timeouts.set(handle, { callback, delayMs });
+    return handle;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.clearedTimeouts.push(handle);
+    this.timeouts.delete(handle as number);
+  }
+
+  runTimeout(delayMs: number): void {
+    const entry = [...this.timeouts.entries()].find(([, timeout]) => timeout.delayMs === delayMs);
+    if (!entry) throw new Error(`No timeout scheduled for ${delayMs}ms`);
+    this.timeouts.delete(entry[0]);
+    entry[1].callback();
+  }
+}
+
+class FakeSyncSocket {
+  readonly OPEN = 1;
+  readonly readyState = 1;
+  readonly sent: string[] = [];
+  readonly close = vi.fn((code?: number, reason?: string) => {
+    void code;
+    void reason;
+    this.emitClose();
+  });
+  private messageListener?: (raw: { toString(): string }) => void;
+  private closeListener?: () => void;
+
+  send(payload: string): void {
+    this.sent.push(payload);
+  }
+
+  ping(): void {}
+
+  on(event: "message" | "close", listener: ((raw: { toString(): string }) => void) | (() => void)): void {
+    if (event === "message") this.messageListener = listener as (raw: { toString(): string }) => void;
+    else this.closeListener = listener as () => void;
+  }
+
+  emitMessage(raw: string): void {
+    this.messageListener?.({ toString: () => raw });
+  }
+
+  emitClose(): void {
+    this.closeListener?.();
+  }
+}
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
 
