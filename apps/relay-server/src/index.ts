@@ -12,6 +12,13 @@ export function serverIdentity(): string {
   return `${PRODUCT_NAME} v${PRODUCT_VERSION}`;
 }
 
+/** Prints CLI startup information (bound URLs, identity, bootstrap PIN) the operator needs to
+ *  actually use this process. This is the tool's primary output, not diagnostic logging, so it
+ *  writes straight to stdout instead of through console.* (reserved elsewhere for warn/error/debug). */
+function printBanner(line: string): void {
+  process.stdout.write(`${line}\n`);
+}
+
 export function assertPinnedStartupState(state: ServerSecurityState, dualStack: boolean): void {
   if (dualStack && (state === "pinned_tls" || state === "tls_enforced")) {
     throw new Error(`Security state ${state} is HTTPS-only; set TLS_DUAL_STACK=false.`);
@@ -160,8 +167,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       listeningUrls.push(`https://127.0.0.1:${tlsPort}`);
     }
 
-    console.log(`TLS name: ${persisted.identity.tlsName}`);
-    console.log(`Identity SPKI SHA-256: ${persisted.identity.identitySpkiSha256}`);
+    printBanner(`TLS name: ${persisted.identity.tlsName}`);
+    printBanner(`Identity SPKI SHA-256: ${persisted.identity.identitySpkiSha256}`);
   } else {
     if (!config.tlsKeyFile || !config.tlsCertFile) {
       throw new Error("TLS_KEY_FILE and TLS_CERT_FILE are required when TLS_MODE=os-trusted");
@@ -181,18 +188,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const lanIp = detectLanIp();
-  console.log(`Vault Rooms v${PRODUCT_VERSION}`);
+  printBanner(`Vault Rooms v${PRODUCT_VERSION}`);
   for (const url of listeningUrls) {
-    console.log(`Local:   ${url}`);
+    printBanner(`Local:   ${url}`);
   }
   if (lanIp) {
     const publicUrl = new URL(config.publicUrl);
-    console.log(`LAN:     ${publicUrl.protocol}//${lanIp}:${publicUrl.port}`);
-    console.log(`Sync:    ${publicUrl.protocol === "https:" ? "wss:" : "ws:"}//${lanIp}:${publicUrl.port}/sync`);
+    printBanner(`LAN:     ${publicUrl.protocol}//${lanIp}:${publicUrl.port}`);
+    printBanner(`Sync:    ${publicUrl.protocol === "https:" ? "wss:" : "ws:"}//${lanIp}:${publicUrl.port}/sync`);
   }
   // Required by POST /api/bootstrap (see security/bootstrapPin.ts and team.routes.ts) - the
   // operator running this standalone process supplies it back to whichever client performs the
   // one-time server-owner setup.
   const bootstrapPin = (bootstrapApp as unknown as { bootstrapPin: string }).bootstrapPin;
-  console.log(`Bootstrap PIN: ${bootstrapPin}`);
+  printBanner(`Bootstrap PIN: ${bootstrapPin}`);
 }

@@ -48,7 +48,7 @@ export class VaultPathSuggestModal extends SuggestModal<TAbstractFile> {
   }
 
   renderSuggestion(file: TAbstractFile, el: HTMLElement): void {
-    el.createEl("div", { text: file.path });
+    el.createDiv({ text: file.path });
     el.createEl("small", { text: this.type === "folder" ? "Folder" : "File" });
   }
 

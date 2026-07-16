@@ -119,14 +119,14 @@ export class VaultRoomsView extends ItemView {
 
     if (status.running) {
       if (status.legacyV01BackupAvailable) {
-        card.createEl("div", {
+        card.createDiv({
           cls: "vault-rooms-error",
           text: "A v0.1 database archived by an earlier upgrade build is available. Restore it to recover the original users, teams, rooms, files, and history."
         });
       }
       if (status.lanUrl) {
         const lanRow = card.createDiv({ cls: "vault-rooms-lan-row" });
-        lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
+        lanRow.createDiv({ cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
         const lanInput = lanRow.createEl("input", { value: status.lanUrl });
         lanInput.readOnly = true;
         const reachability = this.plugin.getLanShareReachability();
@@ -139,25 +139,25 @@ export class VaultRoomsView extends ItemView {
           });
         }
         if (reachability.status === "unreachable") {
-          card.createEl("div", {
+          card.createDiv({
             cls: "vault-rooms-error",
             text: `This device cannot reach the configured LAN share URL (${reachability.error}). Update Public URL override, then restart the server to check the LAN URL again.`
           });
         }
-        card.createEl("div", {
+        card.createDiv({
           cls: "vault-rooms-room-meta",
           text: "This host-side check does not guarantee that a teammate's firewall or Wi-Fi client isolation will allow the connection."
         });
       } else {
-        card.createEl("div", {
+        card.createDiv({
           cls: "vault-rooms-error",
           text: "Invite links would point at 127.0.0.1 and won't work for teammates. Set a Public URL override in Settings → Vault Rooms → Relay server, then restart the server."
         });
       }
     } else if (!status.running && status.error) {
-      card.createEl("div", { cls: "vault-rooms-error", text: status.error });
+      card.createDiv({ cls: "vault-rooms-error", text: status.error });
     } else {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Not running. Only start this if you want to host a room for others - joining someone else's server doesn't need it." });
+      card.createDiv({ cls: "vault-rooms-room-meta", text: "Not running. Only start this if you want to host a room for others - joining someone else's server doesn't need it." });
     }
 
     const actions = section.createDiv({ cls: "vault-rooms-actions" });
@@ -204,14 +204,14 @@ export class VaultRoomsView extends ItemView {
     }
 
     const card = section.createDiv({ cls: "vault-rooms-server-card" });
-    card.createEl("div", { text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+    card.createDiv({ text: `${server.baseUrl} - ${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
     if (this.plugin.activeServerIsOwnEmbeddedServer()) {
-      card.createEl("div", { cls: "vault-rooms-room-meta", text: "Local owner connection" });
+      card.createDiv({ cls: "vault-rooms-room-meta", text: "Local owner connection" });
     }
     const badgeRow = card.createDiv({ cls: "vault-rooms-badge-row" });
     if (this.plugin.activeServerIsOwnStoppedServer()) {
       badgeRow.createSpan({ cls: "vault-rooms-badge is-stopped", text: "Live sync: server stopped" });
-      card.createEl("div", {
+      card.createDiv({
         cls: "vault-rooms-room-meta",
         text: "Start this device's server above (\"This device's server\"), or enable \"Start automatically\" in Settings → Vault Rooms → Relay server."
       });
@@ -262,8 +262,8 @@ export class VaultRoomsView extends ItemView {
         const item = list.createDiv({ cls: "vault-rooms-team" });
         const title = item.createDiv({ cls: "vault-rooms-team-title" });
         title.createEl("strong", { text: server.baseUrl });
-        title.createEl("span", { text: server.status });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
+        title.createSpan({ text: server.status });
+        item.createDiv({ cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
         const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
         this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
         this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server)));
@@ -343,7 +343,7 @@ export class VaultRoomsView extends ItemView {
     title.createEl("strong", { text: team.name });
     const role = this.plugin.myTeamRoles[team.id];
     if (role) {
-      title.createEl("span", { text: role });
+      title.createSpan({ text: role });
     }
 
     const memberList = card.createDiv({ cls: "vault-rooms-team-member-list" });
@@ -417,16 +417,16 @@ export class VaultRoomsView extends ItemView {
         const item = body.createDiv({ cls: "vault-rooms-room" });
         const title = item.createDiv({ cls: "vault-rooms-room-title" });
         title.createEl("strong", { text: room.name });
-        title.createEl("span", { text: room.type });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Folder: ${room.mountName}` });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Source: ${room.sourcePath}` });
-        item.createEl("div", { cls: "vault-rooms-room-meta", text: `Permissions: ${room.permissions.join(", ") || "none"}` });
-        item.createEl("div", {
+        title.createSpan({ text: room.type });
+        item.createDiv({ cls: "vault-rooms-room-meta", text: `Folder: ${room.mountName}` });
+        item.createDiv({ cls: "vault-rooms-room-meta", text: `Source: ${room.sourcePath}` });
+        item.createDiv({ cls: "vault-rooms-room-meta", text: `Permissions: ${room.permissions.join(", ") || "none"}` });
+        item.createDiv({
           cls: "vault-rooms-room-meta",
           text: `Capabilities: ${room.capabilities.map((cap) => `${cap.displayName}: ${cap.installed ? "installed" : "missing"}`).join(", ") || "none"}`
         });
         const mounted = this.plugin.isRoomMounted(room.id);
-        item.createEl("div", {
+        item.createDiv({
           cls: mounted ? "vault-rooms-mounted" : "vault-rooms-unmounted",
           text: mounted ? `Mounted: ${this.plugin.mountedPathFor(room.id) ?? room.mountName}` : "Not mounted"
         });
@@ -434,7 +434,7 @@ export class VaultRoomsView extends ItemView {
         // under a server this device isn't currently using would otherwise look identical to a
         // normally-syncing one, which is exactly the confusing silent-pause this note prevents.
         if (mounted && this.plugin.mountedRoomServerId(room.id) !== undefined && this.plugin.mountedRoomServerId(room.id) !== activeServerId) {
-          item.createEl("div", {
+          item.createDiv({
             cls: "vault-rooms-error",
             text: "Not syncing right now - this room was mounted under a different server. Switch to that server (Other servers, above) to resume."
           });
@@ -467,13 +467,13 @@ export class VaultRoomsView extends ItemView {
       return;
     }
     const section = parent.createDiv({ cls: "vault-rooms-conflict-list" });
-    section.createEl("div", {
+    section.createDiv({
       cls: "vault-rooms-error",
       text: `${conflicts.length} unresolved conflict${conflicts.length > 1 ? "s" : ""} - a teammate's edit and yours landed at the same time:`
     });
     for (const conflict of conflicts) {
       const row = section.createDiv({ cls: "vault-rooms-conflict-row" });
-      row.createEl("div", { cls: "vault-rooms-room-meta", text: conflict.relativePath });
+      row.createDiv({ cls: "vault-rooms-room-meta", text: conflict.relativePath });
       const rowActions = row.createDiv({ cls: "vault-rooms-room-actions" });
       this.addPanelButton(rowActions, "Keep mine", async () => {
         await this.plugin.resolveRoomConflict(roomId, conflict.relativePath, conflict.conflictRelativePath, "mine");
