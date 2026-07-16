@@ -204,7 +204,7 @@ Expected: FAIL because `lanSharePresentation` is not implemented.
 
 - [x] **Step 3: Render distinct LAN and local states**
 
-Implement `lanSharePresentation()` for checking/reachable/unreachable and return `null` for unavailable. In `VaultRoomsView.renderHostingSection()`, render its badge under the LAN URL, render the actionable unreachable diagnostic, and add `Test LAN URL` which forces a refresh. In `renderActiveConnectionSection()`, add `Local owner connection` when `activeServerIsOwnEmbeddedServer()` is true; do not alter `getSyncState()` or the loopback base URL.
+Implement `lanSharePresentation()` for checking/reachable/unreachable and return `null` for unavailable. In `VaultRoomsView.renderHostingSection()`, render its badge under the LAN URL and render the actionable unreachable diagnostic. Lifecycle changes trigger the non-blocking probe automatically, while invite creation always forces a fresh probe. In `renderActiveConnectionSection()`, add `Local owner connection` when `activeServerIsOwnEmbeddedServer()` is true; do not alter `getSyncState()` or the loopback base URL.
 
 Update README operational text: Public URL override is manually maintained, the panel probes it from the host, a green LAN badge does not prove firewall/AP reachability from every teammate, and invite creation is blocked on a failed host-side probe.
 

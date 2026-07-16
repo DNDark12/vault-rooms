@@ -129,12 +129,6 @@ export class VaultRoomsView extends ItemView {
         lanRow.createEl("div", { cls: "vault-rooms-room-meta", text: `LAN (share this): ${status.lanUrl}` });
         const lanInput = lanRow.createEl("input", { value: status.lanUrl });
         lanInput.readOnly = true;
-        this.addPanelButton(lanRow, "Select LAN URL", () => {
-          lanInput.focus();
-          lanInput.select();
-          new Notice("LAN URL selected.");
-        });
-        this.addPanelButton(lanRow, "Test LAN URL", () => this.plugin.refreshLanShareReachability(true));
         const reachability = this.plugin.getLanShareReachability();
         const presentation = lanSharePresentation(reachability);
         if (presentation) {
@@ -147,7 +141,7 @@ export class VaultRoomsView extends ItemView {
         if (reachability.status === "unreachable") {
           card.createEl("div", {
             cls: "vault-rooms-error",
-            text: `This device cannot reach the configured LAN share URL (${reachability.error}). Update Public URL override, restart the server, then test the LAN URL again.`
+            text: `This device cannot reach the configured LAN share URL (${reachability.error}). Update Public URL override, then restart the server to check the LAN URL again.`
           });
         }
         card.createEl("div", {

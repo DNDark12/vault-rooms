@@ -280,10 +280,6 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.serverConnectionManager.getLanShareReachability();
   }
 
-  refreshLanShareReachability(force = false): void {
-    this.serverConnectionManager.refreshLanShareReachability(force);
-  }
-
   /** Live-sync WebSocket state - separate from getServerStatus(), which is about *hosting* the embedded server. */
   getSyncState(): SyncConnectionState {
     return this.syncState;
