@@ -37,3 +37,4 @@ apps/relay-server/test/health.test.d.ts.map
 # time (esbuild.config.mjs), not shipped as a separate file.
 apps/obsidian-plugin/main.js
 apps/obsidian-plugin/assets/
+CLAUDE.md

@@ -266,7 +266,7 @@ To cut a release:
 
 1. Confirm root `manifest.json`, `main.js`, `styles.css`, `README.md`, and `LICENSE` exist, and that `manifest.json`'s `version` has been bumped.
 2. Run `pnpm typecheck`, `pnpm test`, `pnpm build:plugin`, `pnpm audit --prod`, and the Obsidian publish scanners locally. For TLS releases, also complete the two-real-machine matrix in `docs/superpowers/plans/2026-07-13-tls-pinning.md` before tagging. Commit the resulting root `manifest.json`/`main.js`/`styles.css`.
-3. Push a tag that matches `manifest.json`'s `version` exactly (no `v` prefix), e.g. `git tag -a 0.2.0 -m "0.2.0" && git push origin 0.2.0`.
+3. Push a tag that matches `manifest.json`'s `version` exactly (no `v` prefix), e.g. `git tag -a 0.2.1 -m "0.2.1" && git push origin 0.2.1`.
 4. GitHub Actions (`.github/workflows/release.yml`) builds the plugin fresh, verifies the tag matches `manifest.json`, and creates a **draft** GitHub release with `main.js`, `manifest.json`, and `styles.css` attached. `sql-wasm.wasm` is not a separate release asset - it's bundled directly into `main.js` at build time, so the plugin works from just those three files.
 5. Open the draft release on GitHub, add release notes, and publish it.
 6. First release only: sign in at [Obsidian Community](https://community.obsidian.md), link the repository owner's GitHub account, then choose **Plugins → New plugin** and submit the repository URL. The directory reads `manifest.json` from the default branch and runs its automated review after submission; the matching GitHub release must already exist. See [Submit your plugin](https://docs.obsidian.md/Plugins/Releasing/Submit+your+plugin).

@@ -1,6 +1,6 @@
 # Security
 
-Vault Rooms is pre-1.0 software. Versions through v0.1.6 use plaintext HTTP/WS. Version v0.2.0 introduces the pinned TLS/WSS model described below; verify the installed manifest version before relying on it. See the main [README](README.md) for the full security model, revocation model, and known limitations sections this file summarizes and points back to.
+Vault Rooms is pre-1.0 software. Versions through v0.1.6 use plaintext HTTP/WS. Version v0.2.1 introduces the pinned TLS/WSS model described below; verify the installed manifest version before relying on it. See the main [README](README.md) for the full security model, revocation model, and known limitations sections this file summarizes and points back to.
 
 ## Threat model
 

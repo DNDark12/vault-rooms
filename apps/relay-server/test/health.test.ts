@@ -8,7 +8,7 @@ describe("health", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["access-control-allow-origin"]).toBe("*");
-    expect(response.json()).toEqual({ ok: true, name: "vault-rooms", version: "0.2.0" });
+    expect(response.json()).toEqual({ ok: true, name: "vault-rooms", version: "0.2.1" });
   });
 
   it("handles browser preflight requests", async () => {

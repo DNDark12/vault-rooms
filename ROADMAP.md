@@ -11,7 +11,7 @@ This tracks work after the v0.2 transport-security release candidate, ordered by
 
 ### 1. TLS/WSS + server fingerprint pinning
 
-Implemented for v0.2.0: new embedded servers default to self-managed pinned TLS/WSS; standalone supports pinned or OS-trusted TLS; invites carry the server identity/SPKI pin; legacy servers have owner-controlled normal and strict migration; enforcement covers the shared REST/WSS authentication path; and planned identity rotation uses signed, replay-protected chains with blocking mismatch UI.
+Implemented for v0.2.1: new embedded servers default to self-managed pinned TLS/WSS; standalone supports pinned or OS-trusted TLS; invites carry the server identity/SPKI pin; legacy servers have owner-controlled normal and strict migration; enforcement covers the shared REST/WSS authentication path; and planned identity rotation uses signed, replay-protected chains with blocking mismatch UI.
 
 The release candidate also includes zero-data-loss v0.1 upgrades across the tagged release schema
 and both older team-scoped layouts (including `shares`/`share_id`): relay data, plugin credentials,
