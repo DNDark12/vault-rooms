@@ -317,3 +317,48 @@
   margin-bottom: 0;
   padding-top: 10px;
 }
+
+.vault-rooms-diagnostic-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.vault-rooms-diagnostic-row {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+}
+
+.vault-rooms-diagnostic-mark {
+  flex-shrink: 0;
+  font-weight: 600;
+  width: 1.2em;
+}
+
+.vault-rooms-diagnostic-row.is-pass .vault-rooms-diagnostic-mark {
+  color: var(--text-success);
+}
+
+.vault-rooms-diagnostic-row.is-fail .vault-rooms-diagnostic-mark {
+  color: var(--text-error);
+}
+
+.vault-rooms-diagnostic-row.is-skipped {
+  color: var(--text-faint);
+}
+
+.vault-rooms-diagnostic-summary {
+  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.vault-rooms-diagnostic-summary.is-ok {
+  color: var(--text-success);
+}
+
+.vault-rooms-diagnostic-summary.is-fail {
+  color: var(--text-error);
+}

@@ -1,0 +1,41 @@
+# Standalone Vault Rooms relay for a NAS or always-on machine.
+# See README "Running the standalone relay in Docker" for setup, including how to read
+# the one-time bootstrap PIN from the container logs.
+services:
+  vault-rooms-relay:
+    build: .
+    container_name: vault-rooms-relay
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      # Fresh servers should stay pinned (self-managed TLS identity, HTTPS/WSS only).
+      TLS_MODE: pinned
+      # REQUIRED: the LAN address clients will actually use to reach this box.
+      # Inside a container the relay cannot detect the host's LAN IP.
+      PUBLIC_URL: https://192.168.1.10:8787
+      # The one-time owner bootstrap normally must come from 127.0.0.1. When the relay
+      # runs in a container you bootstrap from another machine, so enable this for the
+      # first run, complete bootstrap, then set it back to "false" and restart.
+      ALLOW_REMOTE_BOOTSTRAP: "false"
+      # MAX_FILE_BYTES: "5242880"
+      # For migrating an already-bootstrapped legacy plaintext server only —
+      # see README "Migrating an existing server to TLS":
+      # TLS_DUAL_STACK: "true"
+      # TLS_MIGRATION_MODE: non_strict
+    volumes:
+      # SQLite database + pinned TLS identity. Losing this loses the server identity
+      # (clients would see a pin mismatch) and all rooms/members — keep it persistent.
+      - vault-rooms-data:/app/apps/relay-server/data
+    healthcheck:
+      # --no-check-certificate because the pinned identity is a self-managed CA the
+      # container's trust store doesn't know; clients verify it by SPKI pin instead.
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+
+volumes:
+  vault-rooms-data:

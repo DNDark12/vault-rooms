@@ -16,6 +16,7 @@ import {
 import { expandPreset } from "@vault-rooms/policy";
 import type {
   AclRuleRow,
+  AuditEventRow,
   DevicePrincipalRow,
   DeviceRow,
   FileRow,
@@ -953,6 +954,23 @@ export class RelayRepository {
         input.ipAddress ?? null,
         new Date().toISOString()
       );
+  }
+
+  /**
+   * Newest-first page of audit events. `teamId` narrows to one team's rows (used for the
+   * team-admin view - server-level rows have a null team_id and are owner-only). Simple
+   * limit/offset pagination is fine here: the table is append-only and newest-first, so a page
+   * shifting by a few rows between requests only ever re-shows an event, never hides one.
+   */
+  listAuditEvents(options: { teamId?: string; limit: number; offset: number }): AuditEventRow[] {
+    if (options.teamId !== undefined) {
+      return this.db
+        .prepare("select * from audit_events where team_id = ? order by created_at desc, id desc limit ? offset ?")
+        .all(options.teamId, options.limit, options.offset) as AuditEventRow[];
+    }
+    return this.db
+      .prepare("select * from audit_events order by created_at desc, id desc limit ? offset ?")
+      .all(options.limit, options.offset) as AuditEventRow[];
   }
 
   private requireValidInvite(inviteToken: string): InviteRow {

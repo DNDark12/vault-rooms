@@ -1,9 +1,10 @@
 import { ItemView, Notice, Setting, WorkspaceLeaf } from "obsidian";
-import type { TeamSummary } from "../apiClient.js";
+import type { AuditEventSummary, TeamSummary } from "../apiClient.js";
 import { pinnedInfoForServer } from "../controllers/ServerConnectionManager.js";
 import { lanSharePresentation } from "../lanShareReachability.js";
 import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
+import { ConnectionDiagnosticsModal } from "../modals/ConnectionDiagnosticsModal.js";
 
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
 
@@ -12,6 +13,17 @@ export class VaultRoomsView extends ItemView {
    *  transient display preference, not data, so it resets (all expanded) when the view is closed
    *  and reopened or Obsidian restarts; that's an acceptable, simple default. */
   private collapsedSections = new Set<string>();
+
+  /** Loaded audit page(s), or null when nothing has been fetched yet. Transient like
+   *  collapsedSections: audit data is a point-in-time snapshot the user explicitly (re)loads, not
+   *  live state, so it resets when the view closes. */
+  private auditEvents: AuditEventSummary[] | null = null;
+  private auditHasMore = false;
+  /** Team filter for non-owner viewers (a team admin can only read their own team's log). */
+  private auditTeamId: string | undefined;
+  /** Which server the cached audit page belongs to - switching the active connection must drop the
+   *  cache, or the previous server's events would render under the new one's heading. */
+  private auditServerId: string | undefined;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -71,6 +83,7 @@ export class VaultRoomsView extends ItemView {
     this.renderFriendsSection(container);
     this.renderTeamsSection(container);
     this.renderRoomsSection(container);
+    this.renderAuditSection(container);
   }
 
   /** A collapsible block: a clickable header (title + optional count badge + chevron) that toggles
@@ -266,7 +279,11 @@ export class VaultRoomsView extends ItemView {
         item.createDiv({ cls: "vault-rooms-room-meta", text: `${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}` });
         const rowActions = item.createDiv({ cls: "vault-rooms-room-actions" });
         this.addPanelButton(rowActions, "Use", () => this.plugin.activateServer(server.id));
-        this.addPanelButton(rowActions, "Test", () => this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server)));
+        this.addPanelButton(rowActions, "Test", () => {
+          new ConnectionDiagnosticsModal(this.plugin, server.baseUrl, () =>
+            this.plugin.diagnoseConnection(server.baseUrl, pinnedInfoForServer(server), server.deviceToken)
+          ).open();
+        });
       }
     });
   }
@@ -484,6 +501,117 @@ export class VaultRoomsView extends ItemView {
         this.render();
       });
     }
+  }
+
+  private static readonly AUDIT_PAGE_SIZE = 50;
+
+  /** Read-only viewer over the server's audit trail (connects/denials/revocations/security state
+   *  changes - see repo.audit call sites). Data loads on explicit request, not on every render:
+   *  the panel re-renders often (sync state changes, section toggles) and the audit log is a
+   *  point-in-time snapshot, not live state worth refetching each time. */
+  private renderAuditSection(parent: HTMLElement): void {
+    const server = this.plugin.getActiveServer();
+    if (!server) {
+      return;
+    }
+    const managedTeams = this.plugin.teams.filter((team) => this.plugin.canManageTeam(team));
+    // The server enforces this too (owner or team admin only) - hiding the section here just
+    // avoids offering a button that can only ever produce a permission error.
+    if (!server.isServerOwner && managedTeams.length === 0) {
+      return;
+    }
+    if (this.auditServerId !== server.id) {
+      this.auditServerId = server.id;
+      this.auditEvents = null;
+      this.auditHasMore = false;
+      this.auditTeamId = undefined;
+    }
+
+    this.renderCollapsibleSection(parent, "audit", "Audit log", this.auditEvents?.length, (body) => {
+      body.createEl("p", {
+        cls: "vault-rooms-setting-hint",
+        text: server.isServerOwner
+          ? "Server-wide activity and security events, newest first."
+          : "Activity for teams you manage, newest first."
+      });
+
+      const actions = body.createDiv({ cls: "vault-rooms-actions" });
+      if (!server.isServerOwner) {
+        if (this.auditTeamId === undefined || !managedTeams.some((team) => team.id === this.auditTeamId)) {
+          this.auditTeamId = managedTeams[0]?.id;
+        }
+        if (managedTeams.length > 1) {
+          const select = actions.createEl("select");
+          for (const team of managedTeams) {
+            const option = select.createEl("option", { text: team.name, value: team.id });
+            option.selected = team.id === this.auditTeamId;
+          }
+          select.onchange = () => {
+            this.auditTeamId = select.value;
+            this.auditEvents = null;
+            void this.loadAuditPage(0)
+              .then(() => this.render())
+              .catch((error) => new Notice(error instanceof Error ? error.message : "Failed to load audit log"));
+          };
+        }
+      }
+      this.addPanelButton(actions, this.auditEvents ? "Refresh" : "Load audit log", async () => {
+        this.auditEvents = null;
+        await this.loadAuditPage(0);
+        this.render();
+      });
+
+      if (!this.auditEvents) {
+        return;
+      }
+      const list = body.createDiv({ cls: "vault-rooms-team-list" });
+      if (this.auditEvents.length === 0) {
+        list.createDiv({ cls: "vault-rooms-empty", text: "No audit events yet." });
+        return;
+      }
+      for (const event of this.auditEvents) {
+        const row = list.createDiv({ cls: "vault-rooms-team" });
+        const title = row.createDiv({ cls: "vault-rooms-team-title" });
+        title.createEl("strong", { text: event.action });
+        title.createSpan({ text: new Date(event.createdAt).toLocaleString() });
+        row.createDiv({
+          cls: "vault-rooms-room-meta",
+          text: `${event.resourceType} ${event.resourceId} - by ${event.actorType} ${event.actorId}${event.ipAddress ? ` (${event.ipAddress})` : ""}`
+        });
+        const metadata = JSON.stringify(event.metadata);
+        if (metadata && metadata !== "{}") {
+          // Hover-only detail: metadata shape varies per action and is occasionally verbose;
+          // a tooltip keeps the list scannable without dropping the information.
+          row.setAttr("title", metadata);
+        }
+      }
+      if (this.auditHasMore) {
+        const moreActions = body.createDiv({ cls: "vault-rooms-actions" });
+        this.addPanelButton(moreActions, "Load more", async () => {
+          await this.loadAuditPage(this.auditEvents?.length ?? 0);
+          this.render();
+        });
+      }
+    });
+  }
+
+  private async loadAuditPage(offset: number): Promise<void> {
+    const server = this.plugin.getActiveServer();
+    const options: { teamId?: string; limit: number; offset: number } = {
+      limit: VaultRoomsView.AUDIT_PAGE_SIZE,
+      offset
+    };
+    if (server && !server.isServerOwner && this.auditTeamId !== undefined) {
+      options.teamId = this.auditTeamId;
+    }
+    const page = await this.plugin.listAuditEvents(options);
+    // Dedupe by id when appending: the log is append-only newest-first, so events written between
+    // two "Load more" clicks shift offsets and re-serve rows the view already has. Re-showing is
+    // harmless server-side (nothing is ever hidden), but the list shouldn't render duplicates.
+    const existing = offset === 0 ? [] : (this.auditEvents ?? []);
+    const seen = new Set(existing.map((event) => event.id));
+    this.auditEvents = [...existing, ...page.events.filter((event) => !seen.has(event.id))];
+    this.auditHasMore = page.events.length === VaultRoomsView.AUDIT_PAGE_SIZE;
   }
 
   private addPanelButton(parent: HTMLElement, label: string, action: () => Promise<void> | void, cta = false): HTMLButtonElement {

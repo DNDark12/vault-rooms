@@ -2,6 +2,7 @@ import { Notice } from "obsidian";
 import { createInviteAcceptanceProof, type IdentityRotationRecord, type MigrationMode } from "@vault-rooms/protocol";
 import { verifyRotationRecord } from "vault-rooms-relay/embedded-core";
 import { RelayApiClient } from "../apiClient.js";
+import { runConnectionDiagnostics, type ConnectionDiagnosticsReport } from "../connectionDiagnostics.js";
 import {
   LanShareReachabilityMonitor,
   probeLanShareTarget,
@@ -409,6 +410,26 @@ export class ServerConnectionManager {
     if (pin) assertPinMaterial(pin);
     await new RelayApiClient(baseUrl, undefined, undefined, pin).testConnection();
     new Notice(`Connected to Vault Rooms`);
+  }
+
+  /** Structured "Test connection" (ROADMAP P1 #4): probes URL/reachability/identity/login and
+   *  reports which step failed. Deliberately side-effect-free - no pinned-transport recovery, no
+   *  markServerRevoked - so running diagnostics never mutates the saved connection it inspects;
+   *  invalid pin material surfaces inside the reach step (pinnedRequest asserts it) instead of
+   *  throwing before any step can report. */
+  async diagnoseConnection(baseUrl: string, pin?: PinnedServerInfo, deviceToken?: string): Promise<ConnectionDiagnosticsReport> {
+    const probe = new RelayApiClient(baseUrl, deviceToken, undefined, pin);
+    return runConnectionDiagnostics(baseUrl, {
+      pinned: Boolean(pin),
+      fetchHealth: () => probe.fetchHealthRaw(),
+      ...(deviceToken
+        ? {
+            fetchMe: async () => {
+              await probe.me();
+            }
+          }
+        : {})
+    });
   }
 
   apiFor(server: ServerConnection): RelayApiClient {

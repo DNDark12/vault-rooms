@@ -4,6 +4,7 @@ import type { SettingDefinitionItem } from "obsidian";
 import type VaultRoomsPlugin from "./main.js";
 import { pinnedInfoForServer } from "./controllers/ServerConnectionManager.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
+import { ConnectionDiagnosticsModal } from "./modals/ConnectionDiagnosticsModal.js";
 import { refreshSettingTab, setDestructiveCompat } from "./obsidianCompat.js";
 import { isRestrictedPort } from "./restrictedPorts.js";
 
@@ -210,12 +211,10 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         })
       );
       setting.addButton((button) =>
-        button.setButtonText("Test").onClick(async () => {
-          try {
-            await this.plugin.testConnection(server.baseUrl, pinnedInfoForServer(server));
-          } catch (error) {
-            new Notice(error instanceof Error ? error.message : "Connection failed");
-          }
+        button.setButtonText("Test").onClick(() => {
+          new ConnectionDiagnosticsModal(this.plugin, server.baseUrl, () =>
+            this.plugin.diagnoseConnection(server.baseUrl, pinnedInfoForServer(server), server.deviceToken)
+          ).open();
         })
       );
       setting.addButton((button) =>

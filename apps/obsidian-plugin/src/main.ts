@@ -364,6 +364,19 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.serverConnectionManager.testConnection(baseUrl, pin);
   }
 
+  /** Structured multi-step connection check - see connectionDiagnostics.ts. Pass the server's
+   *  deviceToken to also verify the saved login; omit it to test reachability/identity only. */
+  async diagnoseConnection(baseUrl: string, pin?: PinnedServerInfo, deviceToken?: string) {
+    return this.serverConnectionManager.diagnoseConnection(baseUrl, pin, deviceToken);
+  }
+
+  /** Newest-first audit page from the active server. The server enforces scope (owner: everything;
+   *  team owner/admin: only with their teamId) - this is just the authenticated transport. */
+  async listAuditEvents(options: { teamId?: string; limit?: number; offset?: number } = {}) {
+    const server = this.requireActiveServer();
+    return this.apiFor(server).listAuditEvents(options);
+  }
+
   async setupServer(displayName: string, deviceName: string, teamName?: string): Promise<void> {
     // Setting up always means "make this device the server," so there is no useful case for
     // asking the user to separately click Start first - do it for them if it isn't running yet.

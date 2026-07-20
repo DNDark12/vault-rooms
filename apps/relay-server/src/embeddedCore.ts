@@ -1,5 +1,6 @@
 export { runMigrations } from "./db/migrations.js";
 export { RelayRepository } from "./db/repositories/relayRepository.js";
+export { registerAuditRoutes } from "./routes/audit.routes.js";
 export { registerAuthRoutes } from "./routes/auth.routes.js";
 export { registerFileRoutes } from "./routes/file.routes.js";
 export { registerFriendRoutes } from "./routes/friend.routes.js";

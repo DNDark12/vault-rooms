@@ -18,22 +18,18 @@ and both older team-scoped layouts (including `shares`/`share_id`): relay data, 
 and mount tracking migrate in place, one-time safety backups are retained, and installations affected
 by the earlier reset prototype have explicit database and owner-credential recovery paths.
 
-The remaining release gate is the two-real-machine checklist in the implementation plan: fresh pinned join, normal migration, strict migration, unexpected wrong-server identity, and enforcement against an unmigrated client. Until those results are recorded and a release is explicitly cut, treat this checkout as a release candidate rather than a published release. See [SECURITY.md](SECURITY.md) for the trust model and limitations.
+The remaining release gate was the two-real-machine checklist in the implementation plan: fresh pinned join, normal migration, strict migration, unexpected wrong-server identity, and enforcement against an unmigrated client. **Verified on two real machines 2026-07-20** — all five scenarios passed. The v0.2 release itself (version bump + tag) is still pending an explicit cut. See [SECURITY.md](SECURITY.md) for the trust model and limitations.
 
-## P1 - next up, in priority order
+## P1 - implemented 2026-07-20, pending release
 
-### 2. Standalone relay packaging
-Currently "standalone" means `pnpm dev:server` from a cloned repo - fine for the maintainer, real friction for a team that wants to run it on a NAS or an always-on machine without a dev toolchain.
+### 2. Standalone relay packaging — done
+`Dockerfile` + `docker-compose.yml` at the repo root (single-stage Node image running the same tsx entry point as `pnpm dev:server`; no native deps to build), plus a README section "Running the standalone relay in Docker (NAS / always-on machine)" covering `PUBLIC_URL`, the first-run `ALLOW_REMOTE_BOOTSTRAP` dance, the data volume's backup importance, and a systemd unit example for bare Linux.
 
-- `Dockerfile` + `docker-compose.yml` (the relay has no native dependencies - `sql.js` is pure WASM - so this should be a small, straightforward image).
-- A short "run this on your NAS" doc section (Synology/Unraid/etc. container instructions, or at minimum a systemd unit example for a bare Linux box).
-- No code changes needed in the relay itself for this - it's packaging and docs only, low risk.
+### 3. Audit log viewer — done
+`GET /api/audit` (`routes/audit.routes.ts`, registered in both runtimes) pages the existing `audit_events` rows newest-first: server owner sees everything, a team owner/admin sees only their team's rows via `?teamId=`. Surfaced as a collapsible "Audit log" section in the Vault Rooms panel (explicit Load/Refresh + Load more, metadata on hover). Covered by `apps/relay-server/test/audit-log.test.ts`.
 
-### 3. Audit log viewer
-The audit *mechanism* already exists server-side - `repo.audit(...)` calls already fire on connect/disconnect, permission denials, revocations, etc. (see `apps/relay-server/src/sync/syncServer.ts`, `services/policyService.ts`). What's missing is a way to actually look at it - right now that data is written but never surfaced anywhere in the plugin UI. This is a smaller lift than it sounds since the backend data already exists: add a read endpoint + a simple table/list view in the Vault Rooms panel (owner/admin only), no new logging infrastructure required.
-
-### 4. Better connection diagnostics
-Right now "why can't B join" is a manual checklist in the Troubleshooting README section (health-check the URL, check subnet/firewall/AP isolation). A built-in "Test connection" flow that actually walks through those checks (resolve the URL, hit `/health`, report which step failed) would turn a support conversation into a self-serve error message. Moderate effort, no architecture risk.
+### 4. Better connection diagnostics — done
+The "Test" buttons (panel Other servers + Settings → Servers) now open a step-by-step diagnostics modal (`connectionDiagnostics.ts`, pure and unit-tested): valid URL → something answers → it's a Vault Rooms server with the expected pinned identity → saved login accepted, reporting exactly which step failed with a hint. A pin mismatch is classified as an identity failure, not unreachability; the run is side-effect-free (no pinned recovery, no revoked-marking).
 
 ## P2 - after TLS and onboarding are solid
 

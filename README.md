@@ -160,6 +160,47 @@ Because invite links and saved logins embed a concrete port, the embedded server
 - **Embedded (in Obsidian):** configure the relay in Settings → Vault Rooms → Relay server (Public URL override, Port, Max synced file size, Start automatically), then use the Start/Stop button. Public URL override is manually maintained: after an address change, restart the server and confirm the panel's automatic LAN reachability check. A fresh server creates and persists its own pinned identity, listens on HTTPS/WSS, and bootstraps the owner through that pinned connection. There is no Host setting - the embedded server always binds every LAN interface (`0.0.0.0`). Nothing is read from `.env` in this mode.
 - **Standalone (`pnpm dev:server`):** configured via environment variables - see `apps/relay-server/.env.example`. `TLS_MODE=pinned` creates a persistent self-managed identity under `IDENTITY_DIR`; `TLS_MODE=os-trusted` requires `TLS_CERT_FILE` and `TLS_KEY_FILE`; `TLS_MODE=plain` is for development or a trusted reverse-proxy hop. `TLS_DUAL_STACK=true` is accepted only as an explicit transition for an already-bootstrapped legacy pinned migration, with `TLS_MIGRATION_MODE=non_strict|strict`; a fresh pinned server is always HTTPS-only. After clients migrate, stop the process and restart with `TLS_DUAL_STACK=false`: a persisted `tls_migrating` state is durably advanced to `tls_enforced` before the HTTPS-only listener starts. Pinned/enforced states reject dual-stack so plaintext cannot be accidentally re-enabled. Useful for development or for hosting the relay on a dedicated always-on machine rather than a personal laptop.
 
+### Running the standalone relay in Docker (NAS / always-on machine)
+
+The relay has no native dependencies, so the container image is small and needs no build toolchain on the host. From a checkout:
+
+```bash
+docker compose up -d --build
+docker compose logs vault-rooms-relay   # shows the TLS identity and the one-time Bootstrap PIN
+```
+
+Before first start, edit `docker-compose.yml`:
+
+1. Set `PUBLIC_URL` to the LAN address clients will use (e.g. `https://<nas-ip>:8787`). Inside a container the relay cannot detect the host's LAN IP, so this is required.
+2. For the very first run, set `ALLOW_REMOTE_BOOTSTRAP: "true"` — the owner bootstrap normally must come from `127.0.0.1`, but with the relay in a container you bootstrap from another machine. Complete the owner setup with the Bootstrap PIN from the logs, then set it back to `"false"` and `docker compose up -d` again.
+
+The named volume `vault-rooms-data` holds the SQLite database *and* the pinned TLS identity. Losing it means clients see a pin mismatch and all rooms/members are gone — include it in NAS backups. On Synology/Unraid/Portainer, build the image from this repo (`docker build -t vault-rooms-relay .`) and recreate the same container settings: publish port 8787, mount a persistent volume at `/app/apps/relay-server/data`, and set the environment variables above.
+
+Without Docker, a bare Linux box can run the same thing under systemd (after `pnpm install` in a checkout):
+
+```ini
+# /etc/systemd/system/vault-rooms-relay.service
+[Unit]
+Description=Vault Rooms relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=vaultrooms
+WorkingDirectory=/opt/vault-rooms/apps/relay-server
+Environment=HOST=0.0.0.0
+Environment=PORT=8787
+Environment=TLS_MODE=pinned
+Environment=PUBLIC_URL=https://192.168.1.10:8787
+ExecStart=/usr/bin/pnpm exec tsx src/index.ts
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`journalctl -u vault-rooms-relay` shows the startup banner with the Bootstrap PIN. Bootstrap from the same machine (`127.0.0.1`) or temporarily set `ALLOW_REMOTE_BOOTSTRAP=true` as above.
+
 ## Installing the Obsidian plugin manually
 
 1. Run `pnpm build:plugin`.
@@ -286,6 +327,8 @@ To cut a release:
 - The **embedded** relay never auto-detects your LAN IP (see "Security model" above) - you must update the Public URL override and restart the server every time your LAN IP changes. The hosting panel checks that address from the host and blocks new own-server invites when it is unreachable; even a green result cannot test a teammate's firewall or Wi-Fi isolation. The standalone relay still auto-detects.
 
 ## Troubleshooting
+
+Start with the built-in **Test** button (Settings → Vault Rooms → Servers, or next to a saved server in the panel): it walks the checks below in order - is the address a valid URL, does anything answer there, is it actually a Vault Rooms server presenting the expected identity, and is this device's saved login still accepted - and reports exactly which step failed with a hint. The items below cover what each failure means and everything the automated check can't see.
 
 - `Destination file already exists!` immediately after manually replacing the v0.2 plugin artifacts: rebuild and copy the latest `main.js`, `manifest.json`, and `styles.css` together, then reload Obsidian. An interim v0.2 build used a `DataAdapter.rename()` pattern that could not replace the existing embedded database. Do **not** delete `server-data`, `relay.sqlite`, or `identity.json`; the corrected build preserves and reuses them.
 - `Bootstrap has already been completed` after upgrading: the relay data still has its original owner but an interim build erased the local saved connection. Start the embedded server and use **Recover server access**. This adds a new device credential to the existing owner through the same process; it does not reopen bootstrap or recreate users/teams/rooms. If the panel also reports an archived v0.1 database, use **Restore v0.1 data** first.

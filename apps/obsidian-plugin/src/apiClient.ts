@@ -51,6 +51,19 @@ export type FriendSummary = {
   teams: Array<{ id: string; role: "admin" | "member" }>;
 };
 
+export type AuditEventSummary = {
+  id: string;
+  teamId: string | null;
+  actorType: "user" | "device" | "system";
+  actorId: string;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  metadata: unknown;
+  ipAddress: string | null;
+  createdAt: string;
+};
+
 export type BootstrapResponse = {
   user: { id: string; displayName: string };
   device: { id: string; displayName: string };
@@ -102,6 +115,24 @@ export class RelayApiClient implements RelayFileApi {
 
   async testConnection(): Promise<{ ok: true; version: string }> {
     return this.testConnectionAttempt(true);
+  }
+
+  /** Raw /health probe for the diagnostics flow (see connectionDiagnostics.ts): returns
+   *  status + parsed body without interpreting them, so the diagnostics runner can distinguish
+   *  "nothing answered" / "answered but not Vault Rooms" / "healthy" itself. Pinned-transport
+   *  recovery is deliberately not attempted here - diagnostics should surface a pin failure as a
+   *  finding, not silently repair it mid-test. */
+  async fetchHealthRaw(timeoutMs = 3_000): Promise<{ status: number; body: unknown }> {
+    const response = this.pinned
+      ? await pinnedRequest(this.pinned, { url: `${this.baseUrl}/health`, timeoutMs })
+      : await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, timeoutMs);
+    let body: unknown;
+    try {
+      body = response.json;
+    } catch {
+      body = undefined;
+    }
+    return { status: response.status, body };
   }
 
   private async testConnectionAttempt(allowPinnedRecovery: boolean): Promise<{ ok: true; version: string }> {
@@ -179,6 +210,26 @@ export class RelayApiClient implements RelayFileApi {
 
   async listFriends(): Promise<{ friends: FriendSummary[] }> {
     return this.request("/api/friends");
+  }
+
+  /** Newest-first audit page. Owner-only without teamId; team owner/admin with their teamId. */
+  async listAuditEvents(options: { teamId?: string; limit?: number; offset?: number } = {}): Promise<{
+    events: AuditEventSummary[];
+    limit: number;
+    offset: number;
+  }> {
+    const params = new URLSearchParams();
+    if (options.teamId !== undefined) {
+      params.set("teamId", options.teamId);
+    }
+    if (options.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options.offset !== undefined) {
+      params.set("offset", String(options.offset));
+    }
+    const query = params.toString();
+    return this.request(query ? `/api/audit?${query}` : "/api/audit");
   }
 
   async revokeFriend(userId: string): Promise<{ ok: true }> {

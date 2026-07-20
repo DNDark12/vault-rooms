@@ -18,6 +18,7 @@ import {
   createRelayCore,
   handleSyncSocket,
   assertTransportAllowed,
+  registerAuditRoutes,
   registerAuthRoutes,
   registerFileRoutes,
   registerFriendRoutes,
@@ -163,6 +164,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     maxFileBytes,
     connectionRegistry
   });
+  registerAuditRoutes(routeApp, repo);
   if (security) {
     registerSecurityRoutes(routeApp, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
   }

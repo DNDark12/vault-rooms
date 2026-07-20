@@ -119,3 +119,16 @@ export type FileVersionWithContentRow = {
   created_at: string;
   content: string;
 };
+
+export type AuditEventRow = {
+  id: string;
+  team_id: string | null;
+  actor_type: "user" | "device" | "system";
+  actor_id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  metadata_json: string;
+  ip_address: string | null;
+  created_at: string;
+};

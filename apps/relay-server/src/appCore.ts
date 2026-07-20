@@ -8,6 +8,7 @@ import {
 } from "node:timers";
 import { AppError, PRODUCT_NAME, PRODUCT_VERSION, toApiError, type HealthResponse } from "@vault-rooms/protocol";
 import type { RelayDb } from "./db/sqlJsAdapter.js";
+import { registerAuditRoutes } from "./routes/audit.routes.js";
 import { registerAuthRoutes } from "./routes/auth.routes.js";
 import { registerFileRoutes } from "./routes/file.routes.js";
 import { registerFriendRoutes } from "./routes/friend.routes.js";
@@ -134,6 +135,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     maxFileBytes,
     connectionRegistry
   });
+  registerAuditRoutes(app, repo);
   if (security) {
     registerSecurityRoutes(app, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
   }
