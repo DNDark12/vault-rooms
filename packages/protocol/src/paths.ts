@@ -55,3 +55,12 @@ export function isEligibleBinaryPath(path: string): boolean {
 export function isEligiblePath(path: string): boolean {
   return isEligibleTextPath(path) || isEligibleBinaryPath(path);
 }
+
+/** CRDT eligibility (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.1) - deliberately
+ *  narrower than isEligiblePath()/isEligibleTextPath(): only `.md` gets the CRDT lane in v1, even
+ *  though .txt/.canvas/.json/.csv/.excalidraw are also synced as text via the whole-file
+ *  compare-and-swap lane. Structured formats (.canvas/.json/.excalidraw) need semantic merging, not
+ *  text merging - that's ROADMAP P2 #5 territory, not this effort. */
+export function isCrdtEligiblePath(path: string): boolean {
+  return path.toLowerCase().endsWith(".md");
+}

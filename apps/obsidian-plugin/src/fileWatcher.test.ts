@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyRenameEvent, isWatchableChange, registerMountedRoomWatcher } from "./fileWatcher.js";
+import { classifyRenameEvent, isCrdtManagedLocalChange, isWatchableChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import type { MountedRoomState, VaultAdapter, VaultChangeEvent } from "./syncClient.js";
 
 const CONFIG_DIR = ".obsidian";
@@ -163,5 +163,26 @@ describe("isWatchableChange (unchanged behavior)", () => {
   it("still matches plain create/modify/delete events", () => {
     const room = createRoom();
     expect(isWatchableChange({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" }, room, CONFIG_DIR)).toBe("Board.md");
+  });
+});
+
+describe("isCrdtManagedLocalChange", () => {
+  it("routes create/modify of a .md path in a CRDT-enabled room to the CRDT lane", () => {
+    expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "create", "Board.md")).toBe(true);
+    expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "modify", "Board.md")).toBe(true);
+  });
+
+  it("keeps delete on the CAS lane even in a CRDT-enabled room - there is no separate CRDT delete message", () => {
+    expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "delete", "Board.md")).toBe(false);
+  });
+
+  it("keeps non-CRDT-eligible paths (e.g. images, .canvas) on the CAS lane even in a CRDT-enabled room", () => {
+    expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "modify", "image.png")).toBe(false);
+    expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "modify", "board.canvas")).toBe(false);
+  });
+
+  it("keeps .md files on the CAS lane unchanged in a room that has not enabled CRDT (non-CRDT regression)", () => {
+    expect(isCrdtManagedLocalChange({ crdtEnabled: false }, "create", "Board.md")).toBe(false);
+    expect(isCrdtManagedLocalChange({ crdtEnabled: false }, "modify", "Board.md")).toBe(false);
   });
 });

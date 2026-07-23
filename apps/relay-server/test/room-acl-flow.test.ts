@@ -145,6 +145,90 @@ describe("rooms and ACL", () => {
     });
     expect(bAfterDeny.statusCode).toBe(200);
     expect(bAfterDeny.json().rooms).toEqual([]);
+
+    // Third-hardware-testing-round item 2: re-granting access after a deny-based revoke must
+    // actually restore visibility - a stale deny rule for the exact same subject/path must not
+    // permanently out-live a fresh allow grant that covers the same permissions.
+    const regrantReader = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "**/*" }
+    });
+    expect(regrantReader.statusCode).toBe(200);
+
+    const bAfterRegrant = await app.inject({
+      method: "GET",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${member.deviceToken}` }
+    });
+    expect(bAfterRegrant.statusCode).toBe(200);
+    expect(bAfterRegrant.json().rooms[0]).toMatchObject({
+      id: room.id,
+      permissions: expect.arrayContaining(["file:read", "sync:subscribe"])
+    });
+
+    const aclAfterRegrant = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(aclAfterRegrant.statusCode).toBe(200);
+    const rulesAfterRegrant = aclAfterRegrant.json().aclRules as Array<{ subjectId: string; effect: string; permissions: string[]; pathPattern: string }>;
+    // The stale deny rule (file:read/room:read, fully covered by the reader preset's re-grant) is
+    // gone entirely - not just shadowed - and the fresh allow rule is present.
+    expect(rulesAfterRegrant.filter((rule) => rule.subjectId === member.user.id && rule.effect === "deny")).toEqual([]);
+    expect(rulesAfterRegrant).toEqual(
+      expect.arrayContaining([expect.objectContaining({ subjectId: member.user.id, effect: "allow", pathPattern: "**/*" })])
+    );
+  });
+
+  it("[third-hardware-testing-round item 2] narrows (rather than deletes) a deny rule whose permissions only partially overlap the new allow grant", async () => {
+    const { app, owner, member } = await bootstrapOwnerAndMember();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+    });
+    const room = created.json().room;
+
+    // Deny room:read, file:read, and file:write (broader than what the next allow grant covers).
+    const deny = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "deny", permissions: ["room:read", "file:read", "file:write"], pathPattern: "**/*" }
+    });
+    expect(deny.statusCode).toBe(200);
+
+    // Allow only room:read and file:read (a narrower reader-only re-grant) - file:write should stay denied.
+    const regrant = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { subjectType: "user", subjectId: member.user.id, effect: "allow", permissions: ["room:read", "file:read", "sync:subscribe"], pathPattern: "**/*" }
+    });
+    expect(regrant.statusCode).toBe(200);
+
+    const aclList = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/acl`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    const rules = aclList.json().aclRules as Array<{ subjectId: string; effect: string; permissions: string[]; pathPattern: string }>;
+    const remainingDenyRules = rules.filter((rule) => rule.subjectId === member.user.id && rule.effect === "deny");
+    expect(remainingDenyRules).toHaveLength(1);
+    // Only the non-overlapping permission (file:write) survives on the narrowed deny rule.
+    expect(remainingDenyRules[0]?.permissions).toEqual(["file:write"]);
+
+    const bAfterRegrant = await app.inject({
+      method: "GET",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${member.deviceToken}` }
+    });
+    expect(bAfterRegrant.json().rooms[0]).toMatchObject({ id: room.id, permissions: expect.arrayContaining(["room:read", "file:read"]) });
+    expect(bAfterRegrant.json().rooms[0].permissions).not.toContain("file:write");
   });
 
   it("rejects a sourcePath that tries to traverse outside the vault, on both create and update", async () => {

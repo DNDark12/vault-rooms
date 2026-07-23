@@ -1,4 +1,6 @@
-import { Notice, Plugin, type ObsidianProtocolData } from "obsidian";
+import { MarkdownView, Notice, Plugin, type Editor, type ObsidianProtocolData } from "obsidian";
+import type { EditorView } from "@codemirror/view";
+import { isCrdtEligiblePath } from "@vault-rooms/protocol";
 import {
   RelayApiClient,
   type AclRuleSummary,
@@ -8,7 +10,10 @@ import {
   type TeamMemberSummary,
   type TeamSummary
 } from "./apiClient.js";
-import { registerMountedRoomWatcher } from "./fileWatcher.js";
+import { CrdtEditorController } from "./crdtEditorBinding.js";
+import { CrdtDocStore } from "./crdtDocStore.js";
+import { CrdtSessionManager } from "./crdtSession.js";
+import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
   DEFAULT_SETTINGS,
@@ -25,7 +30,7 @@ import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
-import { VaultSyncEngine, type MountedRoomState } from "./syncClient.js";
+import { isConflictCopyPath, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, VaultSyncEngine, type MountedRoomState } from "./syncClient.js";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
@@ -72,6 +77,15 @@ export default class VaultRoomsPlugin extends Plugin {
   private syncState: SyncConnectionState = "offline";
   private readonly securityMigrationsInFlight = new Set<string>();
   private roomMountController!: RoomMountController;
+  private crdtDocStore!: CrdtDocStore;
+  /** Recreated whenever the active server changes (connectSyncSocket()), mirroring syncEngine's
+   *  own lifecycle - CRDT session state (in-memory Y.Docs, pending handshakes) is meaningless once
+   *  detached from a specific server's rooms/epochs. */
+  private crdtSessionManager: CrdtSessionManager | null = null;
+  private readonly crdtEditorController: CrdtEditorController = new CrdtEditorController({
+    getSessionManager: () => this.crdtSessionManager ?? undefined,
+    resolveCrdtTarget: (vaultPath) => this.resolveCrdtTarget(vaultPath)
+  });
   /** Getter-backed facade passed to controllers so state reads stay live without exposing the plugin's full surface. */
   private readonly ctx: PluginContext & RoomMountControllerDeps = ((self: VaultRoomsPlugin): PluginContext & RoomMountControllerDeps => ({
     app: self.app,
@@ -96,6 +110,9 @@ export default class VaultRoomsPlugin extends Plugin {
     watchMountedRoom: (roomId) => self.watchMountedRoom(roomId),
     subscribeRoom: (roomId) => {
       self.syncSocket?.subscribe(roomId);
+    },
+    disposeCrdtRoom: (roomId) => {
+      void self.crdtSessionManager?.disposeRoom(roomId);
     }
   }))(this);
   private readonly serverConnectionManager: ServerConnectionManager = new ServerConnectionManager(this.ctx);
@@ -105,9 +122,41 @@ export default class VaultRoomsPlugin extends Plugin {
     this.vaultAdapter = new ObsidianVaultAdapter(this);
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, new RelayApiClient("http://127.0.0.1:8787"));
     this.roomMountController = new RoomMountController(this.ctx);
+    // Persistent CRDT client state (contract 1.12, strategy A) - a sibling directory of
+    // server-data/relay.sqlite (see ServerConnectionManager), through Obsidian's DataAdapter, never
+    // node:fs (CLAUDE.md rule 3). Independent of which server is active, so constructed once here
+    // rather than per connectSyncSocket() call.
+    const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    this.crdtDocStore = new CrdtDocStore(this.app.vault.adapter, `${pluginDir}/server-data/crdt`);
     this.addSettingTab(new VaultRoomsSettingTab(this));
     this.registerView(VAULT_ROOMS_VIEW_TYPE, (leaf) => new VaultRoomsView(leaf, this));
     this.addRibbonIcon("box", "Vault Rooms", () => this.openRoomsPanel());
+
+    // Registered once, globally - starts empty in every CM6 instance Obsidian creates; reconciled
+    // against every currently-open markdown pane by handleActiveEditorChanged() (see
+    // crdtEditorBinding.ts's syncOpenViews - second-hardware-testing-round item 3: this binds every
+    // open CRDT pane live, not just the focused one). "layout-change" fires on pane splits/closes/
+    // file switches in *any* pane, not just the active one, so the full open-pane set gets re-scanned
+    // then too, alongside the existing active-leaf-change/file-open triggers.
+    this.registerEditorExtension(this.crdtEditorController.extension());
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.handleActiveEditorChanged()));
+    this.registerEvent(this.app.workspace.on("file-open", () => this.handleActiveEditorChanged()));
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.handleActiveEditorChanged()));
+    // Renaming the file behind an *already-open* CRDT-bound pane fires none of the three workspace
+    // events above (Obsidian mutates the TFile's path in place rather than closing/reopening the
+    // leaf) - without this, syncOpenViews never re-resolves that view's target, so its editor stays
+    // compartment-bound to the old (roomId, oldRelativePath) session. The watcher meanwhile
+    // translates the rename into a synthetic delete-old + create-new pair (see
+    // registerMountedRoomWatcher's doc comment), and the delete half calls forgetLocalDelete on the
+    // old session - which tears down its persist/materialize timers but deliberately leaves the
+    // Y.Doc and its `doc.on("update", ...)` forwarder alive (teardownSession has no editor/doc
+    // knowledge at all). So the still-bound pane keeps accepting keystrokes locally and keeps
+    // forwarding them as crdt_update against the now-deleted old path/epoch - silently rejected
+    // server-side and never seen by anyone else, while the new path's freshly created session (from
+    // the synthetic create half) sits correctly bound for whichever other device opens it fresh.
+    // Re-running the same reconcile used for the other three triggers immediately on rename closes
+    // that gap by rebinding the pane onto its new target as soon as Obsidian reports the rename.
+    this.registerEvent(this.app.vault.on("rename", () => this.handleActiveEditorChanged()));
 
     this.addCommand({
       id: "start-server",
@@ -242,6 +291,14 @@ export default class VaultRoomsPlugin extends Plugin {
         return;
       }
       this.connectSyncSocket();
+      // Best-effort, fire-and-forget: gets the network-confirmed visibleRooms (crdtEnabled, etc.)
+      // populated as early as realistically possible after startup, instead of waiting for the user
+      // to open the Rooms panel or trigger some other refresh - previously visibleRooms stayed `[]`
+      // for the rest of the session unless one of those happened to run. resolveRoomCrdtEnabled's
+      // persisted fallback already keeps CRDT-lane routing correct before this resolves (or if it
+      // fails, e.g. the server is unreachable), so this must never block or throw on
+      // connectSyncSocket() above.
+      void this.refreshRooms({ notify: false }).catch(() => undefined);
     });
   }
 
@@ -259,6 +316,8 @@ export default class VaultRoomsPlugin extends Plugin {
       this.stopWatchingRoom(roomId);
     }
     this.syncSocket?.disconnect();
+    this.crdtEditorController.unbindAll();
+    this.crdtSessionManager?.dispose();
     void this.serverConnectionManager.stopSilently();
   }
 
@@ -699,6 +758,7 @@ export default class VaultRoomsPlugin extends Plugin {
       mountName: string;
       conflictPolicy?: "keep_both" | "owner_wins";
       capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
+      crdtEnabled?: boolean;
     },
     localMountPath: string
   ): Promise<void> {
@@ -828,10 +888,50 @@ export default class VaultRoomsPlugin extends Plugin {
     const server = this.requireActiveServer();
     const result = await this.apiFor(server).listRooms();
     this.visibleRooms = result.rooms.map((room) => withInstalledCapabilities(this.app, room));
+    await this.persistRoomFlagsForMountedRooms();
     if (options.notify ?? true) {
       new Notice(`Loaded ${this.visibleRooms.length} room(s).`);
     }
     this.renderOpenRoomsViews();
+  }
+
+  /**
+   * Mirrors each visible room's `crdtEnabled` flag and (third hardware-testing round, item 1)
+   * `sync:push`-derived `canPushLocalEdits` flag onto its persisted `MountedRoomState`, for any room
+   * that's actually mounted - so `resolveRoomCrdtEnabled`/`resolveCanPushLocalEdits`'s fallback
+   * chains have a synchronously available last-known value at the start of the *next* Obsidian
+   * session, before that session's own `refreshRooms()` round trip has resolved (see CLAUDE.md's
+   * post-hardware-testing audit notes). Best-effort: only saves settings when something actually
+   * changed, and a save failure here is not worth surfacing on top of whatever normally happens
+   * after refreshRooms().
+   *
+   * Freshness note for `canPushLocalEdits`: there is no live-push equivalent of `room_mode_changed`
+   * for ACL/permission changes - `ConnectionRegistry.revalidateAccess` (relay-server) only ever
+   * fully revokes a subscription on loss of `room:read` (handled by `onAccessRevoked` below), it
+   * never notifies a narrower downgrade like losing `sync:push` while keeping `room:read`. This
+   * `refreshRooms()`-only mirror (called at startup and periodically via user actions) is the
+   * accepted staleness bound: a permission *downgrade* becoming visible with a short lag is a much
+   * smaller risk than the bug this closes (a read-only member's local divergence being treated as a
+   * real edit worth protecting).
+   */
+  private async persistRoomFlagsForMountedRooms(): Promise<void> {
+    let changed = false;
+    for (const room of this.visibleRooms) {
+      const roomState = this.settings.mountedRooms[room.id];
+      if (!roomState) continue;
+      if (roomState.crdtEnabled !== room.crdtEnabled) {
+        roomState.crdtEnabled = room.crdtEnabled;
+        changed = true;
+      }
+      const canPushLocalEdits = resolveCanPushLocalEdits(room, roomState);
+      if (roomState.canPushLocalEdits !== canPushLocalEdits) {
+        roomState.canPushLocalEdits = canPushLocalEdits;
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.saveSettings();
+    }
   }
 
   async mountFirstVisibleRoom(): Promise<void> {
@@ -915,6 +1015,77 @@ export default class VaultRoomsPlugin extends Plugin {
     this.syncSocket = null;
   }
 
+  /**
+   * Resolves a vault-relative file path to a CRDT lane target: which currently-mounted room it
+   * falls under (if any), only when that room has `crdtEnabled` and the path is CRDT-eligible
+   * (`.md`). Folder-scoped by construction - checked against one specific path at a time, never a
+   * vault-wide enumeration (CLAUDE.md rule 5).
+   */
+  private resolveCrdtTarget(vaultPath: string): { roomId: string; relativePath: string } | undefined {
+    for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
+      if (roomState.unmounted) continue;
+      const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
+      if (!room?.crdtEnabled) continue;
+      const prefix = `${roomState.mountPath.replace(/\/+$/, "")}/`;
+      if (!vaultPath.startsWith(prefix)) continue;
+      const relativePath = vaultPath.slice(prefix.length);
+      // A conflict copy is a local-only artifact (see isConflictCopyPath) never known to the server
+      // under this relativePath - the watcher path already filters these out before they ever reach
+      // isCrdtManagedLocalChange (see relativePathIfWatchable in fileWatcher.ts), but opening one
+      // directly in an editor bypasses that filter, so it's repeated here explicitly.
+      if (!relativePath || isConflictCopyPath(relativePath) || !isCrdtEligiblePath(relativePath)) continue;
+      return { roomId, relativePath };
+    }
+    return undefined;
+  }
+
+  /**
+   * Reacts to Obsidian's `active-leaf-change`/`file-open`/`layout-change` workspace events by
+   * enumerating *every currently-open* markdown pane (via `Workspace#getLeavesOfType("markdown")`,
+   * not just the focused one - second-hardware-testing-round item 3) and handing the full set to
+   * the CRDT editor controller's reconcile method, so every open pane showing a live CRDT note stays
+   * bound regardless of focus. Getting from the public `Editor` API to the underlying CM6
+   * `EditorView` goes through Editor's undocumented but long-standing `.cm` accessor (see
+   * getCmEditorView below) - this glue is inherently not unit-testable without a real Obsidian
+   * runtime (the same gap already recorded and accepted for Task 0.2 Step 3); crdtEditorBinding.ts's
+   * own tests cover everything reachable once a real EditorView is in hand, including the multi-view
+   * reconcile logic itself (syncOpenViews).
+   */
+  private handleActiveEditorChanged(): void {
+    const openViews: Array<{ vaultPath: string; view: EditorView }> = [];
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || !view.file) {
+        continue;
+      }
+      const cmView = getCmEditorView(view.editor);
+      if (!cmView) {
+        continue;
+      }
+      openViews.push({ vaultPath: view.file.path, view: cmView });
+    }
+    void this.crdtEditorController.syncOpenViews(openViews);
+  }
+
+  /** Reads current on-disk text for CRDT reconciliation - null if the file doesn't exist locally
+   *  yet (nothing to reconcile against). */
+  private async readCrdtDiskText(roomId: string, relativePath: string): Promise<string | null> {
+    const roomState = this.settings.mountedRooms[roomId];
+    if (!roomState) return null;
+    const path = `${roomState.mountPath.replace(/\/+$/, "")}/${relativePath}`;
+    if (!(await this.vaultAdapter.exists(path))) return null;
+    return this.vaultAdapter.read(path);
+  }
+
+  /** Materializes a CRDT doc's text to disk for a room's file that isn't currently bound to an open
+   *  editor (coexistence: an unopened CRDT file's on-disk copy still needs to stay current). */
+  private async writeCrdtDiskText(roomId: string, relativePath: string, text: string): Promise<void> {
+    const roomState = this.settings.mountedRooms[roomId];
+    if (!roomState) return;
+    const path = `${roomState.mountPath.replace(/\/+$/, "")}/${relativePath}`;
+    await this.vaultAdapter.write(path, text);
+  }
+
   private resetSessionState(): void {
     this.visibleRooms = [];
     this.teams = [];
@@ -978,7 +1149,47 @@ export default class VaultRoomsPlugin extends Plugin {
         // registerMountedRoomWatcher already translates "rename" into a synthetic delete-old +
         // create-new pair (see classifyRenameEvent), so event.type here is always "create" |
         // "modify" | "delete".
-        coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
+        const changeType = event.type as "create" | "modify" | "delete";
+        // CRDT-managed files must never also go through the whole-file CAS lane (CLAUDE.md's
+        // dual-lane invariant) - a create/modify of a `.md` path in a CRDT-enabled room instead
+        // ensures a CRDT session is open (first-create allocates an epoch; an already-open bound
+        // editor already captured the edit live, and an unbound file gets reconciled against disk
+        // here). Delete always stays on the CAS lane regardless of room mode - see
+        // isCrdtManagedLocalChange's doc comment for why there is no separate CRDT delete message.
+        //
+        // CRDT mode is resolved via resolveRoomCrdtEnabled rather than a raw `visibleRooms.find(...)`
+        // lookup: visibleRooms is network-confirmed but empty until refreshRooms() first resolves
+        // (e.g. immediately after Obsidian starts) - looking it up alone would silently misroute a
+        // CRDT-managed file's local edit into this legacy CAS lane during that window, marking it
+        // dirty in a way a later remote CRDT update would mistake for a real conflict (see
+        // CLAUDE.md's post-hardware-testing audit notes for the bug this fixes).
+        const crdtEnabled = resolveRoomCrdtEnabled(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
+        if (isCrdtManagedLocalChange({ crdtEnabled }, changeType, relativePath)) {
+          void this.crdtSessionManager?.ensureSession(roomId, relativePath).catch((error) => {
+            console.error(`Vault Rooms: failed to open CRDT session for "${relativePath}"`, error);
+          });
+          return;
+        }
+        // A local delete of a CRDT-eligible path always stays on the CAS lane (see
+        // isCrdtManagedLocalChange's doc comment), but the server-side delete still bumps this
+        // path's epoch (contract 1.5) - forget the stale local session/known-epoch/persisted-state
+        // now, rather than leaving a window where an immediate local recreate at the same path
+        // would bind its editor to the old (pre-delete) document until a round trip to the server
+        // eventually notices the epoch moved on.
+        if (crdtEnabled && changeType === "delete" && isCrdtEligiblePath(relativePath)) {
+          void this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath).catch((error) => {
+            console.error(`Vault Rooms: failed to forget CRDT session for deleted "${relativePath}"`, error);
+          });
+        }
+        // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate
+        // basis to ever treat a local vault change as a real edit worth protecting - the watcher must
+        // be a complete no-op for it (never dirty-mark, never attempt a push), same resolver/fallback
+        // shape as resolveRoomCrdtEnabled above.
+        const canPushLocalEdits = resolveCanPushLocalEdits(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
+        if (!canPushLocalEdits) {
+          return;
+        }
+        coordinator.handleLocalChange(changeType, relativePath);
       },
       this.app.vault.configDir
     );
@@ -1015,12 +1226,34 @@ export default class VaultRoomsPlugin extends Plugin {
       unsubscribe();
     }
     this.roomWatchers.clear();
+    // CRDT session state is meaningless once detached from a specific server's rooms/epochs -
+    // tear it down alongside syncEngine below, and unbind every editor view live against it (not
+    // just the focused one - second-hardware-testing-round item 3).
+    this.crdtEditorController.unbindAll();
+    this.crdtSessionManager?.dispose();
+    this.crdtSessionManager = null;
     const server = this.getActiveServer();
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787"));
     if (!server) {
       this.renderOpenRoomsViews();
       return;
     }
+    this.crdtSessionManager = new CrdtSessionManager({
+      send: (message) => this.syncSocket?.sendCrdtMessage(message),
+      docStore: this.crdtDocStore,
+      isRoomCrdtEnabled: (roomId) => resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), this.settings.mountedRooms[roomId]),
+      readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
+      writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text)
+    });
+    // A session manager didn't exist a moment ago (unbindAll()/dispose() above tore down the
+    // previous one, if any) - retroactively re-run the full open-pane reconcile, so every note that
+    // was already open (e.g. Obsidian auto-restoring several panes on startup before this ran, which
+    // fires active-leaf-change/file-open ahead of onLayoutReady - see CLAUDE.md's post-hardware-
+    // testing audit notes) gets bound to its CRDT session retroactively instead of staying an unbound
+    // plain CM6 editor for the rest of the session - not just whichever pane happens to be focused
+    // (second-hardware-testing-round item 3). No-ops cleanly via syncOpenViews's empty-list handling
+    // when there are no open markdown panes.
+    this.handleActiveEditorChanged();
     for (const roomId of Object.keys(this.settings.mountedRooms)) {
       this.watchMountedRoom(roomId);
     }
@@ -1033,6 +1266,7 @@ export default class VaultRoomsPlugin extends Plugin {
       return;
     }
     const socket = new RoomSyncSocket(server, {
+      crdt: this.crdtSessionManager,
       // Unmounted rooms (see unmountRoom()/MountedRoomState.unmounted) keep their tracking so a
       // later remount can detect local edits made in the meantime, but must not receive live
       // remote changes/deletes while unmounted - returning undefined here reuses this class's
@@ -1054,6 +1288,15 @@ export default class VaultRoomsPlugin extends Plugin {
           for (const coordinator of this.roomCoordinators.values()) {
             coordinator.retryPending();
           }
+          // Fourth-hardware-testing-round finding: visibleRooms/mountedRooms only ever refresh on
+          // this device's own onLayoutReady() startup or a user-triggered action (Refresh button,
+          // setup/join/etc.) - a live reconnect on its own never re-fetches the room list. If this
+          // device's access to a room changed while it was disconnected (revoked then re-granted,
+          // or a brand-new grant made while offline), reconnecting alone left it stuck showing
+          // whatever visibleRooms happened to hold before the disconnect - "Refresh" was the only
+          // way out, and wasn't obvious after a real network drop or the other party's full app
+          // restart. Best-effort, matches the same fire-and-forget pattern already used at startup.
+          void this.refreshRooms({ notify: false }).catch(() => undefined);
         }
         this.renderOpenRoomsViews();
       },
@@ -1091,6 +1334,21 @@ export default class VaultRoomsPlugin extends Plugin {
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`Your access to ${room?.name ?? "a room"} was revoked.`);
+      },
+      onRoomModeChanged: (roomId, crdtEnabled) => {
+        // Mirrors resolveRoomCrdtEnabled's two sources of truth immediately, ahead of the fresh
+        // subscribe_room/room_snapshot this same message triggers (see syncWsClient.ts) - keeps
+        // both the persisted fallback and the live in-memory list correct without waiting on that
+        // round trip.
+        const roomState = this.settings.mountedRooms[roomId];
+        if (roomState && roomState.crdtEnabled !== crdtEnabled) {
+          roomState.crdtEnabled = crdtEnabled;
+          void this.saveSettings();
+        }
+        const visible = this.visibleRooms.find((candidate) => candidate.id === roomId);
+        if (visible) {
+          visible.crdtEnabled = crdtEnabled;
+        }
       }
     });
     socket.connect();
@@ -1205,4 +1463,20 @@ function isLoopbackUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Obsidian's public `Editor` API has no documented way to reach the underlying CM6 `EditorView` -
+ * `editor.cm` is a long-standing, widely-relied-upon (if undocumented) accessor community plugins
+ * have used since Obsidian's CM6 migration. Duck-typed (checked for a `dispatch` function) rather
+ * than an `instanceof EditorView` check, since the object reaching this accessor may have been
+ * constructed by Obsidian's own bundled copy of `@codemirror/view`, which `instanceof` cannot be
+ * relied on to match across separate module instances.
+ */
+function getCmEditorView(editor: Editor): EditorView | undefined {
+  const candidate = (editor as unknown as { cm?: unknown }).cm;
+  if (candidate && typeof (candidate as { dispatch?: unknown }).dispatch === "function") {
+    return candidate as EditorView;
+  }
+  return undefined;
 }

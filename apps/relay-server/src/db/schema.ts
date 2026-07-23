@@ -71,6 +71,10 @@ export type RoomRow = {
   conflict_policy: "keep_both" | "owner_wins";
   created_at: string;
   updated_at: string;
+  /** CRDT sync opt-in flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). SQLite
+   *  boolean (0/1), default 0. Only `.md` files in a room with this set to 1 use the CRDT lane;
+   *  everything else stays on the whole-file compare-and-swap lane. */
+  crdt_enabled: 0 | 1;
 };
 
 export type RoomCapabilityRow = {
@@ -105,6 +109,31 @@ export type FileRow = {
   deleted_at: string | null;
   updated_by_user_id: string | null;
   updated_at: string;
+  created_at: string;
+  /** Authoritative CRDT document epoch for this file (contract 1.9). Lives on the FileRow itself
+   *  (not in crdt_updates/crdt_snapshots) specifically so it survives purging those tables - after
+   *  a delete or recreate-at-same-path bumps it, the server never loses track of the current/next
+   *  epoch even though the old epoch's update log and snapshots are gone. Default 0; bumped
+   *  immediately on file delete (contract 1.5 "delete wins"), not deferred to recreate. */
+  crdt_epoch: number;
+};
+
+export type CrdtUpdateRow = {
+  id: string;
+  file_id: string;
+  epoch: number;
+  seq: number;
+  update_blob: string;
+  created_at: string;
+};
+
+export type CrdtSnapshotRow = {
+  id: string;
+  file_id: string;
+  epoch: number;
+  state_vector: string;
+  snapshot_blob: string;
+  up_to_seq: number;
   created_at: string;
 };
 

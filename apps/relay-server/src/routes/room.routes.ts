@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, normalizeRelativePath, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
+import { AppError, isCrdtEligiblePath, normalizeRelativePath, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
 import { evaluatePolicy, expandPreset } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageRoom } from "../db/repositories/relayRepository.js";
@@ -7,6 +7,7 @@ import type { RoomRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import type { CrdtDocManager } from "../sync/crdtDocManager.js";
 import { toInviteResponse, type InviteSecurityContext } from "./inviteResponse.js";
 
 const LISTED_PERMISSIONS: Permission[] = [
@@ -25,6 +26,10 @@ export type RoomRoutesOptions = {
   publicUrl: string;
   connectionRegistry?: ConnectionRegistry;
   security?: InviteSecurityContext;
+  /** Phase 6: needed so turning CRDT on for a room with pre-existing `.md` files can seed a fresh
+   *  Y.Doc for each one (contract 1.4/1.5's "conversion never discards content") - optional only so
+   *  tests/callers that never toggle crdtEnabled can omit it. */
+  crdtDocManager?: CrdtDocManager;
 };
 
 export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, options: RoomRoutesOptions): void {
@@ -108,11 +113,12 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       mountName: string;
       conflictPolicy: ConflictPolicy;
       capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
+      crdtEnabled: boolean;
     }>;
     validateRoomBody(body);
 
     try {
-      const updated = repo.updateRoom({
+      let updated = repo.updateRoom({
         roomId,
         actorUserId: principal.userId,
         name: body.name!,
@@ -122,6 +128,42 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         conflictPolicy: body.conflictPolicy,
         capabilities: body.capabilities ?? []
       });
+      // CRDT room-mode toggle (contract 1.11) - a distinct lifecycle transition from the settings
+      // above, so it gets its own repo method/audit action; broadcast lets an already-subscribed
+      // socket transition cleanly without forcing a reconnect. Turning CRDT ON for a room that
+      // already has existing .md files must seed a fresh CRDT document for each of them (Phase 6,
+      // contract 1.4/1.5's "conversion never discards content", at a NEW epoch since
+      // bumpFileCrdtEpoch/purgeCrdtState semantics apply even though there's nothing yet to purge)
+      // - never toggling OFF touches files at all: they simply keep being served from their last-
+      // materialized files/file_versions rows, same as always (verified by reading fileRepository.ts
+      // /crdtDocManager.ts - materialization already keeps that row fresh independent of the flag).
+      // The whole ON transition (flag flip + every per-file epoch bump/seed) goes through
+      // repo.durable(...) as one lifecycle operation, matching this codebase's established pattern
+      // for security/lifecycle transitions (see the epoch-bump code in Phase 2/4).
+      if (body.crdtEnabled !== undefined && body.crdtEnabled !== Boolean(updated.crdt_enabled)) {
+        const crdtEnabled = body.crdtEnabled;
+        // Snapshot which files need seeding, and their current text, before entering durable() -
+        // its callback must stay synchronous (sqlJsAdapter.ts's durable() contract), so any async
+        // read has to happen out here first.
+        const filesToSeed = crdtEnabled
+          ? repo
+              .listFiles(roomId)
+              .filter((file) => !file.deleted_at && isCrdtEligiblePath(file.relative_path))
+              .map((file) => ({ file, content: repo.latestFileVersion(file.id)?.content ?? "" }))
+          : [];
+        updated = await repo.durable(() => {
+          const room = repo.setRoomCrdtEnabled({ roomId, actorUserId: principal.userId, enabled: crdtEnabled });
+          for (const { file, content } of filesToSeed) {
+            const newEpoch = repo.bumpFileCrdtEpoch(file.id);
+            options.crdtDocManager?.createDocumentFromText(file.id, newEpoch, content, {
+              userId: principal.userId,
+              displayName: principal.userDisplayName
+            });
+          }
+          return room;
+        });
+        options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_mode_changed", roomId, crdtEnabled });
+      }
       const teamIds = repo.listUserTeams(principal.userId).map((team) => team.teamId);
       return { room: visibleRoom(repo, principal, updated, teamIds) ?? managedRoomResponse(repo, updated) };
     } catch (error) {
@@ -270,7 +312,9 @@ function toRoomResponse(room: RoomRow) {
     sourcePath: room.source_path,
     mountName: room.mount_name,
     ownerUserId: room.owner_user_id,
-    conflictPolicy: room.conflict_policy
+    conflictPolicy: room.conflict_policy,
+    // CRDT room-mode flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11).
+    crdtEnabled: Boolean(room.crdt_enabled)
   };
 }
 

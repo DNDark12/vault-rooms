@@ -383,7 +383,14 @@ export class VaultRoomsView extends ItemView {
 
     const cardActions = card.createDiv({ cls: "vault-rooms-room-actions" });
     if (canManage) {
-      const candidateFriends = this.plugin.friends.filter((friend) => !friend.revokedAt && !members?.some((member) => member.userId === friend.id));
+      // A *revoked* team member must still show up as a re-addable candidate - excluding anyone
+      // already present in `members` regardless of revoked status (the previous condition) meant a
+      // removed member could never be added back through this dropdown at all, since they'd stay
+      // permanently filtered out despite plugin.addFriendToTeam()/the server's addTeamMember()
+      // already correctly handling re-adding a revoked membership (it un-revokes the existing row).
+      const candidateFriends = this.plugin.friends.filter(
+        (friend) => !friend.revokedAt && !members?.some((member) => member.userId === friend.id && !member.revokedAt)
+      );
       if (candidateFriends.length > 0) {
         const addFriendRow = card.createDiv({ cls: "vault-rooms-add-friend-row" });
         const select = addFriendRow.createEl("select");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, resolveRoomMountPath, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
+import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, resolveRoomMountPath, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
@@ -148,6 +148,7 @@ describe("plugin sync core", () => {
     const room = {
       roomId: "room_1",
       mountPath: "Vault Rooms/demo/Projects Demo",
+      canPushLocalEdits: true,
       files: {
         "Board.md": { serverVersion: 1, serverSha256: "old", localSha256: await VaultSyncEngine.sha256("# Board\n"), dirty: false }
       }
@@ -163,6 +164,31 @@ describe("plugin sync core", () => {
     await engine.applyRemoteChange(room, { relativePath: "Board.md", version: 3, sha256: "newer", content: "# server wins\n" }, "B laptop");
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# server wins\n");
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe("# local draft\n");
+  });
+
+  it("applyRemoteChange never forks a conflict copy for a room this device can't push to, even when `dirty` is (incorrectly) true from stale pre-fix state", async () => {
+    // Third-hardware-testing-round item 1: a real user's device may already have a persisted
+    // `dirty: true` entry from before this fix landed (the original bug marked read-only members'
+    // local divergence dirty unconditionally). Once canPushLocalEdits is known to be false, that
+    // stale flag must never cause a conflict-copy fork - the remote content just applies silently.
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api, () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      canPushLocalEdits: false,
+      files: {
+        "Board.md": { serverVersion: 2, serverSha256: "old", localSha256: "local", dirty: true }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# local edit that should never have been tracked as dirty\n");
+
+    await engine.applyRemoteChange(room, { relativePath: "Board.md", version: 3, sha256: "newer", content: "# server wins\n" }, "B laptop");
+
+    expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# server wins\n");
+    expect(await vault.exists("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe(false);
+    expect(room.files["Board.md"]).toMatchObject({ serverVersion: 3, serverSha256: "newer", dirty: false });
   });
 
   it("ignores remote changes and deletes that are not newer than tracked state", async () => {
@@ -190,6 +216,7 @@ describe("plugin sync core", () => {
     const room = {
       roomId: "room_1",
       mountPath: "Vault Rooms/demo/Projects Demo",
+      canPushLocalEdits: true,
       files: {
         "Board.md": { serverVersion: 2, serverSha256: "old", localSha256: "local", dirty: true }
       }
@@ -292,6 +319,7 @@ describe("plugin sync core", () => {
     const room = {
       roomId: "room_1",
       mountPath: "Vault Rooms/demo/Projects Demo",
+      canPushLocalEdits: true,
       files: {
         "Board.md": { serverVersion: 2, serverSha256: "server-2", localSha256: await VaultSyncEngine.sha256("# synced\n"), dirty: false },
         "Untouched.md": { serverVersion: 1, serverSha256: "server-1", localSha256: await VaultSyncEngine.sha256("# same\n"), dirty: false }
@@ -304,6 +332,27 @@ describe("plugin sync core", () => {
 
     expect(room.files["Board.md"]?.dirty).toBe(true);
     expect(room.files["Untouched.md"]?.dirty).toBe(false);
+  });
+
+  it("reconcileLocalEdits never marks a path dirty for a room this device can't push to, even with a genuine on-disk hash divergence", async () => {
+    // Third-hardware-testing-round item 1: a reader-permission member's local file divergence must
+    // always silently defer to the synced version - it must never be dirty-tracked (which is what
+    // eventually drives a push attempt/conflict-fork), regardless of how real the divergence is.
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      canPushLocalEdits: false,
+      files: {
+        "Board.md": { serverVersion: 2, serverSha256: "server-2", localSha256: await VaultSyncEngine.sha256("# synced\n"), dirty: false }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# a local edit this reader never intentionally made\n");
+
+    await engine.reconcileLocalEdits(room);
+
+    expect(room.files["Board.md"]?.dirty).toBe(false);
   });
 
   it("pushLocalChange recreates a remotely-deleted (tombstoned) file with baseVersion 0, not the tombstone's stale version", async () => {
@@ -337,6 +386,57 @@ describe("plugin sync core", () => {
     expect(room.files["Board.md"]).toMatchObject({ serverVersion: 3, serverSha256: "server-3", dirty: false });
   });
 
+  it("reconcileLocalEdits skips a CRDT-managed .md file even when its on-disk hash has drifted (legitimate CRDT-lane edits), but still marks a non-.md file in the same CRDT-enabled room dirty for the same drift", async () => {
+    // Regression test for second-hardware-testing-round item 2: a CRDT-managed .md file's on-disk
+    // content changes constantly and legitimately via the CRDT lane (yCollab live edits,
+    // CrdtSessionManager's materialize write-back) - none of which ever touch
+    // tracked.localSha256 (that bookkeeping belongs to the CAS lane, which CRDT edits bypass
+    // entirely by design). Without this guard, reconcileLocalEdits (called on every (re)mount) sees
+    // the hash mismatch and marks the file dirty purely as an artifact of stale bookkeeping - the
+    // next room_snapshot/remote_file_change for that path then forks a spurious conflict copy.
+    // "Asset.txt" is deliberately non-.md (contract 1.1: CRDT eligibility is .md-only) - even in a
+    // CRDT-enabled room, it stays on the ordinary CAS lane and must still be marked dirty for a real
+    // hash mismatch, same as before this fix.
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      crdtEnabled: true,
+      canPushLocalEdits: true,
+      files: {
+        "CrdtNote.md": { serverVersion: 2, serverSha256: "server-2", localSha256: await VaultSyncEngine.sha256("# synced\n"), dirty: false },
+        "Asset.txt": { serverVersion: 1, serverSha256: "server-1", localSha256: await VaultSyncEngine.sha256("same\n"), dirty: false }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/CrdtNote.md", "# live-edited via the CRDT lane\n");
+    await vault.write("Vault Rooms/demo/Projects Demo/Asset.txt", "edited while unmounted\n");
+
+    await engine.reconcileLocalEdits(room);
+
+    expect(room.files["CrdtNote.md"]?.dirty).toBe(false);
+    expect(room.files["Asset.txt"]?.dirty).toBe(true);
+  });
+
+  it("reconcileLocalEdits still marks a .md file dirty for a hash mismatch in a room that is not CRDT-enabled (normal case, unaffected by the CRDT skip above)", async () => {
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      crdtEnabled: false,
+      canPushLocalEdits: true,
+      files: {
+        "Board.md": { serverVersion: 2, serverSha256: "server-2", localSha256: await VaultSyncEngine.sha256("# synced\n"), dirty: false }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# edited while unmounted\n");
+
+    await engine.reconcileLocalEdits(room);
+
+    expect(room.files["Board.md"]?.dirty).toBe(true);
+  });
+
   it("reconcileLocalEdits leaves already-dirty files and missing local files untouched", async () => {
     const vault = new FakeVaultAdapter();
     const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-07-06T12:00:00Z"));
@@ -354,5 +454,42 @@ describe("plugin sync core", () => {
 
     expect(room.files["AlreadyDirty.md"]?.dirty).toBe(true);
     expect(room.files["Missing.md"]?.dirty).toBe(false);
+  });
+});
+
+describe("resolveRoomCrdtEnabled", () => {
+  it("prefers the freshest visibleRooms entry when present, regardless of the persisted fallback", () => {
+    expect(resolveRoomCrdtEnabled({ crdtEnabled: true }, { crdtEnabled: false })).toBe(true);
+    expect(resolveRoomCrdtEnabled({ crdtEnabled: false }, { crdtEnabled: true })).toBe(false);
+  });
+
+  it("falls back to the persisted MountedRoomState.crdtEnabled when visibleRooms has no entry for the room yet", () => {
+    // This is the startup-window case: visibleRooms is still empty/stale (refreshRooms() hasn't
+    // resolved yet), but the client already has a last-known persisted value from a previous
+    // session - see CLAUDE.md's post-hardware-testing audit notes.
+    expect(resolveRoomCrdtEnabled(undefined, { crdtEnabled: true })).toBe(true);
+    expect(resolveRoomCrdtEnabled(undefined, { crdtEnabled: false })).toBe(false);
+  });
+
+  it("defaults to false when neither visibleRooms nor a persisted value is available", () => {
+    expect(resolveRoomCrdtEnabled(undefined, undefined)).toBe(false);
+    expect(resolveRoomCrdtEnabled(undefined, {})).toBe(false);
+  });
+});
+
+describe("resolveCanPushLocalEdits", () => {
+  it("prefers the freshest visibleRooms entry's permissions when present, regardless of the persisted fallback", () => {
+    expect(resolveCanPushLocalEdits({ permissions: ["room:read", "file:read", "sync:subscribe", "sync:push"] }, { canPushLocalEdits: false })).toBe(true);
+    expect(resolveCanPushLocalEdits({ permissions: ["room:read", "file:read", "sync:subscribe"] }, { canPushLocalEdits: true })).toBe(false);
+  });
+
+  it("falls back to the persisted MountedRoomState.canPushLocalEdits when visibleRooms has no entry for the room yet", () => {
+    expect(resolveCanPushLocalEdits(undefined, { canPushLocalEdits: true })).toBe(true);
+    expect(resolveCanPushLocalEdits(undefined, { canPushLocalEdits: false })).toBe(false);
+  });
+
+  it("defaults to false (the safe default) when neither visibleRooms nor a persisted value is available", () => {
+    expect(resolveCanPushLocalEdits(undefined, undefined)).toBe(false);
+    expect(resolveCanPushLocalEdits(undefined, {})).toBe(false);
   });
 });

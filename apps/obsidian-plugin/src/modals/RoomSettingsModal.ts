@@ -21,6 +21,9 @@ export class RoomSettingsModal extends Modal {
   /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
   private mountNameTouched = false;
   private conflictPolicy: "keep_both" | "owner_wins";
+  // CRDT room-mode toggle (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11, Phase 6
+  // UI) - default off, matches RoomSummary.crdtEnabled's server default for a freshly created room.
+  private crdtEnabled: boolean;
   private capabilities: CapabilityDraft[];
   private aclRules: AclRuleSummary[] = [];
   private subjectType: "team" | "user" = "team";
@@ -39,6 +42,7 @@ export class RoomSettingsModal extends Modal {
     this.sourcePath = room.sourcePath;
     this.mountName = room.mountName;
     this.conflictPolicy = room.conflictPolicy;
+    this.crdtEnabled = room.crdtEnabled;
     this.localMountPath = plugin.settings.roomMountPaths[room.id] ?? plugin.roomMountPathFor(room);
     this.capabilities = room.capabilities.map((capability) => ({
       pluginId: capability.pluginId,
@@ -145,6 +149,18 @@ export class RoomSettingsModal extends Modal {
             this.conflictPolicy = value as "keep_both" | "owner_wins";
           })
       );
+    if (this.isOwnRoom()) {
+      new Setting(parent)
+        .setName("Live editing (CRDT sync)")
+        .setDesc(
+          "Experimental, opt-in, and Markdown-only: lets multiple people type in the same note at the same time, merging edits automatically instead of the usual conflict-copy behavior above. Applies only to this room's .md files - other file types keep syncing as whole-file pushes either way. Vault Rooms builds from before this feature can still read notes in this mode, but cannot push a direct edit to one - they're told to upgrade instead."
+        )
+        .addToggle((toggle) =>
+          toggle.setValue(this.crdtEnabled).onChange((value) => {
+            this.crdtEnabled = value;
+          })
+        );
+    }
   }
 
   private isOwnRoom(): boolean {
@@ -223,7 +239,8 @@ export class RoomSettingsModal extends Modal {
               sourcePath: this.sourcePath,
               mountName: this.mountName,
               conflictPolicy: this.conflictPolicy,
-              capabilities: this.capabilities
+              capabilities: this.capabilities,
+              ...(this.isOwnRoom() ? { crdtEnabled: this.crdtEnabled } : {})
             },
             this.localMountPath
           );

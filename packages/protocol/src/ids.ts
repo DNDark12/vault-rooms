@@ -13,7 +13,9 @@ export type IdPrefix =
   | "aud"
   | "req"
   | "srv"
-  | "rot";
+  | "rot"
+  | "cru"
+  | "crs";
 
 export function createId(prefix: IdPrefix): string {
   return `${prefix}_${randomBytes(12).toString("base64url")}`;

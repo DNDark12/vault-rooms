@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { createApp } from "../src/app.js";
 import type { RelayRepository } from "../src/db/repositories/relayRepository.js";
 import { ConnectionRegistry } from "../src/sync/connectionRegistry.js";
+import type { CrdtDocManager } from "../src/sync/crdtDocManager.js";
 import { handleSyncSocket, type SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
@@ -694,7 +695,8 @@ describe("WebSocket admission timeout", () => {
       maxFileBytes: 1024,
       maxConnections: 5,
       transport: "http",
-      timerHost: timers
+      timerHost: timers,
+      crdtDocManager: {} as unknown as CrdtDocManager
     });
 
     expect(registry.size()).toBe(1);
@@ -723,7 +725,8 @@ describe("WebSocket admission timeout", () => {
       maxFileBytes: 1024,
       maxConnections: 5,
       transport: "http",
-      timerHost: timers
+      timerHost: timers,
+      crdtDocManager: {} as unknown as CrdtDocManager
     });
     authenticated.emitMessage(JSON.stringify({
       type: "hello",

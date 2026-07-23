@@ -1,6 +1,33 @@
 import esbuild from "esbuild";
 import builtins from "builtin-modules";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
+const here = fileURLToPath(new URL(".", import.meta.url));
+
+// yjs (and transitively y-codemirror.next) depend on lib0, whose logging/environment-detection
+// modules read `process.env`/`process.argv`/`process.stdout.isTTY` at module load time and call
+// `console.log` for their generic "print" helper - both of which are things this bundle must never
+// contain (CLAUDE.md rules 3 and 13). Neither is reachable through a `define`-able static branch
+// (lib0/environment.js's `getVariable` does a *dynamic* `process.env[computedKey]` lookup, not a
+// literal `process.env.NAME` esbuild's `define` can match), so this plugin substitutes lib0's own
+// logging/environment modules for local shims that preserve their exported API but never touch
+// `process.env` and never call `console.log` (see src/vendor-shims/lib0-*.js for the full
+// rationale). The filter matches the *resolved* absolute path, so it applies no matter which of
+// lib0's node/browser/bun export conditions esbuild would otherwise have picked.
+const lib0ShimPlugin = {
+  name: "lib0-shims",
+  setup(build) {
+    build.onLoad({ filter: /\/lib0\/environment\.js$/ }, async () => ({
+      contents: await readFile(here + "src/vendor-shims/lib0-environment.js", "utf8"),
+      loader: "js"
+    }));
+    build.onLoad({ filter: /\/lib0\/logging(\.node)?\.js$/ }, async () => ({
+      contents: await readFile(here + "src/vendor-shims/lib0-logging.js", "utf8"),
+      loader: "js"
+    }));
+  }
+};
 
 const result = await esbuild.build({
   entryPoints: ["src/main.ts"],
@@ -17,6 +44,7 @@ const result = await esbuild.build({
     "process.env.WS_NO_BUFFER_UTIL": "true",
     "process.env.WS_NO_UTF_8_VALIDATE": "true"
   },
+  plugins: [lib0ShimPlugin],
   external: ["obsidian", "electron", "bufferutil", "utf-8-validate", "@codemirror/autocomplete", "@codemirror/collab", "@codemirror/commands", "@codemirror/language", "@codemirror/lint", "@codemirror/search", "@codemirror/state", "@codemirror/view", "@lezer/common", "@lezer/highlight", "@lezer/lr", ...builtins],
   format: "cjs",
   platform: "node",

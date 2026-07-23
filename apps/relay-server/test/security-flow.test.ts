@@ -296,9 +296,16 @@ describe("shared REST and WebSocket transport enforcement", () => {
         isServerOwner: true,
         tokenSecurity: "plain"
       },
-      subscriptions: new Set()
+      subscriptions: new Set(),
+      capabilities: { crdt: false }
     });
-    registry.add({ id: "unauthenticated", socket: socket(unauthenticatedMessages), principal: null, subscriptions: new Set() });
+    registry.add({
+      id: "unauthenticated",
+      socket: socket(unauthenticatedMessages),
+      principal: null,
+      subscriptions: new Set(),
+      capabilities: { crdt: false }
+    });
 
     registry.broadcastAuthenticated({
       type: "security_upgrade_available",

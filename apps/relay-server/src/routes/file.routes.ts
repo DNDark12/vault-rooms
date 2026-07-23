@@ -1,13 +1,19 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, isEligiblePath, normalizeRelativePath } from "@vault-rooms/protocol";
+import { AppError, isCrdtEligiblePath, isEligiblePath, normalizeRelativePath } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import type { CrdtDocManager } from "../sync/crdtDocManager.js";
 
 export type FileRoutesOptions = {
   maxFileBytes: number;
   connectionRegistry?: ConnectionRegistry;
+  /** Phase 6: needed for the legacy-write-policy rejection (contract 1.4) and to evict a deleted
+   *  file's cached CRDT doc via this REST delete route - the WS file_delete branch already does
+   *  the same eviction (Phase 4); optional only so tests that don't exercise the CRDT lane can omit
+   *  it. */
+  crdtDocManager?: CrdtDocManager;
 };
 
 export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, options: FileRoutesOptions): void {
@@ -64,6 +70,17 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     if (!isEligiblePath(relativePath)) {
       throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (supported: Markdown/text/canvas/JSON/CSV, common image formats, and PDF).", 422);
     }
+    // Legacy write policy (contract 1.4, decided as "reject") - see the identical check in
+    // syncServer.ts's file_change branch for the WS equivalent. GET (this route's read sibling)
+    // is unaffected: it keeps serving the materialized files/file_versions row CrdtDocManager's
+    // debounced materialize keeps fresh, for both CRDT-capable and legacy clients.
+    if (room.crdt_enabled && isCrdtEligiblePath(relativePath)) {
+      throw new AppError(
+        "CRDT_WRITE_UNSUPPORTED",
+        "This room has CRDT sync enabled for this file - use the CRDT sync message types (or upgrade) instead of a whole-file write.",
+        409
+      );
+    }
     if (Buffer.byteLength(body.content, "utf8") > options.maxFileBytes) {
       throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
     }
@@ -116,12 +133,20 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     const relativePath = normalizeRelativePath(body.relativePath);
     assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });
     assertRoomPermission({ repo, principal, room, permission: "file:delete", relativePath });
+    // Contract 1.5: deleteFile() already bumps files.crdt_epoch and purges the old epoch's durable
+    // CRDT rows transactionally - this just closes the loop on the in-memory cache too, mirroring
+    // the WS file_delete branch (Phase 4 left this REST route as a known memory-hygiene gap,
+    // harmless but noted, closed here in Phase 6). Inert for a file that never had a CRDT document.
+    const beforeDelete = repo.getFile(room.id, relativePath);
     const result = repo.deleteFile({
       roomId: room.id,
       relativePath,
       baseVersion: body.baseVersion,
       actorUserId: principal.userId
     });
+    if (beforeDelete) {
+      options.crdtDocManager?.evictDocument(beforeDelete.id, beforeDelete.crdt_epoch);
+    }
     const fileDeleteAclRules = repo.listAclRulesForRoom(room.id);
     options.connectionRegistry?.broadcastToRoom(
       room.id,

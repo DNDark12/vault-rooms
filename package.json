@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev:server": "pnpm --filter vault-rooms-relay dev",
-    "build:plugin": "pnpm --filter @vault-rooms/obsidian-plugin build && node scripts/sync-plugin-assets.mjs",
+    "build:plugin": "pnpm --filter @vault-rooms/obsidian-plugin build && node scripts/sync-plugin-assets.mjs && node scripts/scan-bundle.mjs",
     "typecheck": "tsc -b",
     "test": "vitest run"
   },

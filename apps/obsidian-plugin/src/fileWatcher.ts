@@ -1,4 +1,4 @@
-import { isEligiblePath } from "@vault-rooms/protocol";
+import { isCrdtEligiblePath, isEligiblePath } from "@vault-rooms/protocol";
 import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "./syncClient.js";
 
 /** Shared by isWatchableChange (single-path events) and classifyRenameEvent (each side of a
@@ -33,6 +33,25 @@ function relativePathIfWatchable(path: string, room: MountedRoomState, configDir
 
 export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomState, configDir: string): string | null {
   return relativePathIfWatchable(event.path, room, configDir);
+}
+
+/**
+ * Decides whether a local vault change to `relativePath` in a CRDT-enabled room must be routed
+ * through the CRDT lane (crdtSession.ts) instead of the whole-file CAS lane (pushCoordinator.ts) -
+ * per CLAUDE.md's dual-lane invariant, CRDT files must never go through both.
+ *
+ * Only "create"/"modify" of a `.md` path route to the CRDT lane: a create is the client's
+ * first-create flow (contract 1.10, `crdt_create`), and a modify is normally already captured
+ * live by the bound CM6 editor (see crdtEditorBinding.ts) - routing the resulting vault "modify"
+ * event here too lets an *unbound* file (edited by something that doesn't speak CRDT while the
+ * plugin's editor binding wasn't attached, e.g. another app, or the file just isn't open) still get
+ * reconciled. A "delete" always stays on the CAS lane regardless of room mode: there is no separate
+ * CRDT delete message (contract 1.5's destructive epoch-bump lifecycle is driven by the existing
+ * `file:delete`/REST delete path, which the server already handles), so excluding "delete" here
+ * would silently drop the request to delete the file server-side.
+ */
+export function isCrdtManagedLocalChange(room: { crdtEnabled: boolean }, eventType: "create" | "modify" | "delete", relativePath: string): boolean {
+  return room.crdtEnabled && eventType !== "delete" && isCrdtEligiblePath(relativePath);
 }
 
 export type RenameClassification =

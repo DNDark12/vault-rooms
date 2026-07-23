@@ -30,8 +30,10 @@ import type {
 } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
 import { RelayFileRepository, type FileDeleteResult, type FileWriteResult } from "./fileRepository.js";
+import { RelayCrdtRepository, type CrdtSnapshot } from "./crdtRepository.js";
 
 export type { FileDeleteResult, FileWriteResult } from "./fileRepository.js";
+export type { CrdtSnapshot } from "./crdtRepository.js";
 
 export type DevicePrincipal = {
   deviceId: string;
@@ -74,12 +76,15 @@ export type JoinInviteResult = BootstrapResult & InviteGrantResult;
 
 export class RelayRepository {
   private readonly files: RelayFileRepository;
+  private readonly crdt: RelayCrdtRepository;
 
   constructor(private readonly db: RelayDb) {
+    this.crdt = new RelayCrdtRepository(db);
     this.files = new RelayFileRepository(
       db,
       (input) => this.audit(input),
-      (roomId) => this.getRoom(roomId)
+      (roomId) => this.getRoom(roomId),
+      (fileId) => this.bumpFileCrdtEpochStatements(fileId)
     );
   }
 
@@ -764,6 +769,32 @@ export class RelayRepository {
     return updated;
   }
 
+  /** Room-mode toggle (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). Separate
+   *  from `updateRoom` since it's a distinct lifecycle concern with its own audit action, not just
+   *  another settings field - Phase 6 hooks Y.Doc seeding onto this same transition once
+   *  `CrdtDocManager` exists (contract 1.10's "conversion writes the current file text as the
+   *  initial Y.Doc state"). */
+  setRoomCrdtEnabled(input: { roomId: string; actorUserId: string; enabled: boolean }): RoomRow {
+    const set = this.db.transaction(() => {
+      this.db.prepare("update rooms set crdt_enabled = ?, updated_at = ? where id = ?").run(input.enabled ? 1 : 0, new Date().toISOString(), input.roomId);
+      this.audit({
+        teamId: null,
+        actorType: "user",
+        actorId: input.actorUserId,
+        action: input.enabled ? "room.crdt_enabled" : "room.crdt_disabled",
+        resourceType: "room",
+        resourceId: input.roomId,
+        metadata: {}
+      });
+    });
+    set();
+    const updated = this.getRoom(input.roomId);
+    if (!updated) {
+      throw new Error("Failed to update room");
+    }
+    return updated;
+  }
+
   deleteAclRule(input: { aclId: string; roomId: string; actorUserId: string }): void {
     const rule = this.db.prepare("select * from acl_rules where id = ? and room_id = ?").get(input.aclId, input.roomId) as AclRuleRow | undefined;
     if (!rule) {
@@ -832,7 +863,47 @@ export class RelayRepository {
     remove();
   }
 
+  /**
+   * Third-hardware-testing-round item 2: a fresh "allow" rule must supersede any existing "deny"
+   * rule that would otherwise permanently block it, since `evaluatePolicy` (packages/policy-engine)
+   * checks deny rules before allow rules regardless of which was created more recently - a member
+   * revoked via a `deny` rule (the room-settings UI's natural, intuitive way to "remove access")
+   * could otherwise never be re-granted access at all, even by a brand-new `allow` grant.
+   *
+   * Scoped deliberately narrow: only reconciles a deny rule for the *exact same*
+   * (roomId, subjectType, subjectId, pathPattern) tuple as the new allow rule - no attempt at
+   * general partial-path-overlap reconciliation across different `pathPattern` strings (out of
+   * scope; the UI/tests always use "**\/*" for whole-room grants, so exact-tuple matching already
+   * covers the reported bug). For each matched deny rule: if the new allow grant's permissions fully
+   * cover the deny rule's permissions, the deny rule is deleted outright (this is the common case -
+   * a reader/editor preset re-grant covering exactly what an earlier "remove access" deny blocked).
+   * If only some of the deny rule's permissions are covered, the deny rule is narrowed to keep just
+   * the non-overlapping permissions, so it keeps doing useful work for whatever the new allow grant
+   * doesn't cover. A deny rule with no overlap at all is left untouched.
+   *
+   * Runs in the same transaction as the insert below so the delete/update-and-insert is atomic - no
+   * crash window where the deny row is gone but the new allow row never landed, or vice versa.
+   *
+   * This is the public entry point (opens its own transaction) for callers with no transaction of
+   * their own already open (the `POST /api/rooms/:roomId/acl` route). `RelayDb.transaction()` has no
+   * nesting/savepoint support (see sqlJsAdapter.ts - it unconditionally issues a raw `BEGIN`), so a
+   * caller that's already inside a transaction (e.g. `joinInvite`/`acceptInviteWithinTransaction`,
+   * via `upsertRoomInviteGrant`) must call `createAclRuleWithinTransaction` directly instead of this
+   * method, or the nested `BEGIN` fails outright.
+   */
   createAclRule(input: {
+    roomId: string;
+    actorUserId: string;
+    subjectType: SubjectType;
+    subjectId: string;
+    effect: AclEffect;
+    permissions: Permission[];
+    pathPattern: string;
+  }): AclRule {
+    return this.db.transaction(() => this.createAclRuleWithinTransaction(input))();
+  }
+
+  private createAclRuleWithinTransaction(input: {
     roomId: string;
     actorUserId: string;
     subjectType: SubjectType;
@@ -843,6 +914,9 @@ export class RelayRepository {
   }): AclRule {
     const now = new Date().toISOString();
     const id = createId("acl");
+    if (input.effect === "allow") {
+      this.supersedeConflictingDenyRules(input, now);
+    }
     this.db
       .prepare("insert into acl_rules(id, room_id, subject_type, subject_id, effect, permissions_json, path_pattern, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)")
       .run(id, input.roomId, input.subjectType, input.subjectId, input.effect, JSON.stringify(input.permissions), input.pathPattern, now);
@@ -867,6 +941,50 @@ export class RelayRepository {
     };
   }
 
+  private supersedeConflictingDenyRules(
+    input: { roomId: string; actorUserId: string; subjectType: SubjectType; subjectId: string; permissions: Permission[]; pathPattern: string },
+    now: string
+  ): void {
+    const conflictingDenyRules = (
+      this.db
+        .prepare(
+          "select * from acl_rules where room_id = ? and subject_type = ? and subject_id = ? and path_pattern = ? and effect = 'deny'"
+        )
+        .all(input.roomId, input.subjectType, input.subjectId, input.pathPattern) as AclRuleRow[]
+    ).map(mapAclRule);
+    for (const denyRule of conflictingDenyRules) {
+      const remainingPermissions = denyRule.permissions.filter((permission) => !input.permissions.includes(permission));
+      if (remainingPermissions.length === denyRule.permissions.length) {
+        // No overlap at all - this deny rule isn't in conflict with the new allow grant, leave it.
+        continue;
+      }
+      if (remainingPermissions.length === 0) {
+        this.db.prepare("delete from acl_rules where id = ?").run(denyRule.id);
+      } else {
+        this.db.prepare("update acl_rules set permissions_json = ? where id = ?").run(JSON.stringify(remainingPermissions), denyRule.id);
+      }
+      this.audit({
+        teamId: null,
+        actorType: "user",
+        actorId: input.actorUserId,
+        action: "acl.deny_superseded",
+        resourceType: "room",
+        resourceId: input.roomId,
+        metadata: {
+          supersededAclId: denyRule.id,
+          subjectType: input.subjectType,
+          subjectId: input.subjectId,
+          pathPattern: input.pathPattern,
+          supersededByPermissions: input.permissions,
+          removedPermissions: denyRule.permissions.filter((permission) => input.permissions.includes(permission)),
+          remainingPermissions,
+          deleted: remainingPermissions.length === 0,
+          at: now
+        }
+      });
+    }
+  }
+
   listAclRulesForRoom(roomId: string): AclRule[] {
     return (this.db.prepare("select * from acl_rules where room_id = ? order by created_at asc").all(roomId) as AclRuleRow[]).map(mapAclRule);
   }
@@ -877,6 +995,10 @@ export class RelayRepository {
 
   getFile(roomId: string, relativePath: string): FileRow | null {
     return this.files.getFile(roomId, relativePath);
+  }
+
+  getFileById(fileId: string): FileRow | null {
+    return this.files.getFileById(fileId);
   }
 
   readFileContent(roomId: string, relativePath: string): { file: FileRow; content: string } {
@@ -893,6 +1015,53 @@ export class RelayRepository {
 
   latestFileVersion(fileId: string): FileVersionWithContentRow | null {
     return this.files.latestFileVersion(fileId);
+  }
+
+  // --- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 2) ---
+
+  /** Bumps a file's authoritative CRDT epoch (contract 1.9) and purges the old epoch's update
+   *  log/snapshots (contract 1.5), transactionally. Standalone entry point for callers outside a
+   *  delete (e.g. Phase 4's explicit epoch management); `deleteFile` calls the non-transactional
+   *  `bumpFileCrdtEpochStatements` form directly so it stays atomic with its own tombstone update. */
+  bumpFileCrdtEpoch(fileId: string): number {
+    return this.db.transaction(() => this.bumpFileCrdtEpochStatements(fileId))();
+  }
+
+  private bumpFileCrdtEpochStatements(fileId: string): number {
+    const row = this.db.prepare("select crdt_epoch from files where id = ?").get(fileId) as { crdt_epoch: number } | undefined;
+    const currentEpoch = row?.crdt_epoch ?? 0;
+    const newEpoch = currentEpoch + 1;
+    this.db.prepare("update files set crdt_epoch = ? where id = ?").run(newEpoch, fileId);
+    this.crdt.purgeCrdtStateStatements(fileId, currentEpoch);
+    return newEpoch;
+  }
+
+  appendCrdtUpdate(fileId: string, epoch: number, updateBase64: string): number {
+    return this.crdt.appendCrdtUpdate(fileId, epoch, updateBase64);
+  }
+
+  listCrdtUpdatesSince(fileId: string, epoch: number, sinceSeq: number): Array<{ seq: number; update: string }> {
+    return this.crdt.listCrdtUpdatesSince(fileId, epoch, sinceSeq);
+  }
+
+  writeCrdtSnapshot(fileId: string, epoch: number, stateVectorBase64: string, snapshotBase64: string, upToSeq: number): void {
+    this.crdt.writeCrdtSnapshot(fileId, epoch, stateVectorBase64, snapshotBase64, upToSeq);
+  }
+
+  getLatestCrdtSnapshot(fileId: string, epoch: number): CrdtSnapshot | null {
+    return this.crdt.getLatestCrdtSnapshot(fileId, epoch);
+  }
+
+  purgeCrdtState(fileId: string, epoch: number): void {
+    this.crdt.purgeCrdtState(fileId, epoch);
+  }
+
+  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string }): { fileId: string; epoch: number } {
+    return this.files.createCrdtFile(input);
+  }
+
+  materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string }): { version: number; sha256: string } | null {
+    return this.files.materializeCrdtContent(input);
   }
 
   getTeam(teamId: string): TeamRow | null {
@@ -1076,7 +1245,10 @@ export class RelayRepository {
       });
       return;
     }
-    this.createAclRule({
+    // upsertRoomInviteGrant is always called from within an already-open transaction
+    // (joinInvite/acceptInviteWithinTransaction) - use the non-transaction-opening variant, not the
+    // public createAclRule (see its doc comment on why nesting RelayDb.transaction() calls breaks).
+    this.createAclRuleWithinTransaction({
       roomId,
       actorUserId,
       subjectType: "user",

@@ -20,6 +20,10 @@ export type RoomMountControllerDeps = Pick<
   stopWatchingRoom(roomId: string): void;
   watchMountedRoom(roomId: string): void;
   subscribeRoom(roomId: string): void;
+  /** Drops in-memory CRDT session state and deletes persisted CRDT documents for a room (contract
+   *  1.12: cleanup on leaving/unmounting a room). Optional so tests that don't touch the CRDT lane
+   *  don't need to stub it. */
+  disposeCrdtRoom?(roomId: string): void;
 };
 
 /** Owns local mount/unmount state, conflict discovery, and mount-time reconciliation. */
@@ -68,6 +72,13 @@ export class RoomMountController {
     state.mountPath = mountPath;
     state.serverId = server.id;
     state.unmounted = false;
+    // Third-hardware-testing-round item 1: mirror this device's actual write access onto the
+    // persisted state *before* reconcileLocalEdits/the "push anything unknown" loop below run, so
+    // both read the freshest permission instead of whatever was last persisted (possibly stale/
+    // unset on a first-ever mount). `room` is the RoomSummary this call was given directly, so no
+    // fallback-resolver is needed here - `permissions` is always present.
+    const canPushLocalEdits = room.permissions.includes("sync:push");
+    state.canPushLocalEdits = canPushLocalEdits;
 
     // Capture the engine once for this whole mount, so a mid-mount server switch cannot route the
     // remainder of the operation through the newly-active server's engine.
@@ -103,20 +114,26 @@ export class RoomMountController {
     // forever, since the local file watcher only reacts to *future* edits. Push anything under
     // mountPath the server has never heard of (skips anything it already knows about, including
     // tombstoned/deleted paths - those are intentional server-side deletions, not "missing" files).
-    const localPaths = await this.deps.vaultAdapter.list(mountPath);
-    const configDir = this.deps.app.vault.configDir.replace(/\/+$/, "");
-    for (const localPath of localPaths) {
-      if (!mountPath && (localPath === configDir || localPath.startsWith(`${configDir}/`))) {
-        continue;
-      }
-      const relativePath = mountPath ? localPath.slice(mountPath.length + 1) : localPath;
-      if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
-        continue;
-      }
-      try {
-        await syncEngine.pushLocalChange(state, relativePath, server.deviceName);
-      } catch (error) {
-        console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
+    //
+    // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate basis
+    // to ever push anything here - skip the whole loop rather than attempting (and silently
+    // swallowing failures for) pushes that can only ever be rejected server-side.
+    if (canPushLocalEdits) {
+      const localPaths = await this.deps.vaultAdapter.list(mountPath);
+      const configDir = this.deps.app.vault.configDir.replace(/\/+$/, "");
+      for (const localPath of localPaths) {
+        if (!mountPath && (localPath === configDir || localPath.startsWith(`${configDir}/`))) {
+          continue;
+        }
+        const relativePath = mountPath ? localPath.slice(mountPath.length + 1) : localPath;
+        if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
+          continue;
+        }
+        try {
+          await syncEngine.pushLocalChange(state, relativePath, server.deviceName);
+        } catch (error) {
+          console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
+        }
       }
     }
 
@@ -142,6 +159,10 @@ export class RoomMountController {
     if (roomState) {
       roomState.unmounted = true;
     }
+    // Contract 1.12: leaving/unmounting a room deletes its persisted CRDT documents - a later
+    // remount starts CRDT state fresh via crdt_create/the handshake rather than risk reloading a
+    // persisted doc that's gone stale relative to whatever happened on the server in the meantime.
+    this.deps.disposeCrdtRoom?.(roomId);
     await this.deps.saveSettings();
     this.deps.renderOpenRoomsViews();
     new Notice(`Unmounted ${room?.name ?? "room"}`);
@@ -162,6 +183,7 @@ export class RoomMountController {
     this.deps.stopWatchingRoom(roomId);
     delete this.deps.settings.mountedRooms[roomId];
     delete this.deps.settings.roomMountPaths[roomId];
+    this.deps.disposeCrdtRoom?.(roomId);
   }
 
   isRoomMounted(roomId: string): boolean {

@@ -152,6 +152,31 @@ export function runMigrations(db: RelayDb): void {
       ip_address text,
       created_at text not null
     );
+
+    -- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 2). Additive only - never
+    -- reset an existing database. crdt_updates/crdt_snapshots are keyed by (file_id, epoch) rather
+    -- than file_id alone so a purged/superseded epoch's rows are unambiguous and never mixed with
+    -- a later incarnation's (contract 1.5/1.9).
+    create table if not exists crdt_updates(
+      id text primary key,
+      file_id text not null,
+      epoch integer not null,
+      seq integer not null,
+      update_blob text not null,
+      created_at text not null,
+      unique(file_id, epoch, seq)
+    );
+
+    create table if not exists crdt_snapshots(
+      id text primary key,
+      file_id text not null,
+      epoch integer not null,
+      state_vector text not null,
+      snapshot_blob text not null,
+      up_to_seq integer not null,
+      created_at text not null,
+      unique(file_id, epoch)
+    );
   `);
 
   rebuildLegacyInvitesTable(db);
@@ -162,6 +187,8 @@ export function runMigrations(db: RelayDb): void {
   addColumnIfMissing(db, "rooms", "conflict_policy", "text not null default 'keep_both'");
   addColumnIfMissing(db, "devices", "last_transport", "text");
   addColumnIfMissing(db, "devices", "token_security", "text not null default 'plain'");
+  addColumnIfMissing(db, "rooms", "crdt_enabled", "integer not null default 0");
+  addColumnIfMissing(db, "files", "crdt_epoch", "integer not null default 0");
   if (upgradingV01) {
     db.prepare("insert or replace into server_meta(key, value) values ('legacy_v01_migrated', '1')").run();
   }

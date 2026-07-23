@@ -4,6 +4,7 @@ import { RoomSyncSocket, toWsUrl, type RoomSyncSocketDeps } from "./syncWsClient
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 import type { ServerConnection } from "./settings.js";
 import type { RelayApiClient } from "./apiClient.js";
+import type { CrdtWsBridge } from "./crdtSession.js";
 
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
 
@@ -60,6 +61,22 @@ class FakeApi implements RelayFileApi {
 
   async deleteFile(): Promise<{ ok: true; relativePath: string; version: number }> {
     throw new Error("not used in these tests");
+  }
+}
+
+/** Minimal CrdtWsBridge test double - the remote_file_change gating tests below only need
+ *  isSessionOpen() to return a fixed answer; the other three methods are never exercised there. */
+class FakeCrdtBridge implements CrdtWsBridge {
+  constructor(private readonly sessionOpen: boolean) {}
+
+  async handleServerMessage(): Promise<void> {}
+
+  handleRoomSnapshot(): void {}
+
+  onConnected(): void {}
+
+  isSessionOpen(): boolean {
+    return this.sessionOpen;
   }
 }
 
@@ -529,6 +546,133 @@ describe("RoomSyncSocket reconnect ordering", () => {
     await vi.waitFor(() => expect(room.files["Board.md"]?.serverVersion).toBe(2));
 
     expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("new");
+    socket.disconnect();
+  });
+});
+
+describe("RoomSyncSocket room_mode_changed", () => {
+  it("reports the new crdtEnabled flag via onRoomModeChanged and still re-subscribes a desired room", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const onRoomModeChanged = vi.fn();
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), onRoomModeChanged });
+
+    socket.subscribe("room_1");
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+    const subscribesBefore = sockets[0]?.sent.filter((raw) => JSON.parse(raw).type === "subscribe_room").length ?? 0;
+
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "room_mode_changed", roomId: "room_1", crdtEnabled: true }) });
+    await flushAsyncWork();
+
+    expect(onRoomModeChanged).toHaveBeenCalledWith("room_1", true);
+    const subscribesAfter = sockets[0]?.sent.filter((raw) => JSON.parse(raw).type === "subscribe_room").length ?? 0;
+    expect(subscribesAfter).toBe(subscribesBefore + 1);
+    socket.disconnect();
+  });
+
+  it("does not throw when onRoomModeChanged is not provided (optional dep)", async () => {
+    const socket = new RoomSyncSocket(createServer(), createDeps());
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+
+    await expect(handleMessage(JSON.stringify({ type: "room_mode_changed", roomId: "room_1", crdtEnabled: false }))).resolves.toBeUndefined();
+  });
+});
+
+// Second-hardware-testing-round item 1: a device that never opens a CRDT file's editor never
+// received live updates for it, because the relay used to exclude every CRDT-capable connection
+// from the materialized remote_file_change fallback broadcast on the assumption the CRDT lane
+// already delivered it via remote_crdt_update - which silently no-ops when no local session is
+// open. Now that the relay sends this broadcast to every subscriber regardless of capability (see
+// relayCore.ts), the client must decide whether to apply it: skip it when a live CRDT session
+// already owns this path (avoid clobbering in-flight editor state), apply it otherwise (this is
+// what keeps a never-opened CRDT file's on-disk copy fresh, and is unchanged behavior for any
+// ordinary non-CRDT path/room).
+describe("RoomSyncSocket remote_file_change CRDT session gating", () => {
+  function remoteFileChangeMessage(): string {
+    return JSON.stringify({
+      type: "remote_file_change",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      version: 1,
+      sha256: "sha-1",
+      content: "materialized snapshot",
+      updatedBy: { userId: "user_2", displayName: "Teammate" },
+      updatedAt: "2026-01-01"
+    });
+  }
+
+  it("does not apply a remote_file_change when a CRDT session is already open for the path", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const engine = new VaultSyncEngine(vault, new FakeApi());
+    const applySpy = vi.spyOn(engine, "applyRemoteChange");
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      syncEngine: engine,
+      crdt: new FakeCrdtBridge(true)
+    });
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("message", { data: remoteFileChangeMessage() });
+    await flushAsyncWork();
+
+    expect(applySpy).not.toHaveBeenCalled();
+    expect(vault.files.has("Vault Rooms/demo/Projects Demo/Board.md")).toBe(false);
+    socket.disconnect();
+  });
+
+  it("applies a remote_file_change as before when no CRDT session is open for the path", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const engine = new VaultSyncEngine(vault, new FakeApi());
+    const applySpy = vi.spyOn(engine, "applyRemoteChange");
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      syncEngine: engine,
+      crdt: new FakeCrdtBridge(false)
+    });
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("message", { data: remoteFileChangeMessage() });
+    await flushAsyncWork();
+
+    expect(applySpy).toHaveBeenCalledOnce();
+    expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("materialized snapshot");
+    socket.disconnect();
+  });
+
+  it("applies a remote_file_change as before when there is no CRDT bridge configured at all (non-CRDT room / legacy setup)", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const engine = new VaultSyncEngine(vault, new FakeApi());
+    const applySpy = vi.spyOn(engine, "applyRemoteChange");
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      syncEngine: engine
+    });
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("message", { data: remoteFileChangeMessage() });
+    await flushAsyncWork();
+
+    expect(applySpy).toHaveBeenCalledOnce();
+    expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("materialized snapshot");
     socket.disconnect();
   });
 });

@@ -14,6 +14,11 @@ export type SyncConnection = {
   socket: SyncSocket;
   principal: DevicePrincipal | null;
   subscriptions: Set<string>;
+  // Capability negotiation (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.2). Defaults
+  // to { crdt: false } until a "hello" with capabilities.crdt=true is processed - absent/older
+  // clients never advertise CRDT support, so fanout branching in later phases can trust this
+  // rather than re-deriving it from message.client.version.
+  capabilities: { crdt: boolean };
 };
 
 export class ConnectionRegistry {
@@ -42,6 +47,12 @@ export class ConnectionRegistry {
       // that message type is meant for the acting device, not passive observers. When omitted,
       // every room subscriber receives the message (existing behavior for room-level events).
       canReceive?: (principal: DevicePrincipal) => boolean;
+      // Connection-level filter (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.2) -
+      // distinct from canReceive, which only sees the ACL-relevant DevicePrincipal. This exists so
+      // the CRDT lane can partition a room's subscribers into "gets remote_crdt_update" vs "gets
+      // the materialized remote_file_change instead" by capability, without threading connection
+      // internals through the ACL-focused canReceive predicate.
+      connectionFilter?: (connection: SyncConnection) => boolean;
     }
   ): void {
     for (const connection of this.connections) {
@@ -50,7 +61,8 @@ export class ConnectionRegistry {
         (options?.excludeDeviceId !== undefined && connection.principal?.deviceId === options.excludeDeviceId) ||
         !connection.subscriptions.has(roomId) ||
         connection.socket.readyState !== connection.socket.OPEN ||
-        (options?.canReceive !== undefined && (!connection.principal || !options.canReceive(connection.principal)))
+        (options?.canReceive !== undefined && (!connection.principal || !options.canReceive(connection.principal))) ||
+        (options?.connectionFilter !== undefined && !options.connectionFilter(connection))
       ) {
         continue;
       }

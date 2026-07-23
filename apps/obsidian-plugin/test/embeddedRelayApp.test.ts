@@ -4,7 +4,8 @@ import { createServer, Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic } from "sql.js";
 import WebSocket from "ws";
-import type { PreparedStatement, RelayDb, SqlRow } from "vault-rooms-relay/embedded-core";
+import * as Y from "yjs";
+import { CRDT_TEXT_KEY, type PreparedStatement, type RelayDb, type SqlRow } from "vault-rooms-relay/embedded-core";
 import { createEmbeddedRelayApp, EmbeddedRelayApp } from "../src/embeddedRelayApp.js";
 
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
@@ -44,6 +45,76 @@ describe("embedded relay WebSocket server", () => {
     expect(await nextMessage(socket, "hello_ok")).toMatchObject({ requestId: "hello-a", userId: owner.user.id, deviceId: owner.device.id });
   });
 
+  it("wires CrdtDocManager into the same handleSyncSocket the standalone runtime uses - crdt_create/crdt_update/handshake work over the embedded transport", async () => {
+    // Phase 4 of docs/superpowers/plans/2026-07-20-crdt-sync.md: the CRDT message-handling logic
+    // (syncServer.ts's handleMessage) is one shared function reused by both runtimes - this test
+    // exercises it through the embedded (node:http + real `ws`) transport specifically, so CRDT
+    // coverage isn't only ever exercised via the standalone Fastify injectWS harness.
+    const { app, baseUrl } = await startEmbeddedRelay();
+    const owner = await bootstrapOwner(app, baseUrl);
+    const roomResponse = await fetch(`${baseUrl}/api/rooms`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${owner.deviceToken}` },
+      body: JSON.stringify({ name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [] })
+    });
+    const room = (await roomResponse.json()).room as { id: string };
+    await fetch(`${baseUrl}/api/rooms/${room.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${owner.deviceToken}` },
+      body: JSON.stringify({ name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", crdtEnabled: true })
+    });
+
+    const socket = await connect(`${baseUrl.replace(/^http/, "ws")}/sync`);
+    socket.send(
+      JSON.stringify({
+        type: "hello",
+        requestId: "hello-crdt",
+        token: owner.deviceToken,
+        client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "A laptop" },
+        capabilities: { crdt: true }
+      })
+    );
+    await nextMessage(socket, "hello_ok");
+    socket.send(JSON.stringify({ type: "subscribe_room", requestId: "sub", roomId: room.id }));
+    await nextMessage(socket, "room_snapshot");
+
+    socket.send(JSON.stringify({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" }));
+    const created = await nextMessage(socket, "crdt_created");
+    expect(created).toMatchObject({ requestId: "c1", roomId: room.id, relativePath: "note.md", epoch: 0 });
+
+    const localDoc = new Y.Doc();
+    localDoc.getText(CRDT_TEXT_KEY).insert(0, "hello from the embedded relay");
+    socket.send(
+      JSON.stringify({
+        type: "crdt_update",
+        requestId: "u1",
+        roomId: room.id,
+        relativePath: "note.md",
+        epoch: created.epoch,
+        update: Buffer.from(Y.encodeStateAsUpdate(localDoc)).toString("base64")
+      })
+    );
+
+    // Verify durability + handshake round-trip (rather than waiting on the real 2s materialize
+    // debounce, which would make this test slow) - a fresh crdt_sync_step1 from an empty state
+    // vector should get back a diff containing the just-applied update.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    socket.send(
+      JSON.stringify({
+        type: "crdt_sync_step1",
+        requestId: "h1",
+        roomId: room.id,
+        relativePath: "note.md",
+        epoch: created.epoch,
+        stateVector: Buffer.from(Y.encodeStateVector(new Y.Doc())).toString("base64")
+      })
+    );
+    const step2 = await nextMessage(socket, "crdt_sync_step2");
+    const verifyDoc = new Y.Doc();
+    Y.applyUpdate(verifyDoc, new Uint8Array(Buffer.from(step2.update, "base64")));
+    expect(verifyDoc.getText(CRDT_TEXT_KEY).toString()).toBe("hello from the embedded relay");
+  });
+
   it("rejects an oversized pre-auth frame from the declared payload length without waiting for the body", async () => {
     const { port } = await startEmbeddedRelay({ maxFileBytes: 1024 });
     const socket = await openRawWebSocket(port);
@@ -56,7 +127,7 @@ describe("embedded relay WebSocket server", () => {
 
 describe("EmbeddedRelayApp.close", () => {
   it("does not terminate sockets that close during the graceful shutdown window", async () => {
-    const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined);
+    const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined, { dispose: () => undefined });
     const socket = new GracefulFakeSocket();
     (app as unknown as { sockets: Map<WebSocket, "http" | "https"> }).sockets.set(
       socket as unknown as WebSocket,
@@ -70,7 +141,7 @@ describe("EmbeddedRelayApp.close", () => {
   });
 
   it("closes a transport socket that appears while its listener is shutting down", async () => {
-    const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined);
+    const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined, { dispose: () => undefined });
     const socketsByTransport = (app as unknown as { sockets: Map<WebSocket, "http" | "https"> }).sockets;
     const lateSocket = new GracefulFakeSocket();
     const firstSocket = new GracefulFakeSocket(() => {

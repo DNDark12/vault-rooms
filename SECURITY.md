@@ -60,6 +60,15 @@ Pinned REST and WSS fail before sending credentials if certificate verification 
 
 A deliberate owner rotation is the only automatic recovery path. Rotation records are signed by the previously pinned identity; the client verifies the complete oldest-to-newest chain and persists applied rotation IDs so replay protection survives a plugin restart. An unsigned, expired, replayed, incomplete, or wrong-server chain remains blocked. There is no **Trust anyway** button. If the old identity was lost through a reinstall or data reset, obtain a fresh invite from the owner and verify its fingerprint through a trusted channel.
 
+## CRDT sync (opt-in, per room)
+
+A room can opt into CRDT sync (Room Settings → "Live editing (CRDT sync)", default off) for real-time, character-level merging of its Markdown (`.md`) files, using Yjs. This adds no new network listener or transport mode: CRDT messages are JSON on the same authenticated `/sync` WebSocket connection every room already uses, protected by whatever transport mode the server is running (pinned TLS/WSS, OS-trusted TLS, or legacy plaintext - see "Transport security modes" above), and gated by the same per-path `file:read`/`file:write`/`file:create` ACL checks as every other sync message.
+
+- **Bounded update-loss-on-crash, not corruption.** A CRDT edit is applied to the relay's in-memory document and appended to its update log on the ordinary (not `durable()`-committed) write path - the same accepted bounded-loss stance the whole-file sync lane already has for its own debounced push (README's "Sync latency"). A relay crash in the narrow window between accepting an edit and that log entry's background flush reaching disk can lose that specific edit; it cannot corrupt the document or resurrect deleted content, and the relay never reports an edit as accepted to other room members until it has actually landed in the log. Room/file lifecycle transitions that affect CRDT state (enabling CRDT for a room, deleting/recreating a file) do go through the stronger `durable()` commit path, matching every other lifecycle transition in this document.
+- **Legacy-client compatibility is read-capable, not write-capable.** A Vault Rooms client that hasn't upgraded to advertise CRDT support can still read a CRDT-enabled room's Markdown files - the relay periodically writes the merged text back into the same whole-file storage regular REST/legacy reads use. It cannot write to a CRDT-enabled path directly: a whole-file REST or WebSocket write to that path is rejected with a specific error instructing the client to use CRDT sync (or upgrade), rather than silently corrupting the document or losing the legacy client's edit.
+
+CRDT sync's own manual two-real-device verification is still pending (see ROADMAP.md) - treat it as a newer, less-tested surface than the rest of the sync engine.
+
 ## Token storage
 
 - Invite tokens (`tr_inv_...`) and device tokens (`tr_dev_...`) are generated with a CSPRNG (`crypto.randomBytes`).

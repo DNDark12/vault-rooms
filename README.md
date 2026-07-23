@@ -14,7 +14,7 @@ Identity is per-server: each device you join gets one device token for that serv
 
 ## What it is not
 
-This is not cloud sync, NAT traversal, mobile sync, character-level co-editing, or a sandbox for arbitrary Obsidian community plugins. Vault Rooms syncs Markdown/text and a limited set of common file types (see "Known limitations" below for the exact list), up to the configured size limit.
+This is not cloud sync, NAT traversal, mobile sync, or a sandbox for arbitrary Obsidian community plugins. Vault Rooms syncs Markdown/text and a limited set of common file types (see "Known limitations" below for the exact list), up to the configured size limit. Character-level co-editing exists only as an explicit per-room opt-in for Markdown notes (**CRDT sync**, off by default - see "CRDT sync" below); it is not how a room behaves unless an owner/admin turns it on.
 
 ## Quick start
 
@@ -115,7 +115,7 @@ One caveat: this reconciliation runs when you mount/re-mount a room or reconnect
 
 ## Concurrency model
 
-Concurrent edits to the same file are "first save wins"; the losing device gets a **local-only** conflict copy (never pushed or synced - it only exists on the device that lost the race) instead of losing the edit outright. Character-level co-editing and CRDT merging are separate future work, not part of v0.2.
+Concurrent edits to the same file are "first save wins"; the losing device gets a **local-only** conflict copy (never pushed or synced - it only exists on the device that lost the race) instead of losing the edit outright. This is the default for every room and every synced file type. A room can opt a subset of its files (Markdown only) out of this model into character-level CRDT merging instead - see "CRDT sync" below.
 
 The server uses compare-and-swap file versions: every write must include the version it was based on, and a write based on a stale version is rejected (see the conflict policy above for what happens next).
 
@@ -128,13 +128,27 @@ Whenever a local conflict copy does exist, the Rooms panel lists it under the mo
 
 ## Sync latency: how fast does a teammate's edit show up?
 
-This is not character-level realtime (no shared cursor, no live keystrokes). The current sync contract is:
+This describes the default whole-file sync lane, which is not character-level realtime (no shared cursor, no live keystrokes). A room with CRDT sync enabled (see below) instead delivers character-level live editing for its Markdown files specifically - everything below still applies to every other file type, and to Markdown files in a room that hasn't opted in. The current sync contract is:
 
 - **Push side (debounced, not per-keystroke).** When you edit a mounted file, the plugin waits for `debounceMs` (Settings → Vault Rooms → Sync, default **300ms**) of no further local writes to that file before pushing it to the relay. This avoids pushing a partial file on every keystroke while still keeping the delay small and predictable - not "no delay," but not "wait for a manual sync" either.
 - **Pull side (live, not polled).** Every mounted room keeps an open WebSocket subscription to the relay. The moment the relay accepts a write (from REST push or another device's WebSocket push), it broadcasts the change to every other subscribed device immediately - there is no polling interval on this side. Combined with the push-side debounce, a teammate's edit typically lands on your machine well under a second after they stop typing.
 - **Reconnect catch-up.** If your Obsidian was closed, the connection dropped, or the host restarted its server, the plugin automatically reconnects (with backoff) and re-subscribes to every previously-mounted room, including a room whose prior subscription was interrupted before its snapshot arrived. It then reconciles against a fresh snapshot - you don't need to manually remount or reload Obsidian to start receiving live updates again. Each socket processes messages in receive order, and stale callbacks from a replaced socket are ignored, so an older async file operation cannot overwrite a newer event. The Rooms panel's "Connection" section shows a live badge (connected / reconnecting / offline) so you can tell at a glance whether you're actually getting real-time updates right now.
 - **Bounded handshake.** A client that receives no `hello_ok` within 10 seconds closes and follows the normal reconnect policy. The relay also closes a socket that has not authenticated within 10 seconds, so silent unauthenticated upgrades cannot retain connection slots indefinitely.
 - **No ping-pong.** Applying a remote change updates the local file's known server version/hash, so the local file watcher recognizes the resulting "modify" event as already-in-sync and does not push it back.
+
+## CRDT sync (opt-in live editing for Markdown notes)
+
+Per room, an owner (Room Settings → **"Live editing (CRDT sync)"**, default off) can turn on real-time, character-level merging for that room's Markdown (`.md`) notes. This replaces the whole-file "first save wins" model above with a CRDT (Yjs): two people typing in the same note at the same time merge deterministically, instead of one edit becoming a local-only conflict copy.
+
+Scope and behavior:
+
+- **Markdown (`.md`) files only.** Every other synced file type in the room (`.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw`, images, PDF) keeps using the whole-file compare-and-swap lane described above, even in a room with CRDT sync enabled.
+- **Turning it on preserves existing notes.** If the room already has `.md` files, each one is seeded from its current content when CRDT sync is enabled - nothing is discarded or reset.
+- **Turning it off is non-destructive.** Files simply go back to being served from their last-synced whole-file content; nothing is deleted.
+- **Older Vault Rooms builds can still read, not write.** A plugin build from before CRDT sync existed (or a device that hasn't upgraded) keeps seeing up-to-date content for a CRDT-enabled note - the relay periodically writes the merged text back into the same whole-file storage regular reads use, on the same latency budget described in "Sync latency" above. That older build cannot push a direct edit to a CRDT-enabled note, though: it gets a clear rejection telling it to use the CRDT sync path (or upgrade) rather than a silent conflict-copy or lost edit.
+- **No new transport surface.** CRDT traffic rides the same authenticated `/sync` WebSocket connection, protected by whatever transport mode the server is running (pinned TLS/WSS, OS-trusted TLS, or legacy plaintext) - see "Security model" and [SECURITY.md](SECURITY.md). There is nothing new to open, pin, or expose on the network.
+
+CRDT sync is new; treat it as a beta feature within a beta plugin, and see [SECURITY.md](SECURITY.md) for its durability/compatibility characteristics.
 
 ## Plugin capability model
 
@@ -318,7 +332,7 @@ To cut a release:
 - No cloud relay, NAT traversal, or mobile support.
 - Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw` (legacy Excalidraw format - newer `.excalidraw.md` files are already covered by Markdown), plus common images (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.svg`) and `.pdf`. Other binary formats (audio, video, Office docs, etc.) aren't synced yet - edits to those files won't reach teammates. Images/PDFs are base64-encoded for transport, so they count against the max file size at roughly 1.33x their real size on disk.
 - No guaranteed deletion of already-synced collaborator copies (this applies to member revocation and room/team deletion alike - see "Deleting rooms/teams and removing access").
-- No character-level co-editing (edits sync as whole-file pushes, debounced - see "Sync latency" above).
+- No character-level co-editing outside of a room's CRDT sync opt-in (edits otherwise sync as whole-file pushes, debounced - see "Sync latency" above). CRDT sync (see "CRDT sync" above) is per-room, off by default, and Markdown-only; a client that hasn't upgraded to a CRDT-capable build can read but not write to a CRDT-enabled note; and live cursors/presence don't exist yet even in a CRDT-enabled room (see ROADMAP.md).
 - Renames and moves within a room sync, but as a delete of the old path plus a create at the new path - there is no dedicated move operation, so renaming a large file re-uploads its contents.
 - Plugin settings store the device token in Obsidian plugin data JSON, unencrypted at rest. A leaked device can be revoked individually (see "Deleting rooms/teams and removing access"). The embedded server identity file also contains private keys; protect plugin configuration backups and sync destinations as described under "Security model."
 - No rate-limit tuning UI: the relay applies a strict per-IP limit on the unauthenticated bootstrap endpoint and a WebSocket connection cap to protect the host (the server runs inside Obsidian's process). There is intentionally no general per-request limiter on authenticated traffic - it legitimately scales with vault size (mounting/reconciling an existing room can fire well over a hundred requests in a burst), and an earlier general limiter was removed after it broke sync on established rooms.

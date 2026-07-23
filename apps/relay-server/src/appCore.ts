@@ -16,8 +16,9 @@ import type { InviteSecurityContext } from "./routes/inviteResponse.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
 import { assertTransportAllowed, registerSecurityRoutes, type RequestTransport } from "./routes/security.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
-import { createRelayCore, type RelayCoreOptions } from "./relayCore.js";
+import { createCrdtMaterializedHandler, createRelayCore, type RelayCoreOptions } from "./relayCore.js";
 import { certPemToDerBase64Url } from "./security/identity.js";
+import { CrdtDocManager } from "./sync/crdtDocManager.js";
 import { registerSyncRoutes, type SyncTimerHost } from "./sync/syncServer.js";
 
 const nodeSyncTimerHost: SyncTimerHost = {
@@ -37,6 +38,10 @@ export type CreateAppCoreOptions = RelayCoreOptions & {
   ownsDb?: boolean;
   /** In-process test seam. Never derived from request-controlled data. */
   transportOverrideForTests?: RequestTransport;
+  /** Test seam: override the CRDT lane's materialize-debounce/idle-eviction timer host. Defaults
+   *  to real Node timers - lets tests fast-forward the materialization SLA (contract 1.6)
+   *  deterministically instead of sleeping 2 real seconds. */
+  crdtTimerHost?: SyncTimerHost;
 };
 
 export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions = {}) {
@@ -51,6 +56,11 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     maxConnections
   } = core;
   const security = options.security ?? core.security;
+  const crdtDocManager = new CrdtDocManager(
+    repo,
+    options.crdtTimerHost ?? nodeSyncTimerHost,
+    createCrdtMaterializedHandler(repo, connectionRegistry)
+  );
   // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
   // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
   // maxFileBytes - otherwise a file just under the configured limit can still be rejected at the
@@ -129,20 +139,24 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     security: inviteSecurity
   });
   const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
-  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity });
+  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity, crdtDocManager });
   registerFriendRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity });
   registerFileRoutes(app, repo, {
     maxFileBytes,
-    connectionRegistry
+    connectionRegistry,
+    crdtDocManager
   });
   registerAuditRoutes(app, repo);
   if (security) {
     registerSecurityRoutes(app, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
   }
   void app.register(async (syncApp) => {
-    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections, timerHost: nodeSyncTimerHost });
+    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections, timerHost: nodeSyncTimerHost, crdtDocManager });
   });
 
+  app.addHook("onClose", async () => {
+    crdtDocManager.dispose();
+  });
   if (options.ownsDb !== false) {
     app.addHook("onClose", async () => {
       await db.close();
@@ -160,6 +174,9 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
   // Test-only hook: integration tests assert WebSocket connection-cap behavior without exposing
   // registry internals through production routes.
   app.decorate("testConnectionRegistry", connectionRegistry);
+  // Test-only hook: CRDT compaction/eviction/materialization tests need to observe cache state
+  // (e.g. isCached/size) that has no other externally-observable signal.
+  app.decorate("testCrdtDocManager", crdtDocManager);
 
   return app;
 }

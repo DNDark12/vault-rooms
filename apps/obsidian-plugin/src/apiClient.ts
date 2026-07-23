@@ -13,6 +13,10 @@ export type RoomSummary = {
   conflictPolicy: "keep_both" | "owner_wins";
   permissions: string[];
   capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string; installed: boolean | null }>;
+  // CRDT room-mode flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). The
+  // client-side type mirrors the server's toRoomResponse()/managedRoomResponse() shape; consumed
+  // starting Phase 5 (editor binding decides CRDT vs whole-file sync per this flag).
+  crdtEnabled: boolean;
 };
 
 export type TeamMemberSummary = {
@@ -326,6 +330,11 @@ export class RelayApiClient implements RelayFileApi {
       mountName: string;
       conflictPolicy?: "keep_both" | "owner_wins";
       capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
+      // CRDT room-mode toggle (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11,
+      // Phase 6 UI). Optional so existing callers that never touch this field don't need updating -
+      // the server only applies the toggle transition when the field is present and differs from
+      // the room's current crdtEnabled.
+      crdtEnabled?: boolean;
     }
   ): Promise<{ room: RoomSummary }> {
     return this.request(`/api/rooms/${roomId}`, {

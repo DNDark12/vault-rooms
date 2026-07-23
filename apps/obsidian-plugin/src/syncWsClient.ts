@@ -1,6 +1,7 @@
 import { PRODUCT_VERSION, type SyncClientMessage, type SyncServerMessage } from "@vault-rooms/protocol";
 import { WebSocket as NodeWebSocket } from "ws";
 import { requestUrlWithTimeout, type RelayApiClient } from "./apiClient.js";
+import type { CrdtWsBridge } from "./crdtSession.js";
 import {
   assertPinMaterial,
   InvalidPinMaterialError,
@@ -30,6 +31,19 @@ export type RoomSyncSocketDeps = {
   onSecurityUpgradeAvailable?: () => void;
   onPinnedTransportFailure?: (error: Error) => Promise<"retry" | "normal" | "stop">;
   onHelloOk?: () => void;
+  /** Called when the server pushes a live CRDT room-mode toggle (contract 1.11) for a room. Lets
+   *  the caller mirror the new `crdtEnabled` flag onto persisted `MountedRoomState`/`visibleRooms`
+   *  immediately, rather than waiting on the follow-up snapshot re-subscribe below to eventually
+   *  reflect it via a full `refreshRooms()` round trip - see `resolveRoomCrdtEnabled` and CLAUDE.md's
+   *  post-hardware-testing audit notes. Optional so a socket used purely for tests/diagnostics
+   *  doesn't need one wired up. */
+  onRoomModeChanged?: (roomId: string, crdtEnabled: boolean) => void;
+  /** CRDT message-lane bridge (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 5) - handles
+   *  every CRDT-lane server message (crdt_created, crdt_rejected, crdt_sync_step1/step2,
+   *  remote_crdt_update) and re-runs the bidirectional handshake for live sessions on (re)connect
+   *  (contract 1.3, blocker 1: outbound recovery). Optional so a socket used purely for
+   *  tests/diagnostics doesn't need one wired up. */
+  crdt?: CrdtWsBridge;
 };
 
 const MIN_RECONNECT_DELAY_MS = 1000;
@@ -164,7 +178,11 @@ export class RoomSyncSocket {
         type: "hello",
         requestId: createRequestId(),
         token: this.server.deviceToken,
-        client: { kind: "obsidian-plugin", version: PRODUCT_VERSION, deviceName: this.server.deviceName }
+        client: { kind: "obsidian-plugin", version: PRODUCT_VERSION, deviceName: this.server.deviceName },
+        // Contract 1.2: this build always speaks the CRDT lane. A room that hasn't opted into
+        // crdtEnabled simply never receives any crdt_*/remote_crdt_update message regardless of
+        // what a connection advertises here - advertising true is safe and unconditional.
+        capabilities: { crdt: true }
       });
       this.clearHelloAckTimer();
       this.helloAckTimer = window.setTimeout(() => {
@@ -305,6 +323,10 @@ export class RoomSyncSocket {
         for (const roomId of this.desiredSubscriptions) {
           this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
         }
+        // Contract 1.3/blocker 1: re-run the bidirectional handshake for every live CRDT session on
+        // (re)connect - this is what recovers a local edit made while this socket was offline (the
+        // server's reply to this re-sent step1 is what will ask the client for its missing update).
+        this.deps.crdt?.onConnected();
         return;
       }
       case "security_upgrade_available": {
@@ -320,6 +342,11 @@ export class RoomSyncSocket {
         return;
       }
       case "room_snapshot": {
+        // Contract 1.11: feed per-file crdtEpoch entries to the CRDT bridge before the CAS-lane
+        // reconciliation below - independent concerns over the same message, same as how a CRDT-
+        // eligible file's entry still also participates in ordinary CAS-lane bookkeeping until a
+        // session actually opens for it.
+        this.deps.crdt?.handleRoomSnapshot(message.roomId, message.files);
         await this.enqueueRemoteApply(() => this.reconcileSnapshot(message.roomId, message.files));
         return;
       }
@@ -327,6 +354,19 @@ export class RoomSyncSocket {
         await this.enqueueRemoteApply(async () => {
           const room = this.deps.getMountedRoom(message.roomId);
           if (!room) return;
+          // Second-hardware-testing-round item 1: the relay now sends this materialized broadcast
+          // to every subscriber with file:read (CRDT-capable or not - see relayCore.ts's
+          // createCrdtMaterializedHandler), since a CRDT-capable device with no open session for
+          // this exact path would otherwise never learn about the change at all (remote_crdt_update
+          // is silently dropped by crdtSession.ts when no session exists). If a CRDT session IS
+          // already open for this path, that lane already owns it live - applying this coarser
+          // snapshot on top could clobber in-flight editor state, so skip it here. isSessionOpen
+          // always returns false for a path that was never a CRDT target (or when there's no CRDT
+          // bridge at all, e.g. a non-CRDT room), so this is a no-op change for the ordinary CAS-lane
+          // case - every relative_path gets applied exactly as before.
+          if (this.deps.crdt?.isSessionOpen(message.roomId, message.relativePath)) {
+            return;
+          }
           await this.deps.syncEngine.applyRemoteChange(
             room,
             { relativePath: message.relativePath, version: message.version, sha256: message.sha256, content: message.content },
@@ -363,9 +403,36 @@ export class RoomSyncSocket {
         });
         return;
       }
+      case "room_mode_changed": {
+        // Mirror the new flag onto persisted/visible state immediately (see onRoomModeChanged's
+        // doc comment) - independent of, and ahead of, the snapshot re-fetch below.
+        this.deps.onRoomModeChanged?.(message.roomId, message.crdtEnabled);
+        // Contract 1.11's live-toggle path: reuse the existing snapshot-fetch mechanism (a fresh
+        // subscribe_room) rather than inventing a partial-update merge - simplest correct behavior,
+        // and it's exactly what a client would send on first subscribe anyway.
+        if (this.desiredSubscriptions.has(message.roomId)) {
+          this.send({ type: "subscribe_room", requestId: createRequestId(), roomId: message.roomId });
+        }
+        return;
+      }
+      case "crdt_created":
+      case "crdt_rejected":
+      case "crdt_sync_step1":
+      case "crdt_sync_step2":
+      case "remote_crdt_update": {
+        await this.enqueueRemoteApply(() => this.deps.crdt?.handleServerMessage(message) ?? Promise.resolve());
+        return;
+      }
       default:
         return;
     }
+  }
+
+  /** Passthrough for the CRDT session bridge to send client->server CRDT-lane messages through
+   *  this socket's normal send() (which already guards on OPEN readyState) - kept as its own method
+   *  rather than exposing send() itself, since send() is otherwise private implementation detail. */
+  sendCrdtMessage(message: SyncClientMessage): void {
+    this.send(message);
   }
 
   private enqueueRemoteApply(operation: () => Promise<void>): Promise<void> {

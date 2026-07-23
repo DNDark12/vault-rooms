@@ -16,6 +16,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import {
   certPemToDerBase64Url,
   createRelayCore,
+  createCrdtMaterializedHandler,
   handleSyncSocket,
   assertTransportAllowed,
   registerAuditRoutes,
@@ -25,6 +26,7 @@ import {
   registerRoomRoutes,
   registerSecurityRoutes,
   registerTeamRoutes,
+  CrdtDocManager,
   type RelayDb,
   type InviteSecurityContext,
   type RequestTransport,
@@ -33,6 +35,11 @@ import {
 } from "vault-rooms-relay/embedded-core";
 
 type SyncSocketLike = Parameters<typeof handleSyncSocket>[0];
+
+/** Narrow structural type instead of the concrete `CrdtDocManager` class - `EmbeddedRelayApp` only
+ *  ever calls `dispose()` on it (from `close()`), so this is all it should require, both for
+ *  decoupling and so tests that don't exercise the CRDT lane can pass a trivial stub. */
+type DisposableCrdtDocManager = { dispose(): void };
 
 type EmbeddedRelayAppOptions = {
   publicUrl?: string;
@@ -47,6 +54,10 @@ type EmbeddedRelayAppOptions = {
   };
   security?: { runtime: SecurityRuntime };
   core?: ReturnType<typeof createRelayCore>;
+  /** Test seam: override the CRDT lane's materialize-debounce/idle-eviction timer host. Defaults
+   *  to `window.setTimeout`/etc. (rule 2 - this file never runs outside Obsidian's process, but
+   *  still must not call bare timers directly). */
+  crdtTimerHost?: SyncTimerHost;
 };
 
 type RouteMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -93,14 +104,20 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     maxConnections
   } = core;
   const security = options.security ?? core.security;
+  const crdtDocManager = new CrdtDocManager(
+    repo,
+    options.crdtTimerHost ?? windowSyncTimerHost,
+    createCrdtMaterializedHandler(repo, connectionRegistry)
+  );
   const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket, transport) => {
     handleSyncSocket(socket, repo, connectionRegistry, {
       maxFileBytes,
       maxConnections,
       transport,
-      timerHost: windowSyncTimerHost
+      timerHost: windowSyncTimerHost,
+      crdtDocManager
     });
-  }, options.publicUrl ?? "http://127.0.0.1:8787");
+  }, crdtDocManager, options.publicUrl ?? "http://127.0.0.1:8787");
 
   app.get("/health", async (): Promise<HealthResponse> => ({
     ok: true,
@@ -149,7 +166,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     get security() {
       return currentInviteSecurity();
     },
-    connectionRegistry
+    connectionRegistry,
+    crdtDocManager
   });
   registerFriendRoutes(routeApp, repo, {
     get publicUrl() {
@@ -162,7 +180,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
   });
   registerFileRoutes(routeApp, repo, {
     maxFileBytes,
-    connectionRegistry
+    connectionRegistry,
+    crdtDocManager
   });
   registerAuditRoutes(routeApp, repo);
   if (security) {
@@ -253,6 +272,7 @@ export class EmbeddedRelayApp {
     private readonly maxFileBytes: number,
     readonly bootstrapPin: string,
     private readonly handleSyncSocket: (socket: SyncSocketLike, transport: RequestTransport) => void,
+    private readonly crdtDocManager: DisposableCrdtDocManager,
     private publicUrl = "http://127.0.0.1:8787"
   ) {
     this.webSocketServer = new WebSocketServer({
@@ -355,6 +375,7 @@ export class EmbeddedRelayApp {
   }
 
   async close(): Promise<void> {
+    this.crdtDocManager.dispose();
     await Promise.all([...this.sockets.keys()].map((socket) => closeSocketWithGrace(socket)));
     await Promise.all([closeServer(this.plainServer), closeServer(this.tlsServer)]);
     this.plainServer = null;
