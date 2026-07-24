@@ -17,6 +17,13 @@ export type FileDeleteResult = {
   version: number;
 };
 
+export type FileRenameResult = {
+  ok: true;
+  oldRelativePath: string;
+  relativePath: string;
+  epoch: number;
+};
+
 export type AuditInput = {
   teamId: string | null;
   actorType: "user" | "device" | "system";
@@ -154,6 +161,40 @@ export class RelayFileRepository {
       return { ok: true as const, relativePath: input.relativePath, version };
     });
     return remove();
+  }
+
+  /**
+   * Atomic rename for a file in a CRDT-enabled room (fourth hardware-testing round, 2026-07-23):
+   * updates only `relative_path` (+ `content_type`, recomputed from the new extension) - `id`,
+   * `crdt_epoch`, `version`, and all `file_versions`/CRDT history stay untouched. Replaces the old
+   * client-side delete-old+create-new translation, which discarded the file's identity (a fresh
+   * `fileId`/epoch) and left every other subscriber with a multi-second, uncorrelated gap between
+   * "old file deleted" and "new file created" (see this repo's fourth-hardware-testing-round
+   * notes). `CrdtDocManager` caches by `(fileId, epoch)`, never by path (see `crdtDocManager.ts`'s
+   * `key()`), so a caller needs no doc-cache/materialize-timer bookkeeping around this at all - the
+   * cache stays valid across the rename automatically. Does not bump `version`: content is
+   * unchanged, only the path is, so no new `file_versions` row is written either.
+   */
+  renameFile(input: { roomId: string; oldRelativePath: string; relativePath: string; actorUserId: string }): FileRenameResult {
+    const rename = this.db.transaction(() => {
+      const existing = this.getFile(input.roomId, input.oldRelativePath);
+      if (!existing || existing.deleted_at) {
+        throw new AppError(existing?.deleted_at ? "FILE_DELETED" : "NOT_FOUND", existing?.deleted_at ? "The file has been deleted." : "File not found.", 404);
+      }
+      if (input.oldRelativePath !== input.relativePath) {
+        const conflict = this.getFile(input.roomId, input.relativePath);
+        if (conflict && !conflict.deleted_at) {
+          throw new AppError("FILE_EXISTS", "A file already exists at the new path.", 409, { serverVersion: conflict.version });
+        }
+      }
+      const now = new Date().toISOString();
+      this.db
+        .prepare("update files set relative_path = ?, content_type = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
+        .run(input.relativePath, contentTypeForPath(input.relativePath), input.actorUserId, now, existing.id);
+      this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, input.relativePath, existing.version);
+      return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: input.relativePath, epoch: existing.crdt_epoch };
+    });
+    return rename();
   }
 
   /** First-create flow for the CRDT lane (contract 1.10). Distinct from `writeFile`'s

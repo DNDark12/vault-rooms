@@ -67,6 +67,11 @@ export type CrdtSessionManagerDeps = {
    *  editor (coexistence: an unopened CRDT file's on-disk copy still needs to stay current - see
    *  the research spec's "when the file is not open" case). */
   writeDiskText: (roomId: string, relativePath: string, text: string) => Promise<void>;
+  /** Moves the vault file on disk to match a `remote_crdt_rename` from another device (fourth
+   *  hardware-testing round, 2026-07-23) - never called for this device's *own* rename (Obsidian
+   *  already renamed the file itself before the watcher ever fired). A no-op if the source path
+   *  doesn't exist locally (e.g. this device never downloaded the file before the rename). */
+  renameDiskFile: (roomId: string, oldRelativePath: string, newRelativePath: string) => Promise<void>;
   onSessionChanged?: (roomId: string, relativePath: string) => void;
   createRequestId?: () => string;
   schedule?: (fn: () => void, ms: number) => number;
@@ -114,6 +119,9 @@ export class CrdtSessionManager implements CrdtWsBridge {
    *  not just the epoch fetch). */
   private readonly pendingSessionOpen = new Map<string, Promise<CrdtSession>>();
   private readonly pendingHandshake = new Map<string, string>();
+  /** Correlates an in-flight `crdt_rename` request with its `crdt_renamed`/`crdt_rejected` answer -
+   *  see `renameSession`. */
+  private readonly pendingRename = new Map<string, { resolve: (epoch: number) => void; reject: (error: Error) => void }>();
   private readonly persistTimers = new Map<string, number>();
   private readonly materializeTimers = new Map<string, number>();
   private readonly schedule: (fn: () => void, ms: number) => number;
@@ -187,6 +195,83 @@ export class CrdtSessionManager implements CrdtWsBridge {
     return opening;
   }
 
+  /**
+   * Renames this device's own already-known CRDT file (fourth hardware-testing round, 2026-07-23):
+   * sends `crdt_rename` and, once the server acks with `crdt_renamed`, rekeys this session's
+   * in-memory/persisted state onto the new path - without tearing down or re-seeding the `Y.Doc`,
+   * unlike the old delete-old+create-new translation this replaces. A live-bound editor keeps its
+   * document identity, network connection, and content throughout. Never touches the vault file on
+   * disk - the caller (main.ts's watcher, reacting to Obsidian's own rename event) only calls this
+   * after Obsidian has already renamed the file itself; see `renameDiskFile` for the other device's
+   * side of this, which does need to move the file.
+   */
+  async renameSession(roomId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+    const requestId = this.createRequestId();
+    const epoch = await new Promise<number>((resolve, reject) => {
+      this.pendingRename.set(requestId, { resolve, reject });
+      this.deps.send({ type: "crdt_rename", requestId, roomId, oldRelativePath, relativePath: newRelativePath });
+    });
+    await this.rekeyLocalState(roomId, oldRelativePath, newRelativePath, epoch);
+  }
+
+  /**
+   * Applies another device's confirmed rename (`remote_crdt_rename`) to this device's own state:
+   * rekeys any locally-open session the same way `renameSession` does for the initiating device
+   * (a no-op if this device never had the file open), and always moves the vault file on disk to
+   * match - unlike `renameSession`, this device's own file watcher never fired for this rename, so
+   * nothing else will move it.
+   */
+  private async applyRemoteRename(roomId: string, oldRelativePath: string, newRelativePath: string, epoch: number): Promise<void> {
+    await this.rekeyLocalState(roomId, oldRelativePath, newRelativePath, epoch);
+    await this.deps.renameDiskFile(roomId, oldRelativePath, newRelativePath);
+  }
+
+  /**
+   * Moves every piece of in-memory/persisted bookkeeping keyed by (roomId, relativePath) from the
+   * old path to the new one, for both `renameSession` and `applyRemoteRename`. Deliberately does
+   * NOT try to move a pending persist/materialize timer's *entry* directly - each timer's own fired
+   * callback closure captured its scheduling-time key, so relocating just the map entry would leave
+   * the callback checking `this.sessions.get(oldKey)` (now empty) and silently bailing out when it
+   * eventually fires. Cancelling and re-scheduling fresh (schedulePersist/scheduleMaterialize
+   * recompute the key from the session's now-updated fields) sidesteps that - the cost is only a
+   * restarted debounce window, never a lost write (the live Y.Doc still has everything either way).
+   */
+  private async rekeyLocalState(roomId: string, oldRelativePath: string, newRelativePath: string, epoch: number): Promise<void> {
+    const oldKey = sessionKey(roomId, oldRelativePath);
+    const newKey = sessionKey(roomId, newRelativePath);
+
+    const session = this.sessions.get(oldKey);
+    if (session) {
+      this.sessions.delete(oldKey);
+      session.relativePath = newRelativePath;
+      this.sessions.set(newKey, session);
+
+      const persistTimer = this.persistTimers.get(oldKey);
+      if (persistTimer !== undefined) {
+        this.cancel(persistTimer);
+        this.persistTimers.delete(oldKey);
+        this.schedulePersist(session);
+      }
+      const materializeTimer = this.materializeTimers.get(oldKey);
+      if (materializeTimer !== undefined) {
+        this.cancel(materializeTimer);
+        this.materializeTimers.delete(oldKey);
+        this.scheduleMaterialize(session);
+      }
+      // A handshake started just before the rename would otherwise resolve against a session key
+      // that no longer has anything registered under it once the map entry above moves.
+      for (const [requestId, pendingKey] of this.pendingHandshake.entries()) {
+        if (pendingKey === oldKey) {
+          this.pendingHandshake.set(requestId, newKey);
+        }
+      }
+    }
+
+    this.knownEpoch.delete(oldKey);
+    this.knownEpoch.set(newKey, epoch);
+    await this.deps.docStore.rename(roomId, oldRelativePath, newRelativePath, epoch);
+  }
+
   private async openSession(roomId: string, relativePath: string, key: string): Promise<CrdtSession> {
     const epoch = await this.ensureEpoch(roomId, relativePath);
     const existing = this.sessions.get(key);
@@ -240,7 +325,15 @@ export class CrdtSessionManager implements CrdtWsBridge {
       // disk read" and must run before anything else in this handler could itself await.
       session.revision++;
       this.schedulePersist(session);
-      this.deps.onSessionChanged?.(roomId, relativePath);
+      // Reads roomId/relativePath off `session` rather than the outer closure params: a rename
+      // (renameSession/applyRemoteRename) mutates `session.relativePath` in place, keeping the same
+      // session/doc/listener alive rather than tearing down and recreating them - if this closure
+      // kept referencing its original captured `relativePath`, every crdt_update sent after a
+      // rename would still target the old (now-renamed-away) path forever, silently rejected
+      // server-side. `epoch` is intentionally still captured directly - a rename never changes it
+      // (only a genuinely new session/epoch would, which always goes through a fresh openSession
+      // call with its own new closure).
+      this.deps.onSessionChanged?.(session.roomId, session.relativePath);
       if (origin === REMOTE_ORIGIN || origin === HYDRATE_ORIGIN) {
         if (!session.boundToEditor) {
           this.scheduleMaterialize(session);
@@ -250,8 +343,8 @@ export class CrdtSessionManager implements CrdtWsBridge {
       this.deps.send({
         type: "crdt_update",
         requestId: this.createRequestId(),
-        roomId,
-        relativePath,
+        roomId: session.roomId,
+        relativePath: session.relativePath,
         epoch,
         update: toBase64(update)
       });
@@ -347,14 +440,34 @@ export class CrdtSessionManager implements CrdtWsBridge {
         return;
       }
       case "crdt_rejected": {
-        const pending = message.requestId ? this.pendingCreate.get(message.requestId) : undefined;
-        if (pending && message.requestId) {
+        const pendingCreateEntry = message.requestId ? this.pendingCreate.get(message.requestId) : undefined;
+        if (pendingCreateEntry && message.requestId) {
           this.pendingCreate.delete(message.requestId);
-          pending.reject(new Error(message.message));
+          pendingCreateEntry.reject(new Error(message.message));
+        }
+        // A crdt_rename can be rejected too (FILE_EXISTS at the new path, NOT_FOUND at the old one,
+        // PERMISSION_DENIED) - renameSession's caller (main.ts) is expected to fall back to the old
+        // forgetLocalDelete+ensureSession behavior when this rejects, same as before this feature.
+        const pendingRenameEntry = message.requestId ? this.pendingRename.get(message.requestId) : undefined;
+        if (pendingRenameEntry && message.requestId) {
+          this.pendingRename.delete(message.requestId);
+          pendingRenameEntry.reject(new Error(message.message));
         }
         if (message.currentEpoch !== undefined) {
           await this.resyncAtEpoch(message.roomId, message.relativePath, message.currentEpoch);
         }
+        return;
+      }
+      case "crdt_renamed": {
+        const pending = this.pendingRename.get(message.requestId);
+        if (pending) {
+          this.pendingRename.delete(message.requestId);
+          pending.resolve(message.epoch);
+        }
+        return;
+      }
+      case "remote_crdt_rename": {
+        await this.applyRemoteRename(message.roomId, message.oldRelativePath, message.relativePath, message.epoch);
         return;
       }
       case "crdt_sync_step2": {

@@ -386,6 +386,64 @@ async function handleMessage(
     return;
   }
 
+  // Atomic rename (fourth hardware-testing round, 2026-07-23) - replaces the old client-side
+  // delete-old+create-new translation, which discarded the file's id/epoch/history and left a
+  // multi-second, uncorrelated gap on every OTHER subscriber's device between "old file gone" and
+  // "new file appears" (see docs/superpowers/plans/2026-07-20-crdt-sync.md's fourth hardware-
+  // testing round, item 3). `repo.renameFile` only updates `relative_path` - `CrdtDocManager`
+  // caches by `(fileId, epoch)`, never by path (see crdtDocManager.ts's `key()`), so neither the
+  // in-memory doc cache nor any pending materialize timer needs touching here at all.
+  if (message.type === "crdt_rename") {
+    const roomId = message.roomId;
+    const relativePath = message.relativePath;
+    try {
+      const room = requireRoom(repo, roomId);
+      const normalizedOldPath = requireCrdtTarget(room, message.oldRelativePath);
+      const normalizedNewPath = requireCrdtTarget(room, relativePath);
+      requireCrdtCapability(connection);
+      assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath: normalizedOldPath });
+      // Mirrors exactly the two permissions the old delete+create translation required - a rename
+      // grants no capability beyond what was already achievable via that slower path.
+      assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:delete", relativePath: normalizedOldPath });
+      assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:create", relativePath: normalizedNewPath });
+      const renamedBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
+      const result = repo.renameFile({
+        roomId: room.id,
+        oldRelativePath: normalizedOldPath,
+        relativePath: normalizedNewPath,
+        actorUserId: connection.principal.userId
+      });
+      sendJson(connection.socket, {
+        type: "crdt_renamed",
+        requestId: message.requestId,
+        roomId: room.id,
+        oldRelativePath: result.oldRelativePath,
+        relativePath: result.relativePath,
+        epoch: result.epoch
+      });
+      const renameAclRules = repo.listAclRulesForRoom(room.id);
+      registry.broadcastToRoom(
+        room.id,
+        {
+          type: "remote_crdt_rename",
+          roomId: room.id,
+          oldRelativePath: result.oldRelativePath,
+          relativePath: result.relativePath,
+          epoch: result.epoch,
+          renamedBy
+        },
+        {
+          exclude: connection,
+          canReceive: (principal) =>
+            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: normalizedNewPath, aclRules: renameAclRules })
+        }
+      );
+    } catch (error) {
+      sendCrdtRejection(connection.socket, message.requestId, roomId, relativePath, error);
+    }
+    return;
+  }
+
   if (message.type === "crdt_sync_step1") {
     const roomId = message.roomId;
     const relativePath = message.relativePath;

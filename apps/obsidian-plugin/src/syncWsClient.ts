@@ -419,7 +419,9 @@ export class RoomSyncSocket {
       case "crdt_rejected":
       case "crdt_sync_step1":
       case "crdt_sync_step2":
-      case "remote_crdt_update": {
+      case "remote_crdt_update":
+      case "crdt_renamed":
+      case "remote_crdt_rename": {
         await this.enqueueRemoteApply(() => this.deps.crdt?.handleServerMessage(message) ?? Promise.resolve());
         return;
       }

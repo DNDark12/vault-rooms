@@ -40,6 +40,7 @@ class FakeVaultAdapter implements VaultAdapter {
   }
   async writeBinary(): Promise<void> {}
   async delete(): Promise<void> {}
+  async rename(): Promise<void> {}
   async exists(): Promise<boolean> {
     return true;
   }
@@ -109,14 +110,27 @@ type WatchMountedRoomInternals = {
  * VaultSyncEngine.applyRemoteChange.
  */
 describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
-  function setUp(options: { visibleRoomCrdtEnabled?: boolean; persistedCrdtEnabled: boolean }) {
+  function setUp(options: {
+    visibleRoomCrdtEnabled?: boolean;
+    persistedCrdtEnabled: boolean;
+    renameSession?: ReturnType<typeof vi.fn>;
+    // Fifth hardware-testing round (2026-07-24): lets a test simulate the startup window where this
+    // device can't (yet) push - visibleRooms empty, so canPushLocalEdits falls back to this persisted
+    // value. Defaults true so every pre-existing test keeps its can-push behavior unchanged.
+    persistedCanPush?: boolean;
+  }) {
     const server = serverConnection();
     const roomState: MountedRoomState = {
       roomId: "room_1",
       serverId: server.id,
       mountPath: "Vault Rooms/demo/Projects Demo",
       files: {},
-      crdtEnabled: options.persistedCrdtEnabled
+      crdtEnabled: options.persistedCrdtEnabled,
+      // Persisted fallback for canPushLocalEdits (third-hardware-testing-round item 1) - true so
+      // these CRDT-lane-routing tests (including the rename short-circuit) aren't incidentally
+      // gated by it when visibleRooms is still empty, matching the "sync:push" included in the
+      // visibleRooms fixture below for the same reason.
+      canPushLocalEdits: options.persistedCanPush ?? true
     };
     const settings = settingsWithRoom(server, roomState);
     const vaultAdapter = new FakeVaultAdapter();
@@ -145,6 +159,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
           ];
     const ensureSession = vi.fn().mockResolvedValue({ roomId: "room_1", relativePath: "Board.md", epoch: 0, boundToEditor: false });
     const forgetLocalDelete = vi.fn().mockResolvedValue(undefined);
+    const renameSession = options.renameSession ?? vi.fn().mockResolvedValue(undefined);
     // A rejecting writeFile makes it loudly obvious (unhandled rejection / thrown assertion) if the
     // legacy CAS lane's debounced push were ever to actually run - though the primary assertions
     // below are synchronous and don't require the debounce timer to fire at all.
@@ -157,13 +172,13 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     internals.app = { vault: { configDir: ".obsidian" } };
     internals.vaultAdapter = vaultAdapter;
     internals.syncEngine = new VaultSyncEngine(vaultAdapter, api);
-    internals.crdtSessionManager = { ensureSession, forgetLocalDelete } as unknown as CrdtSessionManager;
+    internals.crdtSessionManager = { ensureSession, forgetLocalDelete, renameSession } as unknown as CrdtSessionManager;
     internals.roomWatchers = new Map();
     internals.roomCoordinators = new Map();
     internals.saveSettings = vi.fn().mockResolvedValue(undefined);
     internals.getActiveServer = () => server;
 
-    return { plugin, internals, roomState, vaultAdapter, ensureSession, forgetLocalDelete };
+    return { plugin, internals, roomState, vaultAdapter, ensureSession, forgetLocalDelete, renameSession };
   }
 
   it("routes a local .md modify to the CRDT lane using the persisted crdtEnabled flag when visibleRooms is still empty at startup", () => {
@@ -198,5 +213,85 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     // The freshest network-confirmed visibleRooms entry (crdtEnabled: false) wins over the stale
     // persisted fallback - this file is correctly tracked by the legacy CAS lane instead.
     expect(roomState.files["Board.md"]?.dirty).toBe(true);
+  });
+
+  describe("[fourth hardware-testing round] rename short-circuit", () => {
+    it("routes an in-room rename to renameSession instead of forgetLocalDelete+ensureSession, and no-ops the paired create", () => {
+      const { internals, ensureSession, forgetLocalDelete, renameSession } = setUp({ persistedCrdtEnabled: true });
+
+      internals.watchMountedRoom("room_1");
+      // FakeVaultAdapter's emit() drives the real (unmocked) fileWatcher.ts, which for an in-room
+      // rename fires the synthetic delete-then-create pair with a RenameHint on each.
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "rename",
+        path: "Vault Rooms/demo/Projects Demo/New.md",
+        oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
+      });
+
+      expect(renameSession).toHaveBeenCalledWith("room_1", "Old.md", "New.md");
+      expect(forgetLocalDelete).not.toHaveBeenCalled();
+      expect(ensureSession).not.toHaveBeenCalled();
+    });
+
+    it("falls back to forgetLocalDelete+ensureSession when renameSession rejects", async () => {
+      const rejectingRenameSession = vi.fn().mockRejectedValue(new Error("FILE_EXISTS"));
+      const { internals, ensureSession, forgetLocalDelete } = setUp({ persistedCrdtEnabled: true, renameSession: rejectingRenameSession });
+
+      internals.watchMountedRoom("room_1");
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "rename",
+        path: "Vault Rooms/demo/Projects Demo/New.md",
+        oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
+      });
+
+      await vi.waitFor(() => expect(forgetLocalDelete).toHaveBeenCalledWith("room_1", "Old.md"));
+      expect(ensureSession).toHaveBeenCalledWith("room_1", "New.md");
+    });
+  });
+
+  // Fifth hardware-testing round (2026-07-24): "A renames a note -> B (and the renamer) get a
+  // brand-new file, the old one never goes away". Root cause: in the brief startup window before
+  // refreshRooms() resolves, visibleRooms is empty so canPushLocalEdits falls back to false while
+  // crdtEnabled falls back to a persisted true. The rename short-circuit used to require
+  // canPushLocalEdits, so it was skipped - and the create half then fell through into the ungated
+  // isCrdtManagedLocalChange path, firing ensureSession() -> crdt_create at the NEW path while the
+  // old file still existed on the server. The fix: recognize BOTH halves of a CRDT rename regardless
+  // of canPushLocalEdits (no-op when it can't push), and gate the create/modify ensureSession path by
+  // canPushLocalEdits so it can never fork.
+  describe("[fifth hardware-testing round] rename must never fork a new file when this device can't push", () => {
+    it("does NOT fork via ensureSession when a CRDT rename happens while canPushLocalEdits is false (startup window)", () => {
+      const { internals, ensureSession, forgetLocalDelete, renameSession } = setUp({
+        persistedCrdtEnabled: true,
+        persistedCanPush: false
+      });
+
+      internals.watchMountedRoom("room_1");
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "rename",
+        path: "Vault Rooms/demo/Projects Demo/New.md",
+        oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
+      });
+
+      // The whole rename is a complete no-op: no crdt_rename is sent (can't push), and crucially the
+      // create half never falls through to ensureSession (which would crdt_create a duplicate at the
+      // new path). Nothing is pushed on the CAS lane either.
+      expect(renameSession).not.toHaveBeenCalled();
+      expect(ensureSession).not.toHaveBeenCalled();
+      expect(forgetLocalDelete).not.toHaveBeenCalled();
+    });
+
+    it("does NOT fork via ensureSession for a plain .md create/modify while canPushLocalEdits is false", () => {
+      const { internals, ensureSession } = setUp({ persistedCrdtEnabled: true, persistedCanPush: false });
+
+      internals.watchMountedRoom("room_1");
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "create",
+        path: "Vault Rooms/demo/Projects Demo/Fresh.md"
+      });
+
+      // ensureSession allocates an epoch via crdt_create - a server-side write - so it must never run
+      // for a room this device can't (yet) push to. It opens later, once canPushLocalEdits resolves.
+      expect(ensureSession).not.toHaveBeenCalled();
+    });
   });
 });

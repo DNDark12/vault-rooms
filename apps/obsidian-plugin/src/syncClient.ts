@@ -9,6 +9,11 @@ export interface VaultAdapter {
   readBinary(path: string): Promise<ArrayBuffer>;
   writeBinary(path: string, data: ArrayBuffer): Promise<void>;
   delete(path: string): Promise<void>;
+  /** Moves/renames a file in place (fourth hardware-testing round, 2026-07-23) - used to apply a
+   *  `remote_crdt_rename` on a device that has no open session for the path (so there's no live
+   *  Y.Doc/editor to rekey, just a plain on-disk file to move to match the new name). A no-op is
+   *  not implied when the source doesn't exist - callers check `exists()` first where that matters. */
+  rename(oldPath: string, newPath: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   list(prefix: string): Promise<string[]>;
   /** Returns an unsubscribe function - callers are responsible for calling it once they no longer

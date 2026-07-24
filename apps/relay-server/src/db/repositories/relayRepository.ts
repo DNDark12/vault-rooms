@@ -29,7 +29,7 @@ import type {
   UserRow
 } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
-import { RelayFileRepository, type FileDeleteResult, type FileWriteResult } from "./fileRepository.js";
+import { RelayFileRepository, type FileDeleteResult, type FileRenameResult, type FileWriteResult } from "./fileRepository.js";
 import { RelayCrdtRepository, type CrdtSnapshot } from "./crdtRepository.js";
 
 export type { FileDeleteResult, FileWriteResult } from "./fileRepository.js";
@@ -1011,6 +1011,10 @@ export class RelayRepository {
 
   deleteFile(input: { roomId: string; relativePath: string; baseVersion: number; actorUserId: string }): FileDeleteResult {
     return this.files.deleteFile(input);
+  }
+
+  renameFile(input: { roomId: string; oldRelativePath: string; relativePath: string; actorUserId: string }): FileRenameResult {
+    return this.files.renameFile(input);
   }
 
   latestFileVersion(fileId: string): FileVersionWithContentRow | null {

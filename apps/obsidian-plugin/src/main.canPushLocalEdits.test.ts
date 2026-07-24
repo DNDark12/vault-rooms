@@ -40,6 +40,7 @@ class FakeVaultAdapter implements VaultAdapter {
   }
   async writeBinary(): Promise<void> {}
   async delete(): Promise<void> {}
+  async rename(): Promise<void> {}
   async exists(): Promise<boolean> {
     return true;
   }

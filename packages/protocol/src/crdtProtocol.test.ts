@@ -136,4 +136,38 @@ describe("CRDT protocol messages", () => {
     expect(roundTrip(rejectedStaleEpoch)).toEqual(rejectedStaleEpoch);
     expect(roundTrip(rejectedNoEpoch).currentEpoch).toBeUndefined();
   });
+
+  it("round-trips crdt_rename / crdt_renamed / remote_crdt_rename (fourth hardware-testing round, 2026-07-23)", () => {
+    // Replaces the old delete-old+create-new translation for a rename inside a CRDT-enabled room -
+    // epoch is unchanged (same field shape as every other CRDT message, carried for the receiving
+    // side's own bookkeeping, not because the rename bumps it - CrdtDocManager caches by (fileId,
+    // epoch), never by path, so a pure path change needs no epoch bump at all).
+    const rename: SyncClientMessage = {
+      type: "crdt_rename",
+      requestId: "req_1",
+      roomId: "room_1",
+      oldRelativePath: "old-title.md",
+      relativePath: "new-title.md"
+    };
+    const renamed: SyncServerMessage = {
+      type: "crdt_renamed",
+      requestId: "req_1",
+      roomId: "room_1",
+      oldRelativePath: "old-title.md",
+      relativePath: "new-title.md",
+      epoch: 0
+    };
+    const remoteRename: SyncServerMessage = {
+      type: "remote_crdt_rename",
+      roomId: "room_1",
+      oldRelativePath: "old-title.md",
+      relativePath: "new-title.md",
+      epoch: 0,
+      renamedBy: { userId: "usr_1", displayName: "Alice" }
+    };
+
+    expect(roundTrip(rename)).toEqual(rename);
+    expect(roundTrip(renamed)).toEqual(renamed);
+    expect(roundTrip(remoteRename)).toEqual(remoteRename);
+  });
 });

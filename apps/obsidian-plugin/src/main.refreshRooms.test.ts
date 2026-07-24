@@ -85,7 +85,8 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       saveSettings: () => Promise<void>;
       renderOpenRoomsViews: () => void;
     };
-    internals.app = {};
+    internals.app = { workspace: { getLeavesOfType: () => [] } };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews: vi.fn() };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = saveSettings;
@@ -130,7 +131,8 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       saveSettings: () => Promise<void>;
       renderOpenRoomsViews: () => void;
     };
-    internals.app = {};
+    internals.app = { workspace: { getLeavesOfType: () => [] } };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews: vi.fn() };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = saveSettings;
@@ -178,7 +180,8 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       saveSettings: () => Promise<void>;
       renderOpenRoomsViews: () => void;
     };
-    internals.app = {};
+    internals.app = { workspace: { getLeavesOfType: () => [] } };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews: vi.fn() };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = saveSettings;
@@ -187,5 +190,46 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
     await plugin.refreshRooms({ notify: false });
 
     expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  // Fifth hardware-testing round (2026-07-24): after a restart, an already-open CRDT note stayed an
+  // unbound plain editor - live keystrokes went to disk (lossy reconcile), never to the shared Y.Doc,
+  // so two people typing on the same line didn't merge. connectSyncSocket() binds panes once, while
+  // visibleRooms is still empty (refreshRooms is fire-and-forget), and nothing re-ran the bind pass
+  // after the room list loaded. refreshRooms() now re-runs the open-pane bind pass so panes bind once
+  // their room resolves CRDT-enabled.
+  it("[fifth hardware-testing round] re-runs the open-pane CRDT bind pass after the room list loads", async () => {
+    const server = serverConnection();
+    const settings: VaultRoomsSettings = {
+      servers: [server],
+      activeServerId: server.id,
+      mountRoot: "Vault Rooms",
+      debounceMs: 300,
+      mountedRooms: {},
+      roomMountPaths: {},
+      server: { maxFileBytes: 1024, autoStart: false }
+    };
+    const api = { listRooms: vi.fn().mockResolvedValue({ rooms: [roomSummary({ crdtEnabled: true })] }) };
+    const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
+    plugin.settings = settings;
+    plugin.visibleRooms = [];
+    const syncOpenViews = vi.fn();
+    const internals = plugin as unknown as {
+      app: unknown;
+      requireActiveServer: () => ServerConnection;
+      apiFor: () => RelayApiClient;
+      saveSettings: () => Promise<void>;
+      renderOpenRoomsViews: () => void;
+    };
+    internals.app = { workspace: { getLeavesOfType: () => [] } };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews };
+    internals.requireActiveServer = () => server;
+    internals.apiFor = () => api as unknown as RelayApiClient;
+    internals.saveSettings = vi.fn().mockResolvedValue(undefined);
+    internals.renderOpenRoomsViews = vi.fn();
+
+    await plugin.refreshRooms({ notify: false });
+
+    expect(syncOpenViews).toHaveBeenCalled();
   });
 });

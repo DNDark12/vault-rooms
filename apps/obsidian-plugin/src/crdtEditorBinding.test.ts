@@ -59,7 +59,8 @@ function makeManager(): CrdtSessionManager {
     docStore,
     isRoomCrdtEnabled: () => true,
     readDiskText: async () => "",
-    writeDiskText: async () => undefined
+    writeDiskText: async () => undefined,
+    renameDiskFile: async () => undefined
   });
 }
 

@@ -20,6 +20,7 @@ class FakeVaultAdapter implements VaultAdapter {
   }
   async writeBinary(): Promise<void> {}
   async delete(): Promise<void> {}
+  async rename(): Promise<void> {}
   async exists(): Promise<boolean> {
     return false;
   }
@@ -103,6 +104,45 @@ describe("registerMountedRoomWatcher with rename events", () => {
       { type: "delete", relativePath: "Old.md" },
       { type: "create", relativePath: "New.md" }
     ]);
+  });
+
+  it("[fourth hardware-testing round] attaches a RenameHint to both halves of an in-room rename, correlating them", () => {
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const received: Array<{ type: string; relativePath: string; renameHint?: unknown }> = [];
+    registerMountedRoomWatcher(
+      vault,
+      room,
+      (event, relativePath, renameHint) => {
+        received.push({ type: event.type, relativePath, renameHint });
+      },
+      CONFIG_DIR
+    );
+
+    vault.emit({ type: "rename", path: "Vault Rooms/demo/Projects Demo/New.md", oldPath: "Vault Rooms/demo/Projects Demo/Old.md" });
+
+    expect(received).toEqual([
+      { type: "delete", relativePath: "Old.md", renameHint: { renamedToRelativePath: "New.md" } },
+      { type: "create", relativePath: "New.md", renameHint: { renamedFromRelativePath: "Old.md" } }
+    ]);
+  });
+
+  it("does not attach a RenameHint for a cross-boundary move (only a genuine in-room rename correlates)", () => {
+    const vault = new FakeVaultAdapter();
+    const room = createRoom();
+    const received: Array<{ type: string; relativePath: string; renameHint?: unknown }> = [];
+    registerMountedRoomWatcher(
+      vault,
+      room,
+      (event, relativePath, renameHint) => {
+        received.push({ type: event.type, relativePath, renameHint });
+      },
+      CONFIG_DIR
+    );
+
+    vault.emit({ type: "rename", path: "Elsewhere/Old.md", oldPath: "Vault Rooms/demo/Projects Demo/Old.md" });
+
+    expect(received).toEqual([{ type: "delete", relativePath: "Old.md", renameHint: undefined }]);
   });
 
   it("dispatches a move out of the room as a plain delete", () => {

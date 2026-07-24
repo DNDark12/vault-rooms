@@ -12,7 +12,12 @@ export type SyncClientMessage =
   | { type: "crdt_create"; requestId: string; roomId: string; relativePath: string }
   | { type: "crdt_sync_step1"; requestId: string; roomId: string; relativePath: string; epoch: number; stateVector: string }
   | { type: "crdt_sync_step2"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string }
-  | { type: "crdt_update"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string };
+  | { type: "crdt_update"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string }
+  // --- CRDT atomic rename (fourth hardware-testing round, 2026-07-23) - replaces the old
+  // delete-old+create-new translation for a rename inside a CRDT-enabled room: preserves the
+  // file's stable id/epoch/history (CrdtDocManager caches by (fileId, epoch), never by path, so a
+  // pure path change needs no doc/epoch churn at all - see relayRepository.ts's renameFile). ---
+  | { type: "crdt_rename"; requestId: string; roomId: string; oldRelativePath: string; relativePath: string };
 
 export type SyncServerMessage =
   | { type: "hello_ok"; requestId: string; userId: string; deviceId: string }
@@ -38,4 +43,14 @@ export type SyncServerMessage =
   | { type: "crdt_sync_step2"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string }
   | { type: "remote_crdt_update"; roomId: string; relativePath: string; epoch: number; update: string; updatedBy: { userId: string; displayName: string } }
   | { type: "room_mode_changed"; roomId: string; crdtEnabled: boolean }
-  | { type: "crdt_rejected"; requestId?: string; roomId: string; relativePath: string; code: string; message: string; currentEpoch?: number };
+  | { type: "crdt_rejected"; requestId?: string; roomId: string; relativePath: string; code: string; message: string; currentEpoch?: number }
+  // --- CRDT atomic rename (fourth hardware-testing round, 2026-07-23) ---
+  | { type: "crdt_renamed"; requestId: string; roomId: string; oldRelativePath: string; relativePath: string; epoch: number }
+  | {
+      type: "remote_crdt_rename";
+      roomId: string;
+      oldRelativePath: string;
+      relativePath: string;
+      epoch: number;
+      renamedBy: { userId: string; displayName: string };
+    };

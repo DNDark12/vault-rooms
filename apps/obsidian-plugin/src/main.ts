@@ -893,6 +893,14 @@ export default class VaultRoomsPlugin extends Plugin {
       new Notice(`Loaded ${this.visibleRooms.length} room(s).`);
     }
     this.renderOpenRoomsViews();
+    // Now that visibleRooms carries each room's freshest crdtEnabled, re-run the open-pane bind pass:
+    // resolveCrdtTarget can only bind a note once its room resolves CRDT-enabled, and at cold restart
+    // connectSyncSocket()'s single handleActiveEditorChanged() call runs while visibleRooms is still
+    // empty (refreshRooms is fired but not awaited). Without this re-run, an already-open note stays
+    // an unbound plain editor - no live Yjs merge - until the user happens to switch panes. This also
+    // unbinds a note whose room just flipped CRDT off. No-ops cleanly when nothing is open or no
+    // session manager exists yet (syncOpenViews handles both).
+    this.handleActiveEditorChanged();
   }
 
   /**
@@ -1024,8 +1032,16 @@ export default class VaultRoomsPlugin extends Plugin {
   private resolveCrdtTarget(vaultPath: string): { roomId: string; relativePath: string } | undefined {
     for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
       if (roomState.unmounted) continue;
+      // Resolve CRDT-enablement via the persisted fallback, exactly like the watcher path
+      // (watchMountedRoom) does - NOT a raw `visibleRooms.find(...)?.crdtEnabled`. visibleRooms is
+      // empty until the session's first refreshRooms() resolves (e.g. right after Obsidian restarts,
+      // restoring open panes before the room list has loaded); reading it alone here left every
+      // already-open note as an unbound plain CM6 editor for the rest of the session, so live
+      // keystrokes went to disk (lossy whole-text reconcile) instead of the shared Y.Doc - no
+      // character-level merge. handleActiveEditorChanged() is now also re-run once refreshRooms()
+      // resolves (see refreshRooms) so a room whose freshest state flips enablement rebinds too.
       const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
-      if (!room?.crdtEnabled) continue;
+      if (!resolveRoomCrdtEnabled(room, roomState)) continue;
       const prefix = `${roomState.mountPath.replace(/\/+$/, "")}/`;
       if (!vaultPath.startsWith(prefix)) continue;
       const relativePath = vaultPath.slice(prefix.length);
@@ -1086,6 +1102,17 @@ export default class VaultRoomsPlugin extends Plugin {
     await this.vaultAdapter.write(path, text);
   }
 
+  /** Moves a room's vault file to match a `remote_crdt_rename` from another device (fourth
+   *  hardware-testing round, 2026-07-23) - see CrdtSessionManagerDeps.renameDiskFile's doc comment.
+   *  A no-op if the room is no longer mounted; `vaultAdapter.rename` itself no-ops if the source
+   *  path doesn't exist locally (this device may never have downloaded the file). */
+  private async renameCrdtDiskFile(roomId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+    const roomState = this.settings.mountedRooms[roomId];
+    if (!roomState) return;
+    const mountPath = roomState.mountPath.replace(/\/+$/, "");
+    await this.vaultAdapter.rename(`${mountPath}/${oldRelativePath}`, `${mountPath}/${newRelativePath}`);
+  }
+
   private resetSessionState(): void {
     this.visibleRooms = [];
     this.teams = [];
@@ -1142,13 +1169,14 @@ export default class VaultRoomsPlugin extends Plugin {
     const unsubscribe = registerMountedRoomWatcher(
       this.vaultAdapter,
       roomState,
-      (event, relativePath) => {
+      (event, relativePath, renameHint) => {
         if (this.settings.mountedRooms[roomId] !== roomState) {
           return;
         }
         // registerMountedRoomWatcher already translates "rename" into a synthetic delete-old +
         // create-new pair (see classifyRenameEvent), so event.type here is always "create" |
-        // "modify" | "delete".
+        // "modify" | "delete". A rename fully inside the room additionally carries renameHint on
+        // each of the two calls (see fileWatcher.ts's RenameHint doc comment).
         const changeType = event.type as "create" | "modify" | "delete";
         // CRDT-managed files must never also go through the whole-file CAS lane (CLAUDE.md's
         // dual-lane invariant) - a create/modify of a `.md` path in a CRDT-enabled room instead
@@ -1164,7 +1192,72 @@ export default class VaultRoomsPlugin extends Plugin {
         // dirty in a way a later remote CRDT update would mistake for a real conflict (see
         // CLAUDE.md's post-hardware-testing audit notes for the bug this fixes).
         const crdtEnabled = resolveRoomCrdtEnabled(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
-        if (isCrdtManagedLocalChange({ crdtEnabled }, changeType, relativePath)) {
+        // Third-hardware-testing-round item 1's invariant, resolved early here too (not just at its
+        // original call site below) so the rename short-circuit can honor "a room this device can't
+        // push to must be a complete no-op" the same way the legacy CAS lane already does.
+        const canPushLocalEdits = resolveCanPushLocalEdits(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
+
+        // Fourth hardware-testing round, 2026-07-23: a rename fully inside a CRDT-enabled room,
+        // with both the old and new paths CRDT-eligible, is sent as one atomic crdt_rename instead
+        // of falling through to the delete-old+create-new handling below - preserves the file's
+        // id/epoch/history, and (unlike that translation) never tears down or re-seeds a live-bound
+        // editor's session. Handled entirely on the "delete" half of the pair; the paired "create"
+        // half is then a pure no-op (see the second branch just below), since renameSession already
+        // establishes the session under the new path.
+        // BOTH halves of a CRDT rename are recognized regardless of canPushLocalEdits (unlike the
+        // create/modify path below): if this device can't push *yet* - notably the brief startup
+        // window before refreshRooms() resolves, where canPushLocalEdits falls back to false while
+        // crdtEnabled falls back to a persisted true - the rename becomes a complete no-op instead of
+        // falling through to the create branch below. Without this, that window forked a brand-new
+        // crdt_create at the NEW path while the old file still existed server-side, so a teammate saw
+        // an unrelated new file appear (and the old one never went away) - the "rename produced a
+        // duplicate" hardware bug (fifth round, 2026-07-24). The edit is safe on disk and reconciles
+        // once canPushLocalEdits resolves true.
+        if (
+          changeType === "delete" &&
+          crdtEnabled &&
+          renameHint &&
+          "renamedToRelativePath" in renameHint &&
+          isCrdtEligiblePath(relativePath) &&
+          isCrdtEligiblePath(renameHint.renamedToRelativePath)
+        ) {
+          if (canPushLocalEdits) {
+            const newRelativePath = renameHint.renamedToRelativePath;
+            void this.crdtSessionManager?.renameSession(roomId, relativePath, newRelativePath).catch((error) => {
+              // Falls back to the pre-existing delete+create handling on a rejected rename (the new
+              // path already taken, permission denied, etc.) - so the file still ends up synced
+              // *somehow* rather than left stuck half-renamed with no server-side effect at all.
+              console.error(`Vault Rooms: crdt_rename failed for "${relativePath}" -> "${newRelativePath}", falling back to delete+create`, error);
+              void this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath).catch(() => undefined);
+              void this.crdtSessionManager?.ensureSession(roomId, newRelativePath).catch((ensureError) => {
+                console.error(`Vault Rooms: failed to open CRDT session for "${newRelativePath}"`, ensureError);
+              });
+            });
+          }
+          return;
+        }
+        if (
+          changeType === "create" &&
+          crdtEnabled &&
+          renameHint &&
+          "renamedFromRelativePath" in renameHint &&
+          isCrdtEligiblePath(relativePath) &&
+          isCrdtEligiblePath(renameHint.renamedFromRelativePath)
+        ) {
+          // Tail half of the same rename - the "delete" half above owns it (or intentionally no-op'd
+          // it when this device can't push). It is NEVER an independent crdt_create, which is exactly
+          // what used to fork the duplicate file when the delete half was skipped for canPushLocalEdits.
+          return;
+        }
+
+        // A CRDT-managed create/modify opens/ensures the session - but ONLY when this device can
+        // actually push. ensureSession allocates a fresh epoch via crdt_create the first time this
+        // device sees a path, which is itself a server-side write; running it for a room this device
+        // can't (yet) push to is what let the rename fork slip through here. Deferring is safe: the
+        // edit is on disk, and the editor-binding pass (or the next event once canPushLocalEdits
+        // resolves true) opens the session then. Same "unknown/stale state must never risk a push"
+        // invariant the CAS lane already enforces below (third-hardware-testing-round item 1).
+        if (canPushLocalEdits && isCrdtManagedLocalChange({ crdtEnabled }, changeType, relativePath)) {
           void this.crdtSessionManager?.ensureSession(roomId, relativePath).catch((error) => {
             console.error(`Vault Rooms: failed to open CRDT session for "${relativePath}"`, error);
           });
@@ -1184,8 +1277,8 @@ export default class VaultRoomsPlugin extends Plugin {
         // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate
         // basis to ever treat a local vault change as a real edit worth protecting - the watcher must
         // be a complete no-op for it (never dirty-mark, never attempt a push), same resolver/fallback
-        // shape as resolveRoomCrdtEnabled above.
-        const canPushLocalEdits = resolveCanPushLocalEdits(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
+        // shape as resolveRoomCrdtEnabled above (canPushLocalEdits itself is now resolved once, near
+        // the top of this callback, so the rename short-circuit above can honor the same invariant).
         if (!canPushLocalEdits) {
           return;
         }
@@ -1243,7 +1336,8 @@ export default class VaultRoomsPlugin extends Plugin {
       docStore: this.crdtDocStore,
       isRoomCrdtEnabled: (roomId) => resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), this.settings.mountedRooms[roomId]),
       readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
-      writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text)
+      writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
+      renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath)
     });
     // A session manager didn't exist a moment ago (unbindAll()/dispose() above tore down the
     // previous one, if any) - retroactively re-run the full open-pane reconcile, so every note that

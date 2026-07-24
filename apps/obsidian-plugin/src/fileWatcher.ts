@@ -81,25 +81,38 @@ export function classifyRenameEvent(oldPath: string, newPath: string, room: Moun
   return { kind: "ignore" };
 }
 
+/**
+ * Attached to the synthetic delete/create pair `registerMountedRoomWatcher` emits for a rename
+ * fully inside a room (fourth hardware-testing round, 2026-07-23) - lets a CRDT-aware caller
+ * recognize "these two calls are actually one rename" and short-circuit them into a single atomic
+ * `crdt_rename` (preserving the file's identity/epoch/history) instead of the old delete-old+
+ * create-new handling, without changing what any *other* caller (the legacy CAS lane, a non-CRDT
+ * room) receives - both calls still fire exactly as before, so ignoring this hint is always safe
+ * and behavior-preserving.
+ */
+export type RenameHint = { renamedToRelativePath: string } | { renamedFromRelativePath: string };
+
 /** Returns an unsubscribe function - callers must invoke it when the room is unmounted, or the
  *  underlying vault listener (and everything it closes over) stays registered for the rest of
  *  the session even though it'll never match this room's mountPath again.
  *
  *  A rename/move is translated into a delete-of-old plus create-of-new (see classifyRenameEvent)
  *  so callers only ever need to handle the same "create" | "modify" | "delete" shape they already
- *  do for plain vault events - there is no separate "move" concept in the sync protocol. */
+ *  do for plain vault events - there is no separate "move" concept in the sync protocol. A rename
+ *  fully inside the room additionally carries a RenameHint on each of the two calls (see its doc
+ *  comment) for callers that want to recognize and specially handle that case. */
 export function registerMountedRoomWatcher(
   vault: VaultAdapter,
   room: MountedRoomState,
-  cb: (event: VaultChangeEvent, relativePath: string) => void,
+  cb: (event: VaultChangeEvent, relativePath: string, renameHint?: RenameHint) => void,
   configDir: string
 ): () => void {
   return vault.onChange((event) => {
     if (event.type === "rename") {
       const classification = classifyRenameEvent(event.oldPath, event.path, room, configDir);
       if (classification.kind === "rename") {
-        cb({ type: "delete", path: event.oldPath }, classification.oldRelativePath);
-        cb({ type: "create", path: event.path }, classification.relativePath);
+        cb({ type: "delete", path: event.oldPath }, classification.oldRelativePath, { renamedToRelativePath: classification.relativePath });
+        cb({ type: "create", path: event.path }, classification.relativePath, { renamedFromRelativePath: classification.oldRelativePath });
       } else if (classification.kind === "delete") {
         cb({ type: "delete", path: event.oldPath }, classification.relativePath);
       } else if (classification.kind === "create") {

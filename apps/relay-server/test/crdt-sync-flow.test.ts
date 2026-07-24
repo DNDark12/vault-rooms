@@ -579,4 +579,114 @@ describe("CRDT sync flow (Phase 4)", () => {
       content: "owner's edit the reader must eventually see"
     });
   });
+
+  describe("[fourth hardware-testing round] crdt_rename - atomic rename replacing delete-old+create-new", () => {
+    it("renames in place, preserving the file's epoch/identity and content (no re-seed, no data loss)", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const socket = await connect(app);
+      await helloAndSubscribe(socket, owner.deviceToken, room.id);
+      socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "old-title.md" });
+      const created = await nextMessage(socket, "crdt_created");
+      socket.sendJson({
+        type: "crdt_update",
+        requestId: "u1",
+        roomId: room.id,
+        relativePath: "old-title.md",
+        epoch: created.epoch,
+        update: base64OfUpdate(Y.encodeStateAsUpdate((() => {
+          const doc = new Y.Doc();
+          doc.getText(CRDT_TEXT_KEY).insert(0, "content that must survive the rename");
+          return doc;
+        })()))
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      socket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "old-title.md", relativePath: "new-title.md" });
+      const renamed = await nextMessage(socket, "crdt_renamed");
+      expect(renamed).toMatchObject({ requestId: "r1", roomId: room.id, oldRelativePath: "old-title.md", relativePath: "new-title.md", epoch: created.epoch });
+
+      // Same epoch, same document identity - a handshake at the new path against the same epoch
+      // returns the content untouched, proving this was not a delete+recreate under the hood.
+      socket.sendJson({
+        type: "crdt_sync_step1",
+        requestId: "h1",
+        roomId: room.id,
+        relativePath: "new-title.md",
+        epoch: created.epoch,
+        stateVector: emptyStateVectorBase64()
+      });
+      const step2 = await nextMessage(socket, "crdt_sync_step2");
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, new Uint8Array(Buffer.from(step2.update, "base64")));
+      expect(doc.getText(CRDT_TEXT_KEY).toString()).toBe("content that must survive the rename");
+    });
+
+    it("broadcasts remote_crdt_rename to other subscribers, who never see a delete/create pair for it", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const renamer = await connect(app);
+      await helloAndSubscribe(renamer, owner.deviceToken, room.id);
+      renamer.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "old-title.md" });
+      const created = await nextMessage(renamer, "crdt_created");
+
+      const peer = await connect(app);
+      await helloAndSubscribe(peer, owner.deviceToken, room.id);
+
+      renamer.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "old-title.md", relativePath: "new-title.md" });
+      await nextMessage(renamer, "crdt_renamed");
+
+      const remoteRename = await nextMessage(peer, "remote_crdt_rename");
+      expect(remoteRename).toMatchObject({ roomId: room.id, oldRelativePath: "old-title.md", relativePath: "new-title.md", epoch: created.epoch });
+      // The renamer itself is excluded from its own broadcast (matches remote_file_delete/
+      // remote_crdt_update's existing `exclude: connection` convention).
+      await expect(nextMessage(renamer, "remote_crdt_rename")).rejects.toThrow(/Timed out/);
+    });
+
+    it("rejects with FILE_EXISTS when the new path is already taken by another live file", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const socket = await connect(app);
+      await helloAndSubscribe(socket, owner.deviceToken, room.id);
+      socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "a.md" });
+      await nextMessage(socket, "crdt_created");
+      socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "b.md" });
+      await nextMessage(socket, "crdt_created");
+
+      socket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "a.md", relativePath: "b.md" });
+      expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({ requestId: "r1", code: "FILE_EXISTS" });
+    });
+
+    it("rejects with NOT_FOUND when the source path does not exist", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const socket = await connect(app);
+      await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+      socket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "missing.md", relativePath: "new.md" });
+      expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({ requestId: "r1", code: "NOT_FOUND" });
+    });
+
+    it("[ACL parity] requires file:delete on the old path and file:create on the new path - a reader is rejected and nothing changes", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const ownerSocket = await connect(app);
+      await helloAndSubscribe(ownerSocket, owner.deviceToken, room.id);
+      ownerSocket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+      const created = await nextMessage(ownerSocket, "crdt_created");
+
+      const reader = await addMember(app, owner, room, "reader");
+      const readerSocket = await connect(app);
+      await helloAndSubscribe(readerSocket, reader.deviceToken, room.id);
+
+      readerSocket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "note.md", relativePath: "renamed.md" });
+      expect(await nextMessage(readerSocket, "crdt_rejected")).toMatchObject({ requestId: "r1", code: "PERMISSION_DENIED" });
+
+      // Confirm nothing actually moved - the original path still answers under its original epoch.
+      ownerSocket.sendJson({
+        type: "crdt_sync_step1",
+        requestId: "h1",
+        roomId: room.id,
+        relativePath: "note.md",
+        epoch: created.epoch,
+        stateVector: emptyStateVectorBase64()
+      });
+      await nextMessage(ownerSocket, "crdt_sync_step2");
+    });
+  });
 });

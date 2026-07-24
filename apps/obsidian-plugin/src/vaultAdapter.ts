@@ -48,6 +48,20 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     await this.app.vault.createBinary(normalized, data);
   }
 
+  async rename(oldPath: string, newPath: string): Promise<void> {
+    const normalizedOld = normalizePath(oldPath);
+    const normalizedNew = normalizePath(newPath);
+    const existing = this.app.vault.getAbstractFileByPath(normalizedOld);
+    if (!existing) {
+      return;
+    }
+    await this.ensureFolder(normalizedNew);
+    // FileManager.renameFile (not Vault#rename) so backlinks get updated the same way they would
+    // for a user-driven rename in Obsidian's own UI - this is applying someone else's rename, not
+    // a raw file-system move.
+    await this.app.fileManager.renameFile(existing, normalizedNew);
+  }
+
   async delete(path: string): Promise<void> {
     const existing = this.app.vault.getAbstractFileByPath(normalizePath(path));
     if (existing) {

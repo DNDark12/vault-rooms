@@ -61,12 +61,14 @@ type Harness = {
   sent: SyncClientMessage[];
   disk: Map<string, string>;
   writes: Array<{ roomId: string; relativePath: string; text: string }>;
+  renames: Array<{ roomId: string; oldRelativePath: string; newRelativePath: string }>;
 };
 
 function createHarness(overrides: Partial<CrdtSessionManagerDeps> = {}, docStore = makeDocStore()): Harness {
   const sent: SyncClientMessage[] = [];
   const disk = new Map<string, string>();
   const writes: Array<{ roomId: string; relativePath: string; text: string }> = [];
+  const renames: Array<{ roomId: string; oldRelativePath: string; newRelativePath: string }> = [];
   let counter = 0;
   const manager = new CrdtSessionManager({
     send: (message) => sent.push(message),
@@ -77,10 +79,19 @@ function createHarness(overrides: Partial<CrdtSessionManagerDeps> = {}, docStore
       writes.push({ roomId, relativePath, text });
       disk.set(`${roomId}/${relativePath}`, text);
     },
+    renameDiskFile: async (roomId, oldRelativePath, newRelativePath) => {
+      renames.push({ roomId, oldRelativePath, newRelativePath });
+      const key = `${roomId}/${oldRelativePath}`;
+      const content = disk.get(key);
+      if (content !== undefined) {
+        disk.delete(key);
+        disk.set(`${roomId}/${newRelativePath}`, content);
+      }
+    },
     createRequestId: () => `req_${++counter}`,
     ...overrides
   });
-  return { manager, sent, disk, writes };
+  return { manager, sent, disk, writes, renames };
 }
 
 function ack(harness: Harness, message: SyncServerMessage): Promise<void> {
@@ -403,6 +414,111 @@ describe("CrdtSessionManager - reconcile vs. concurrent remote update race", () 
 
     expect(session.ytext.toString()).toBe("1122");
     expect(writes).toContainEqual({ roomId: "room_1", relativePath: "Board.md", text: "1122" });
+  });
+});
+
+describe("CrdtSessionManager - atomic rename (fourth hardware-testing round, 2026-07-23)", () => {
+  it("renameSession sends crdt_rename, then rekeys the session in place - same Y.Doc, no re-seed, epoch preserved", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "old-title.md", crdtEpoch: 0 }]);
+    const session = await harness.manager.ensureSession("room_1", "old-title.md");
+    session.doc.transact(() => session.ytext.insert(0, "content that must survive the rename"), null);
+
+    const renamePromise = harness.manager.renameSession("room_1", "old-title.md", "new-title.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    expect(renameMessage).toMatchObject({ roomId: "room_1", oldRelativePath: "old-title.md", relativePath: "new-title.md" });
+
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "old-title.md",
+      relativePath: "new-title.md",
+      epoch: 0
+    });
+    await renamePromise;
+
+    // Old key is gone, new key resolves to the *same* session/doc/ytext object - not a fresh one.
+    expect(harness.manager.isSessionOpen("room_1", "old-title.md")).toBe(false);
+    expect(harness.manager.isSessionOpen("room_1", "new-title.md")).toBe(true);
+    const rekeyed = await harness.manager.ensureSession("room_1", "new-title.md");
+    expect(rekeyed).toBe(session);
+    expect(rekeyed.ytext.toString()).toBe("content that must survive the rename");
+    expect(rekeyed.epoch).toBe(0);
+
+    // A further local edit now forwards crdt_update tagged with the *new* path - not the old one
+    // the doc.on("update") listener originally captured (see openSession's doc comment on why this
+    // must read from `session` dynamically, not the closure's original params).
+    harness.sent.length = 0;
+    session.doc.transact(() => session.ytext.insert(session.ytext.length, "!"), null);
+    const update = harness.sent.find((message) => message.type === "crdt_update") as Extract<SyncClientMessage, { type: "crdt_update" }>;
+    expect(update).toMatchObject({ roomId: "room_1", relativePath: "new-title.md" });
+  });
+
+  it("a rejected crdt_rename (e.g. FILE_EXISTS) rejects renameSession's promise without touching the old session", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "old-title.md", crdtEpoch: 0 }]);
+    const session = await harness.manager.ensureSession("room_1", "old-title.md");
+
+    const renamePromise = harness.manager.renameSession("room_1", "old-title.md", "taken.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+
+    await ack(harness, {
+      type: "crdt_rejected",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      relativePath: "taken.md",
+      code: "FILE_EXISTS",
+      message: "A file already exists at the new path."
+    });
+
+    await expect(renamePromise).rejects.toThrow(/A file already exists/);
+    expect(harness.manager.isSessionOpen("room_1", "old-title.md")).toBe(true);
+    expect(await harness.manager.ensureSession("room_1", "old-title.md")).toBe(session);
+  });
+
+  it("applies a remote_crdt_rename by moving the on-disk file, even with no local session ever opened for it", async () => {
+    const harness = createHarness();
+    harness.disk.set("room_1/old-title.md", "never opened this file locally");
+
+    await ack(harness, {
+      type: "remote_crdt_rename",
+      roomId: "room_1",
+      oldRelativePath: "old-title.md",
+      relativePath: "new-title.md",
+      epoch: 0,
+      renamedBy: { userId: "user_2", displayName: "Teammate" }
+    });
+
+    expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "old-title.md", newRelativePath: "new-title.md" });
+    expect(harness.disk.get("room_1/new-title.md")).toBe("never opened this file locally");
+    expect(harness.disk.has("room_1/old-title.md")).toBe(false);
+  });
+
+  it("applies a remote_crdt_rename to a locally-open session too (this device also had the file open), preserving its content", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "old-title.md", crdtEpoch: 0 }]);
+    const session = await harness.manager.ensureSession("room_1", "old-title.md");
+    session.doc.transact(() => session.ytext.insert(0, "both devices had this open"), null);
+
+    await ack(harness, {
+      type: "remote_crdt_rename",
+      roomId: "room_1",
+      oldRelativePath: "old-title.md",
+      relativePath: "new-title.md",
+      epoch: 0,
+      renamedBy: { userId: "user_2", displayName: "Teammate" }
+    });
+
+    expect(harness.manager.isSessionOpen("room_1", "old-title.md")).toBe(false);
+    const rekeyed = await harness.manager.ensureSession("room_1", "new-title.md");
+    expect(rekeyed).toBe(session);
+    expect(rekeyed.ytext.toString()).toBe("both devices had this open");
+    // The vault file still gets moved on disk too - a session being open doesn't own the vault's
+    // own notion of this file's identity/filename, only the CRDT content does.
+    expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "old-title.md", newRelativePath: "new-title.md" });
   });
 });
 

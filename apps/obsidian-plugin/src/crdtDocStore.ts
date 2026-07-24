@@ -84,6 +84,25 @@ export class CrdtDocStore {
     await this.prunePriorEpochs(dir, prefix, epoch);
   }
 
+  /**
+   * Moves a persisted document's on-disk entry to match a renamed path (fourth hardware-testing
+   * round, 2026-07-23), preserving the exact same epoch's persisted bytes rather than losing them
+   * (which would force a reseed-from-disk-text on next load, discarding fine-grained Yjs structure/
+   * history even though the actual text content would still be recovered via the disk fallback).
+   * `roomDir` only depends on `roomId` (unchanged by a rename), so this is always a same-directory
+   * move of one file, keyed by the new path's content hash. A no-op if nothing was ever persisted
+   * for this exact epoch yet - the next `save()` simply writes under the new key from scratch.
+   */
+  async rename(roomId: string, oldRelativePath: string, newRelativePath: string, epoch: number): Promise<void> {
+    const { path: oldPath } = await this.keyFor(roomId, oldRelativePath, epoch);
+    if (!(await this.adapter.exists(oldPath))) {
+      return;
+    }
+    const { dir, path: newPath } = await this.keyFor(roomId, newRelativePath, epoch);
+    await this.ensureDir(dir);
+    await this.adapter.rename(oldPath, newPath);
+  }
+
   /** Cleanup on epoch bump (contract 1.12): removes the specific stale entry for a superseded
    *  epoch, if present. Idempotent - a no-op when nothing was ever persisted for that epoch. */
   async deleteEpoch(roomId: string, relativePath: string, epoch: number): Promise<void> {
