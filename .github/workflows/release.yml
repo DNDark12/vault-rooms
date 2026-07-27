@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "*"
+  # Lets an existing tag be (re)released without deleting and re-pushing it. Needed in practice: a run
+  # that fails after the tag is already pushed otherwise leaves you doing tag surgery to retry, and a
+  # release created by hand ends up with only GitHub's auto-generated source archives - which fails
+  # Obsidian's automated review, since it looks for main.js/manifest.json as real release assets.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. 0.2.3)"
+        required: true
 
 jobs:
   build:
@@ -14,6 +23,14 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On a tag push this is the tag itself; on a manual run it's whatever tag was supplied, so the
+          # build always comes from the tagged commit rather than from the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: release
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Use pnpm
         uses: pnpm/action-setup@v4
@@ -39,7 +56,7 @@ jobs:
 
       - name: Verify tag matches manifest.json version
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
+          tag="${{ steps.release.outputs.tag }}"
           version=$(node -p "require('./manifest.json').version")
           if [ "$tag" != "$version" ]; then
             echo "Tag ($tag) does not match manifest.json version ($version)." >&2
@@ -54,13 +71,24 @@ jobs:
             manifest.json
             styles.css
 
-      - name: Create release
+      - name: Create or update release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
+          tag="${{ steps.release.outputs.tag }}"
 
-          gh release create "$tag" \
-            --title="$tag" \
-            --draft \
-            main.js manifest.json styles.css
+          # Upload into an existing release rather than failing with "tag name has already been taken".
+          # That error is what you hit after any partial attempt - including a release someone created by
+          # hand - and the recovery is always the same: attach the three real assets to what's there.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists - attaching assets."
+            gh release upload "$tag" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$tag" \
+              --title="$tag" \
+              --draft \
+              main.js manifest.json styles.css
+          fi
+
+          gh release view "$tag" --json isDraft,assets \
+            --jq '"draft=\(.isDraft) assets=\([.assets[].name] | join(", "))"'
