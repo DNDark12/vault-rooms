@@ -170,6 +170,13 @@ async function handleMessage(
     return;
   }
 
+  if (message.type === "unsubscribe_room") {
+    // Idempotent local lifecycle operation: removing a room the connection never subscribed to is
+    // harmless, and needs no room lookup/permission check because it can only reduce delivery.
+    connection.subscriptions.delete(message.roomId);
+    return;
+  }
+
   if (message.type === "subscribe_room") {
     try {
       // A previously-mounted room can legitimately no longer exist by the time a client
@@ -398,13 +405,20 @@ async function handleMessage(
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath: normalizedPath });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:create", relativePath: normalizedPath });
       const createdBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
+      const existingBeforeCreate = repo.getFile(room.id, normalizedPath);
       const created = repo.createCrdtFile({
         roomId: room.id,
         relativePath: normalizedPath,
         actorUserId: connection.principal.userId,
-        actorDisplayName: connection.principal.userDisplayName
+        actorDisplayName: connection.principal.userDisplayName,
+        adoptIfExists: message.adoptIfExists === true
       });
-      options.crdtDocManager.createDocument(created.fileId, created.epoch, createdBy);
+      // Seeding replaces the document's snapshot with a fresh empty Y.Doc, so it must never run for a
+      // document that was *adopted* rather than created - that would wipe the note's content.
+      const adopted = Boolean(existingBeforeCreate && !existingBeforeCreate.deleted_at && created.fileId === existingBeforeCreate.id);
+      if (!adopted) {
+        options.crdtDocManager.createDocument(created.fileId, created.epoch, createdBy);
+      }
       // `created.relativePath` may differ from what was asked for: first creator keeps the name, and a
       // second device creating a *different* note at the same path (Obsidian's identical default name
       // for every new note) is given its own disambiguated path instead of being rejected or merged
@@ -416,7 +430,10 @@ async function handleMessage(
         roomId: room.id,
         relativePath: created.relativePath,
         documentId: created.fileId,
-        epoch: created.epoch
+        epoch: created.epoch,
+        // Tells the client whether its local disk copy is this document's only content (create) or a
+        // second copy of what the server already holds (adopt) - see the field's doc comment.
+        adopted
       });
       // Announce the new (empty) document to everyone else right away. Without this, a brand-new note
       // was invisible to every other device until their next subscribe_room: `crdt_create` had no

@@ -48,6 +48,10 @@ import {
   type PinnedServerInfo
 } from "./pinnedTransport.js";
 
+function crdtRenameMarkerKey(roomId: string, oldRelativePath: string, newRelativePath: string): string {
+  return `${roomId} ${oldRelativePath} ${newRelativePath}`;
+}
+
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
   visibleRooms: RoomSummary[] = [];
@@ -118,9 +122,9 @@ export default class VaultRoomsPlugin extends Plugin {
     subscribeRoom: (roomId) => {
       self.syncSocket?.subscribe(roomId);
     },
-    disposeCrdtRoom: (roomId) => {
-      void self.crdtSessionManager?.disposeRoom(roomId);
-    }
+    unsubscribeRoom: (roomId) => self.syncSocket?.unsubscribe(roomId),
+    unbindCrdtRoom: (roomId) => self.crdtEditorController.unbindRoom(roomId),
+    disposeCrdtRoom: async (roomId) => self.crdtSessionManager?.disposeRoom(roomId)
   }))(this);
   private readonly serverConnectionManager: ServerConnectionManager = new ServerConnectionManager(this.ctx);
 
@@ -186,6 +190,11 @@ export default class VaultRoomsPlugin extends Plugin {
       id: "open-rooms-panel",
       name: "Open rooms panel",
       callback: () => this.openRoomsPanel()
+    });
+    this.addCommand({
+      id: "diagnose-live-editing",
+      name: "Diagnose live editing (CRDT) for the active note",
+      callback: () => this.diagnoseLiveEditing()
     });
     this.addCommand({
       id: "setup-server",
@@ -1090,6 +1099,89 @@ export default class VaultRoomsPlugin extends Plugin {
     void this.crdtEditorController.syncOpenViews(openViews);
   }
 
+  /**
+   * Reports, for the note currently open, exactly which link in the live-editing chain is or isn't in
+   * place. Live per-keystroke sync needs *all* of: the room resolving CRDT-enabled, this device being
+   * allowed to push, the path being CRDT-eligible, a CM6 `EditorView` reachable from Obsidian's public
+   * `Editor` (the undocumented `.cm` accessor - the one link that cannot be unit-tested, see
+   * handleActiveEditorChanged), an open CRDT session, and that session being bound to the view. When
+   * any single link is missing, edits still sync, but only after Obsidian's own autosave writes the
+   * file (~2s of inactivity, or immediately when the editor loses focus) and then through the
+   * whole-file/materialize path - which is precisely the "~3s delay, or instant when I click away"
+   * symptom reported repeatedly from real hardware. This exists so that symptom can be attributed to a
+   * specific broken link in one step instead of another round of guessing.
+   */
+  private diagnoseLiveEditing(): void {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const file = view?.file;
+    if (!view || !file) {
+      new Notice("Vault Rooms: open a note first, then run this command again.");
+      return;
+    }
+    const target = this.resolveCrdtTarget(file.path);
+    const cmView = getCmEditorView(view.editor);
+    const sessionOpen = target ? (this.crdtSessionManager?.isSessionOpen(target.roomId, target.relativePath) ?? false) : false;
+    const bound = cmView ? this.crdtEditorController.isBound(cmView) : false;
+    // Which mounted room *contains* this path is resolved independently of whether that room has CRDT
+    // enabled. Reporting them together (as a first version of this command did) can't distinguish "this
+    // note isn't in any mounted room" from "it is, but that room has live editing switched off" - both
+    // collapse to a null target, which is exactly the ambiguity that wasted a diagnostic round.
+    const containingRoom = Object.entries(this.settings.mountedRooms)
+      .filter(([, roomState]) => !roomState.unmounted)
+      .map(([roomId, roomState]) => ({ roomId, roomState, prefix: `${roomState.mountPath.replace(/\/+$/, "")}/` }))
+      .find(({ prefix }) => file.path.startsWith(prefix));
+    const roomState = containingRoom?.roomState;
+    const visibleRoom = containingRoom ? this.visibleRooms.find((candidate) => candidate.id === containingRoom.roomId) : undefined;
+    const report = {
+      file: file.path,
+      crdtEligiblePath: isCrdtEligiblePath(file.path),
+      // The room this path actually falls under, regardless of its CRDT setting.
+      containingRoomId: containingRoom?.roomId ?? null,
+      containingRoomName: visibleRoom?.name ?? null,
+      containingRoomMountPath: roomState?.mountPath ?? null,
+      roomCrdtEnabled: resolveRoomCrdtEnabled(visibleRoom, roomState),
+      roomCrdtEnabledPersisted: roomState?.crdtEnabled ?? null,
+      roomCrdtEnabledFromServer: visibleRoom?.crdtEnabled ?? null,
+      canPushLocalEdits: resolveCanPushLocalEdits(visibleRoom, roomState),
+      // Null here while containingRoomId is set means the room was found but excluded - almost always
+      // because roomCrdtEnabled is false.
+      resolvedRoomId: target?.roomId ?? null,
+      relativePath: target?.relativePath ?? null,
+      editorViewFound: Boolean(cmView),
+      crdtSessionManagerReady: Boolean(this.crdtSessionManager),
+      crdtSessionOpen: sessionOpen,
+      editorBoundToSession: bound,
+      liveEditingActive: Boolean(target) && sessionOpen && bound,
+      mountedRooms: Object.entries(this.settings.mountedRooms).map(([roomId, state]) => ({
+        roomId,
+        name: this.visibleRooms.find((candidate) => candidate.id === roomId)?.name ?? null,
+        mountPath: state.mountPath,
+        unmounted: Boolean(state.unmounted),
+        crdtEnabled: resolveRoomCrdtEnabled(
+          this.visibleRooms.find((candidate) => candidate.id === roomId),
+          state
+        )
+      }))
+    };
+    console.warn("Vault Rooms: live-editing diagnostics", report);
+    const verdict = report.liveEditingActive
+      ? "Live editing IS active for this note."
+      : !report.containingRoomId
+        ? "This note is not inside any mounted room, so it never syncs at all."
+        : !report.roomCrdtEnabled
+          ? `Live editing is switched OFF for the room "${report.containingRoomName ?? report.containingRoomId}" - turn on "Live editing (CRDT sync)" in that room's settings.`
+          : !target
+            ? "This note is in a CRDT-enabled room but was still excluded as a target - check the console details."
+            : !report.canPushLocalEdits
+          ? "This device can't push to that room yet, so nothing is being sent."
+          : !report.editorViewFound
+            ? "Obsidian's editor object exposed no CodeMirror view, so the note cannot be bound - this is the one link that depends on Obsidian's internals."
+            : !report.crdtSessionOpen
+              ? "No CRDT session is open for this note yet."
+              : "A session is open but this editor isn't bound to it.";
+    new Notice(`Vault Rooms: ${verdict} Full details are in the developer console.`, 10000);
+  }
+
   /** Reads current on-disk text for CRDT reconciliation - null if the file doesn't exist locally
    *  yet (nothing to reconcile against). */
   private async readCrdtDiskText(roomId: string, relativePath: string): Promise<string | null> {
@@ -1122,11 +1214,11 @@ export default class VaultRoomsPlugin extends Plugin {
     // push back as a crdt_rename - an echo the server can only reject (it already holds the document
     // at the new path), and one that fed the unbounded rename/announce loop. See the suppression
     // check in watchMountedRoom's callback.
-    this.selfInflictedRenames.add(`${roomId} ${oldRelativePath} ${newRelativePath}`);
+    this.selfInflictedRenames.add(crdtRenameMarkerKey(roomId, oldRelativePath, newRelativePath));
     try {
       await this.vaultAdapter.rename(`${mountPath}/${oldRelativePath}`, `${mountPath}/${newRelativePath}`);
     } catch (error) {
-      this.selfInflictedRenames.delete(`${roomId} ${oldRelativePath} ${newRelativePath}`);
+      this.selfInflictedRenames.delete(crdtRenameMarkerKey(roomId, oldRelativePath, newRelativePath));
       throw error;
     }
   }
@@ -1241,12 +1333,12 @@ export default class VaultRoomsPlugin extends Plugin {
         // available for its partner. A genuine later user rename of the same pair re-adds nothing and
         // is therefore still honored.
         if (renameHint && "renamedToRelativePath" in renameHint) {
-          if (this.selfInflictedRenames.has(`${roomId} ${relativePath} ${renameHint.renamedToRelativePath}`)) {
+          if (this.selfInflictedRenames.has(crdtRenameMarkerKey(roomId, relativePath, renameHint.renamedToRelativePath))) {
             return;
           }
         }
         if (renameHint && "renamedFromRelativePath" in renameHint) {
-          if (this.selfInflictedRenames.delete(`${roomId} ${renameHint.renamedFromRelativePath} ${relativePath}`)) {
+          if (this.selfInflictedRenames.delete(crdtRenameMarkerKey(roomId, renameHint.renamedFromRelativePath, relativePath))) {
             return;
           }
         }
@@ -1313,9 +1405,22 @@ export default class VaultRoomsPlugin extends Plugin {
         // resolves true) opens the session then. Same "unknown/stale state must never risk a push"
         // invariant the CAS lane already enforces below (third-hardware-testing-round item 1).
         if (canPushLocalEdits && isCrdtManagedLocalChange({ crdtEnabled }, changeType, relativePath)) {
-          void this.crdtSessionManager?.ensureSession(roomId, relativePath).catch((error) => {
-            console.error(`Vault Rooms: failed to open CRDT session for "${relativePath}"`, error);
-          });
+          // Only a vault "create" event is a note that did not exist a moment ago and may therefore be
+          // treated as a second, different note if its name is already taken. A "modify" is by
+          // definition an existing note, and must adopt whatever document already holds that path -
+          // otherwise reopening a note (e.g. after a remount) forks a renamed duplicate of it.
+          void this.crdtSessionManager
+            ?.ensureSession(roomId, relativePath, { brandNewNote: changeType === "create" })
+            .then(() => {
+              // The bind pass deliberately never creates a document (see ensureSessionIfKnown), so a
+              // brand-new note's editor cannot bind until this call has established it - and no Obsidian
+              // workspace event fires in between. Re-run the pass here, otherwise a note created in an
+              // open editor would stay unbound and keep syncing through the slow whole-file path.
+              this.handleActiveEditorChanged();
+            })
+            .catch((error) => {
+              console.error(`Vault Rooms: failed to open CRDT session for "${relativePath}"`, error);
+            });
           return;
         }
         // A local delete of a CRDT-eligible path always stays on the CAS lane (see
@@ -1389,10 +1494,15 @@ export default class VaultRoomsPlugin extends Plugin {
     this.crdtSessionManager = new CrdtSessionManager({
       send: (message) => this.syncSocket?.sendCrdtMessage(message),
       docStore: this.crdtDocStore,
-      isRoomCrdtEnabled: (roomId) => resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), this.settings.mountedRooms[roomId]),
+      isRoomCrdtEnabled: (roomId) => {
+        const roomState = this.settings.mountedRooms[roomId];
+        return Boolean(roomState && !roomState.unmounted) && resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), roomState);
+      },
       readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
       writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
       renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath),
+      onSessionRetiring: (roomId, relativePath) => this.crdtEditorController.unbindTarget(roomId, relativePath),
+      onSessionOpened: () => this.handleActiveEditorChanged(),
       // First creator of a name keeps it; this device's own new note was given a distinct name instead
       // of being merged into someone else's note or silently failing to sync. Worth telling the user,
       // since the note they just created visibly changed name in their own vault.

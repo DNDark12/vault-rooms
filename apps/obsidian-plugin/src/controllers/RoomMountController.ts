@@ -20,10 +20,12 @@ export type RoomMountControllerDeps = Pick<
   stopWatchingRoom(roomId: string): void;
   watchMountedRoom(roomId: string): void;
   subscribeRoom(roomId: string): void;
+  unsubscribeRoom(roomId: string): void;
+  unbindCrdtRoom(roomId: string): void;
   /** Drops in-memory CRDT session state and deletes persisted CRDT documents for a room (contract
    *  1.12: cleanup on leaving/unmounting a room). Optional so tests that don't touch the CRDT lane
    *  don't need to stub it. */
-  disposeCrdtRoom?(roomId: string): void;
+  disposeCrdtRoom?(roomId: string): Promise<void>;
 };
 
 /** Owns local mount/unmount state, conflict discovery, and mount-time reconciliation. */
@@ -155,14 +157,16 @@ export class RoomMountController {
   async unmountRoom(roomId: string): Promise<void> {
     const room = this.deps.visibleRooms.find((candidate) => candidate.id === roomId);
     const roomState = this.deps.settings.mountedRooms[roomId];
-    this.deps.stopWatchingRoom(roomId);
     if (roomState) {
       roomState.unmounted = true;
     }
+    this.deps.stopWatchingRoom(roomId);
+    this.deps.unsubscribeRoom(roomId);
+    this.deps.unbindCrdtRoom(roomId);
     // Contract 1.12: leaving/unmounting a room deletes its persisted CRDT documents - a later
     // remount starts CRDT state fresh via crdt_create/the handshake rather than risk reloading a
     // persisted doc that's gone stale relative to whatever happened on the server in the meantime.
-    this.deps.disposeCrdtRoom?.(roomId);
+    await this.deps.disposeCrdtRoom?.(roomId);
     await this.deps.saveSettings();
     this.deps.renderOpenRoomsViews();
     new Notice(`Unmounted ${room?.name ?? "room"}`);
@@ -181,9 +185,11 @@ export class RoomMountController {
 
   dropRoomTracking(roomId: string): void {
     this.deps.stopWatchingRoom(roomId);
+    this.deps.unsubscribeRoom(roomId);
+    this.deps.unbindCrdtRoom(roomId);
     delete this.deps.settings.mountedRooms[roomId];
     delete this.deps.settings.roomMountPaths[roomId];
-    this.deps.disposeCrdtRoom?.(roomId);
+    void this.deps.disposeCrdtRoom?.(roomId);
   }
 
   isRoomMounted(roomId: string): boolean {

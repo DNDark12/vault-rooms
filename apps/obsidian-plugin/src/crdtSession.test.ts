@@ -98,6 +98,31 @@ function ack(harness: Harness, message: SyncServerMessage): Promise<void> {
   return harness.manager.handleServerMessage(message);
 }
 
+/**
+ * Opens a session for a path the server does *not* already have a document for, so its on-disk text
+ * seeds the fresh document. Since the seventeenth hardware-testing round the client only seeds when the
+ * server answers `crdt_created` with `adopted: false` - a document the server already holds gets its
+ * content from the handshake instead, because seeding on top of that is what duplicated notes on every
+ * remount. Tests that just need "a session whose doc contains the disk text" go through this helper
+ * rather than pre-seeding an epoch via `handleRoomSnapshot` (which now means "the server already has
+ * this document" and therefore correctly does not seed).
+ */
+async function openFreshlyCreatedSession(harness: Harness, roomId: string, relativePath: string, epoch = 0) {
+  const opening = harness.manager.ensureSession(roomId, relativePath, { brandNewNote: true });
+  await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+  const createMessage = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+  await ack(harness, {
+    type: "crdt_created",
+    requestId: createMessage.requestId,
+    roomId,
+    relativePath,
+    documentId: "file_test",
+    epoch,
+    adopted: false
+  });
+  return opening;
+}
+
 describe("CrdtSessionManager - first create", () => {
   it("sends crdt_create when no epoch is known yet, and resolves ensureSession once crdt_created arrives", async () => {
     const harness = createHarness();
@@ -142,6 +167,7 @@ describe("CrdtSessionManager - first create", () => {
     await vi.waitFor(() => expect(harness.manager.isSessionOpen("room_1", "note.md")).toBe(true));
     const session = await harness.manager.ensureSession("room_1", "note.md");
     expect(session.epoch).toBe(2);
+    expect(session.ytext.toString()).toBe("typed on the other device a moment ago");
     // No crdt_create either - the epoch was already known from the room snapshot.
     expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(false);
   });
@@ -335,6 +361,33 @@ describe("CrdtSessionManager - bidirectional handshake and outbound recovery", (
 
     expect(session.ytext.toString()).toBe("server content");
   });
+
+  it("does not reconcile a stale disk snapshot over a live bound editor after step2", async () => {
+    const harness = createHarness();
+    harness.disk.set("room_1/Board.md", "");
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await harness.manager.ensureSession("room_1", "Board.md");
+    harness.manager.bindToEditor("room_1", "Board.md");
+    const ourStep1 = harness.sent.find((message) => message.type === "crdt_sync_step1") as Extract<
+      SyncClientMessage,
+      { type: "crdt_sync_step1" }
+    >;
+
+    session.doc.transact(() => session.ytext.insert(0, "hello"), null);
+    const outboundUpdatesBeforeStep2 = harness.sent.filter((message) => message.type === "crdt_update").length;
+
+    await ack(harness, {
+      type: "crdt_sync_step2",
+      requestId: ourStep1.requestId,
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 0,
+      update: Buffer.from(Y.encodeStateAsUpdate(new Y.Doc())).toString("base64")
+    });
+
+    expect(session.ytext.toString()).toBe("hello");
+    expect(harness.sent.filter((message) => message.type === "crdt_update")).toHaveLength(outboundUpdatesBeforeStep2);
+  });
 });
 
 describe("CrdtSessionManager - stale epoch resync", () => {
@@ -451,9 +504,8 @@ describe("CrdtSessionManager - local delete forgets stale state", () => {
 describe("CrdtSessionManager - reconciling an already-open unbound session", () => {
   it("[audit fix] re-reconciles disk text for an already-open, unbound session instead of silently dropping an external edit", async () => {
     const harness = createHarness();
-    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
     harness.disk.set("room_1/Board.md", "original");
-    const session = await harness.manager.ensureSession("room_1", "Board.md");
+    const session = await openFreshlyCreatedSession(harness, "room_1", "Board.md");
     expect(session.ytext.toString()).toBe("original");
 
     // Simulate an external tool editing the file on disk while the session stays open and unbound
@@ -468,9 +520,8 @@ describe("CrdtSessionManager - reconciling an already-open unbound session", () 
 
   it("[audit fix] does not re-reconcile disk while the session is bound to an open editor", async () => {
     const harness = createHarness();
-    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
     harness.disk.set("room_1/Board.md", "original");
-    const session = await harness.manager.ensureSession("room_1", "Board.md");
+    const session = await openFreshlyCreatedSession(harness, "room_1", "Board.md");
     harness.manager.bindToEditor("room_1", "Board.md");
 
     harness.disk.set("room_1/Board.md", "should not be pulled in while bound");
@@ -512,10 +563,11 @@ describe("CrdtSessionManager - reconcile vs. concurrent remote update race", () 
         disk.set(`${roomId}/${relativePath}`, text);
       }
     });
-    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
-
-    // First ensureSession: brand-new session, seeded from disk ("11") - consumes readCount 1.
-    const session = await harness.manager.ensureSession("room_1", "Board.md");
+    // First open: a document the server did not already have, so it is seeded from disk ("11") -
+    // consumes readCount 1. (Opened through the create path rather than a pre-seeded snapshot epoch,
+    // because a known epoch now means "the server already holds this document" and correctly does not
+    // seed - see openFreshlyCreatedSession.)
+    const session = await openFreshlyCreatedSession(harness, "room_1", "Board.md");
     expect(session.ytext.toString()).toBe("11");
 
     // Second ensureSession: session already open and unbound, hits the fast-path reconcile, whose
@@ -780,21 +832,25 @@ describe("CrdtSessionManager - rename ordering (sixth hardware-testing round, 20
     await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
     const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
 
-    // The server took "b.md" already, so it filed this document under a disambiguated name.
+    // The ack reports a path *different* from the one requested. That difference is the whole subject of
+    // this test, so the assigned name must not be edited to match the requested one - doing so (a
+    // find-and-replace that scrubbed a real display name out of the fixture) turned this into an
+    // assertion that a no-op "b.md -> b.md" rename moves a file and fires a reassignment callback, which
+    // it correctly does not. Kept as a neutral placeholder name for that reason.
     await ack(harness, {
       type: "crdt_renamed",
       requestId: renameMessage.requestId,
       roomId: "room_1",
       oldRelativePath: "a.md",
-      relativePath: "b (huynd2).md",
+      relativePath: "b (Teammate).md",
       epoch: 0
     });
     await renamePromise;
 
-    expect(harness.manager.isSessionOpen("room_1", "b (huynd2).md")).toBe(true);
-    expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "b.md", newRelativePath: "b (huynd2).md" });
-    expect(harness.disk.get("room_1/b (huynd2).md")).toBe("the note the user just renamed");
-    expect(reassignments).toEqual([{ requested: "b.md", assigned: "b (huynd2).md" }]);
+    expect(harness.manager.isSessionOpen("room_1", "b (Teammate).md")).toBe(true);
+    expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "b.md", newRelativePath: "b (Teammate).md" });
+    expect(harness.disk.get("room_1/b (Teammate).md")).toBe("the note the user just renamed");
+    expect(reassignments).toEqual([{ requested: "b.md", assigned: "b (Teammate).md" }]);
   });
 
   it("rejects a failed rename with the server's error code so the caller can tell FILE_EXISTS from NOT_FOUND", async () => {
@@ -850,5 +906,20 @@ describe("CrdtSessionManager - room disposal", () => {
 
     expect(harness.manager.isSessionOpen("room_1", "Board.md")).toBe(false);
     expect(await docStore.load("room_1", "Board.md", 0)).toBeNull();
+  });
+
+  it("detaches the update forwarder and destroys every retired Y.Doc", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await harness.manager.ensureSession("room_1", "Board.md");
+    const destroyed = vi.fn();
+    session.doc.on("destroy", destroyed);
+    harness.sent.length = 0;
+
+    await harness.manager.disposeRoom("room_1");
+    session.doc.transact(() => session.ytext.insert(0, "stale owner"), null);
+
+    expect(destroyed).toHaveBeenCalledOnce();
+    expect(harness.sent.filter((message) => message.type === "crdt_update")).toHaveLength(0);
   });
 });

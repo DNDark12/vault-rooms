@@ -290,6 +290,50 @@ describe("CRDT sync flow (Phase 4)", () => {
     expect(readBack.json().content).toBe("content that only exists in the CRDT lane so far");
   });
 
+  // Fifteenth hardware-testing round (2026-07-24): unmount then remount duplicated every note as
+  // "… (A)" / "… (B)". Unmounting clears the client's known epochs, so remounting re-sent
+  // crdt_create for files it already had; each collided and was handed a disambiguated name, and the
+  // client renamed its local file to match. Reopening an existing note must adopt, not fork.
+  it("adopts the existing document when crdt_create sets adoptIfExists, preserving its content", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+    socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    const first = await nextMessage(socket, "crdt_created");
+
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "content that must survive a remount");
+    socket.sendJson({
+      type: "crdt_update",
+      requestId: "u1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: 0,
+      update: base64OfUpdate(Y.encodeStateAsUpdate(doc))
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Exactly what a remount now sends: same path, adoptIfExists.
+    socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "note.md", adoptIfExists: true });
+    const adopted = await nextMessage(socket, "crdt_created");
+    expect(adopted).toMatchObject({ requestId: "c2", relativePath: "note.md", epoch: first.epoch });
+    expect(adopted.documentId).toBe(first.documentId);
+
+    // Adoption must not re-seed the document - the note's content is still there.
+    socket.sendJson({
+      type: "crdt_sync_step1",
+      requestId: "h1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: 0,
+      stateVector: base64OfUpdate(Y.encodeStateVector(new Y.Doc()))
+    });
+    const step2 = await nextMessage(socket, "crdt_sync_step2");
+    const merged = new Y.Doc();
+    Y.applyUpdate(merged, new Uint8Array(Buffer.from(step2.update, "base64")));
+    expect(merged.getText(CRDT_TEXT_KEY).toString()).toBe("content that must survive a remount");
+  });
+
   it("disambiguates repeated creates of the same name by numbering, preserving the user's stem", async () => {
     const { app, owner, room } = await setupCrdtRoom();
     const socket = await connect(app);

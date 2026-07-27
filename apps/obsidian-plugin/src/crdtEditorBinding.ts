@@ -79,6 +79,13 @@ export class CrdtEditorController {
     return this.compartment.of([]);
   }
 
+  /** Whether this view is currently bound to a CRDT session - i.e. whether its keystrokes go straight
+   *  into the shared document. Used by main.ts's live-editing diagnostics command to attribute a
+   *  "changes take seconds to appear" report to a specific broken link rather than guessing. */
+  isBound(view: EditorView): boolean {
+    return this.bound.has(view);
+  }
+
   /**
    * Reconciles the current binding set against `openViews` - every markdown editor view currently
    * open (main.ts resolves this via Obsidian's `Workspace#getLeavesOfType("markdown")`, re-run on
@@ -122,7 +129,10 @@ export class CrdtEditorController {
       }
       const existing = this.bound.get(view);
       if (existing && sameTarget(existing.target, target)) {
-        continue; // Already correctly bound - leave it alone (no rebuild, no undo-history reset).
+        // Already correctly bound or binding - never rebuild/reset undo history, but preserve the
+        // await contract for callers that need the editor live before they proceed.
+        pending.push(existing.ready);
+        continue;
       }
       pending.push(this.bindView(view, target, sessionManager));
     }
@@ -138,6 +148,24 @@ export class CrdtEditorController {
     }
   }
 
+  /** Retires every editor binding owned by one room while leaving other mounted rooms live. */
+  unbindRoom(roomId: string): void {
+    for (const [view, binding] of [...this.bound.entries()]) {
+      if (binding.target.roomId === roomId) {
+        this.unbindView(view);
+      }
+    }
+  }
+
+  /** Retires every view attached to one document before its Y.Doc is destroyed/replaced. */
+  unbindTarget(roomId: string, relativePath: string): void {
+    for (const [view, binding] of [...this.bound.entries()]) {
+      if (binding.target.roomId === roomId && binding.target.relativePath === relativePath) {
+        this.unbindView(view);
+      }
+    }
+  }
+
   private async bindView(view: EditorView, target: CrdtEditorTarget, sessionManager: CrdtSessionManager): Promise<void> {
     const ready = this.openSessionAndBind(view, target, sessionManager);
     // Written synchronously (before the await inside openSessionAndBind's own call to ensureSession
@@ -148,7 +176,18 @@ export class CrdtEditorController {
   }
 
   private async openSessionAndBind(view: EditorView, target: CrdtEditorTarget, sessionManager: CrdtSessionManager): Promise<void> {
-    const session = await sessionManager.ensureSession(target.roomId, target.relativePath);
+    // Attach only - never allocate. Binding must not create a document, because Obsidian moves the open
+    // editor's file during a rename and can deliver that workspace event before the vault rename event,
+    // so a creating bind pass raced the rename to its own destination path and the rename then collided
+    // with the document this same device had just made (see ensureSessionIfKnown). When the document
+    // isn't established yet, leave the view unbound and let the next reconcile pass pick it up.
+    const session = await sessionManager.ensureSessionIfKnown(target.roomId, target.relativePath);
+    if (!session) {
+      if (this.bound.get(view)?.target === target) {
+        this.bound.delete(view);
+      }
+      return;
+    }
     const current = this.bound.get(view);
     // Superseded while awaiting: the view was closed, or a later syncOpenViews call already
     // unbound/rebound it onto a different target. Reference equality against the exact target this

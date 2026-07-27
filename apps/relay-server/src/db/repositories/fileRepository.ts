@@ -251,7 +251,17 @@ export class RelayFileRepository {
    *  bump here would just burn an epoch number on every delete+recreate cycle for no reason, and
    *  would be inconsistent with `writeFile`'s own tombstone-revival path (contract 1.9), which also
    *  does not bump. */
-  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string; actorDisplayName?: string }): {
+  createCrdtFile(input: {
+    roomId: string;
+    relativePath: string;
+    actorUserId: string;
+    actorDisplayName?: string;
+    /** See the protocol's `crdt_create.adoptIfExists`: when set and a live document already holds this
+     *  path, return that document instead of filing this request under a disambiguated name. Set by a
+     *  client reopening a note it already has (remount, editor bind, remote update); never set for a
+     *  brand-new note, so two devices creating "Untitled" still get two separate notes. */
+    adoptIfExists?: boolean;
+  }): {
     fileId: string;
     epoch: number;
     relativePath: string;
@@ -267,6 +277,16 @@ export class RelayFileRepository {
       // path, disambiguated by who created it - mirroring how Obsidian itself resolves a local name
       // clash. The caller relays the assigned path back to the client, which renames its local file
       // to match (see syncServer.ts / CrdtSessionManager.ensureEpoch).
+      // Reopening a note this client already has must attach to the existing document, never fork a
+      // renamed copy of it. Without this distinction, an unmount/remount cycle (which clears the
+      // client's known epochs) re-sent crdt_create for every file it already had, each collided, each
+      // was handed a disambiguated name, and the client renamed its local file to match - so every
+      // remount duplicated the room's notes as "… (DNDark)", "… (huynd2)", … (fifteenth
+      // hardware-testing round, 2026-07-24).
+      const live = this.getFile(input.roomId, input.relativePath);
+      if (input.adoptIfExists && live && !live.deleted_at) {
+        return { fileId: live.id, epoch: live.crdt_epoch, relativePath: input.relativePath };
+      }
       const relativePath = this.freeCrdtPath(input.roomId, input.relativePath, input.actorDisplayName);
       const existing = this.getFile(input.roomId, relativePath);
       const now = new Date().toISOString();
@@ -338,7 +358,11 @@ export class RelayFileRepository {
     const safeName = (actorDisplayName ?? "")
       // eslint-disable-next-line no-control-regex -- strip separators and control chars from a
       // user-chosen display name before it becomes part of a filename.
-      .replace(/[/\\:*?"<>| -]/g, " ")
+      // Control chars are escaped as \u0000-\u001f rather than written as literal bytes: the raw form
+      // put real NUL bytes in this source file, which makes git classify it as binary and makes grep
+      // render them as blanks - exactly what hid a genuine NUL-vs-space key mismatch in main.ts from a
+      // grep-based audit. Keeping sources free of literal control bytes keeps text tooling trustworthy.
+      .replace(/[/\\:*?"<>|\u0000-\u001f]/g, " ")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 40);

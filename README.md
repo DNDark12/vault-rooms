@@ -4,359 +4,186 @@
 
 ## What it is
 
-Vault Rooms lets you create local rooms for selected folders in your vault with trusted people on the same local network.
+Vault Rooms shares selected folders of your Obsidian vault ("rooms") with trusted people on the same local
+network. One device hosts a small relay server; everyone else joins it from the plugin.
 
-Create a room, invite members, grant fine-grained file permissions, and collaborate on Markdown-backed workflows such as Kanban boards and Tasks. Vault Rooms includes a local relay server and an Obsidian client plugin.
+Create a room, invite members, grant per-path permissions, and collaborate on Markdown-backed workflows like
+Kanban boards and Tasks. It is LAN-first, deny-by-default, and never exposes your whole vault.
 
-Vault Rooms is LAN-first, deny-by-default, and designed to avoid exposing raw vault access.
-
-Identity is per-server: each device you join gets one device token for that server (its friends list, teams, and rooms). Teams are named permission groups you can grant to a room as a whole; rooms are the shared folder/file boundary and are owned independently of any team. A room's access list (ACL) grants or denies access to a **user** or a whole **team** per path pattern; team roles (`admin`/`member`) only govern who can manage the team, not room access.
+Identity is per-server: each device gets one token for the server it joined. **Teams** are named permission
+groups you can grant to a room at once; **rooms** are the shared folder boundary and are owned independently of
+any team. A room's access list grants or denies a user or a team, per path pattern.
 
 ## What it is not
 
-This is not cloud sync, NAT traversal, mobile sync, or a sandbox for arbitrary Obsidian community plugins. Vault Rooms syncs Markdown/text and a limited set of common file types (see "Known limitations" below for the exact list), up to the configured size limit. Character-level co-editing exists only as an explicit per-room opt-in for Markdown notes (**CRDT sync**, off by default - see "CRDT sync" below); it is not how a room behaves unless an owner/admin turns it on.
+Not cloud sync, not NAT traversal, not mobile, and not a sandbox for other Obsidian plugins. It syncs Markdown
+plus a limited set of common file types (see "Known limitations"). Character-level co-editing exists only as a
+per-room opt-in for Markdown notes (see "CRDT sync") and is off unless an owner turns it on.
 
 ## Quick start
 
-The full walkthrough, one device at a time. Every step names the exact command/button so you can follow along in the plugin.
+**On the hosting device:**
 
-**On the hosting device ("A"):**
+1. Command palette → **Vault Rooms: Start server**.
+2. Settings → Vault Rooms → Relay server → **Public URL override** → enter this machine's LAN address (e.g.
+   `192.168.1.100`), then stop and start the server. Confirm the panel shows **LAN share: reachable from this
+   device**. This step is required - the host never guesses its own address.
+3. Panel → **Set up server** (makes you the owner, and optionally creates your first team).
+4. Panel → **Rooms** → **Create room**, and pick a folder to share.
+5. In the room's Settings, grant access to a user or team.
+6. Panel → **Invite** → choose what it grants → **Create invite** → **Copy**. Send the whole link: it carries
+   the server's identity and fingerprint, not just an address.
 
-1. Install the plugin (see "Installing the Obsidian plugin manually" below).
-2. Command palette → **Vault Rooms: Start server** (or Settings → Vault Rooms → Relay server → **Start**). No terminal, no config file.
-3. Find this device's LAN IP - `ipconfig getifaddr en0` (macOS), `hostname -I` (Linux), or `ipconfig` (Windows, look for the active adapter's IPv4 address), typically something like `192.168.x.x` or `10.x.x.x`.
-4. Settings → Vault Rooms → Relay server → **Public URL override** → enter `<that-LAN-IP>` (just the address, e.g. `192.168.1.100` - no `http://` or port needed; both are filled in automatically with the server's real ones, and a port typed here is ignored rather than trusted, so there's no way for this field to disagree with what the server actually bound to), then **Stop**/**Start** the server again so it takes effect. The panel automatically checks the advertised address after startup; confirm **LAN share: reachable from this device**. This step is mandatory for the embedded server - see "Security model" below for why it doesn't detect this automatically.
-5. Vault Rooms panel → **Set up server** - this makes you the server owner (creates your account/device identity) and optionally creates your first team in the same step.
-6. Vault Rooms panel → **Rooms** section → **Create room** - pick a folder from your vault to share.
-7. Open the room's Settings → grant access to a user or a team (a permission preset like reader/editor, or a custom path pattern and permission set).
-8. Vault Rooms panel → **Invite** (top of the panel) - choose what the invite grants (a specific room, a team, or just add them as a friend with no access yet), then **Create invite**. The embedded host performs a fresh credentialless health check of the advertised LAN URL before issuing the invite token and blocks creation if that check fails. A successful host-side check still cannot prove that the teammate's firewall or Wi-Fi client isolation permits the connection. The modal contains a pinned HTTPS invite with the server identity and SPKI fingerprint - click **Copy** to copy the whole link without editing it.
+**On the teammate's device:** click the link, add a display name, join, then **mount** the room that appears
+under **Rooms**.
 
-**On the teammate's device ("B"):**
-
-9. Install the plugin.
-10. Click the complete invite link A sent. It opens Obsidian and pre-fills the HTTPS server URL, invite token, server identity, TLS name, and fingerprint; the plugin validates all pin material locally before making any network request. If it cannot connect, use Settings → Vault Rooms → Servers → **Test connection** and see "Troubleshooting" below. A normal browser does not know the server's private CA or internal TLS name, so it is not a reliable health check for pinned mode.
-11. Add a display name and join. Manual join remains available, but a pinned server requires all fields carried by the invite; do not copy only the visible server URL or token.
-12. The shared room now appears under **Rooms** in B's panel - mount it to start syncing.
-
-That's the whole loop. Team size, ACL granularity, and revocation are their own sections below - read those before inviting more than a couple of people.
-
-## Network use
-
-Vault Rooms makes network connections, but only ever between devices on your own local network (LAN) that are running this same plugin - there is no cloud service, third-party server, telemetry, analytics, or update-check call of any kind:
-
-- The device hosting a room (the "server") listens on your local network so teammates' Obsidian clients can reach it over HTTPS and WSS. The legacy/base port starts at `8787`; the pinned TLS port defaults to base port + 1 (`8788`) and scans forward if needed.
-- Every other device's plugin only ever makes outbound HTTPS/WSS requests to that one host, to authenticate, sync files, fetch room/team/friend metadata, and receive live updates.
-
-New embedded servers use self-managed pinned TLS. The standalone relay can use the same pinned mode or operator-provided OS-trusted certificates; plaintext is retained only for a controlled legacy migration. See "Security model" below.
+A green reachability badge only proves the host can reach its own address. It cannot prove the teammate's
+firewall or Wi-Fi client isolation will allow the connection - if they can't connect, use **Test connection**
+and see "Troubleshooting".
 
 ## Architecture
 
-The repo is a pnpm TypeScript monorepo:
+One device runs the relay; every other device is a client that only makes outbound connections to it. Nothing
+leaves your local network: there is no cloud service, no third-party server, and no telemetry of any kind.
 
-- `apps/relay-server`: relay business logic (repositories, route handlers, sync message handling), SQLite storage (via `sql.js`, pure JS/WASM - no native build step), REST API, WebSocket sync (`vault-rooms-relay`). The standalone runtime here is Fastify-based; see below.
-- `apps/obsidian-plugin`: Obsidian plugin shell, settings, setup/join/room commands, mount/download behavior, sync core behind `VaultAdapter`, and an **embedded relay** that runs inside the plugin process (`@vault-rooms/obsidian-plugin`) - lightweight `node:http`/`node:https` routers plus the `ws` library, not Fastify (Obsidian's community-plugin review flags Fastify/AJV as unwanted bundle weight and "dynamic code execution"); it reuses the same route-handler/repository logic from `apps/relay-server`, just behind a different, much smaller HTTP(S)/WebSocket layer.
-- `packages/protocol`: protocol, types, errors, token/path helpers (`@vault-rooms/protocol`).
-- `packages/policy-engine`: pure ACL evaluator used by both REST and sync (`@vault-rooms/policy`).
+The relay can run two ways, speaking the same protocol either way:
 
-There are two ways to run the relay, and both speak the exact same protocol:
+- **Embedded** (recommended) - the plugin runs it in-process. Click **Start server**; no terminal, no config
+  file.
+- **Standalone** - a separate process, for development or for hosting on an always-on machine or NAS instead of
+  someone's laptop.
 
-1. **Embedded (recommended for most teams).** The Obsidian plugin runs its own lightweight relay in-process (see above) - install the plugin, click **Start server** in the Vault Rooms panel (or Settings → Vault Rooms), and it's listening - no terminal, no separate install, no `.env` file. Config lives in the plugin's Settings tab and is stored the same way as any other Obsidian plugin setting. Unlike the standalone runtime, the embedded server does **not** auto-detect your LAN IP (see "Security model" below) - set a Public URL override before creating invites. The plugin probes that exact advertised URL from the host without credentials and reports its reachability separately from the owner's loopback live-sync connection.
-2. **Standalone (`pnpm dev:server`).** The original CLI process, configured via `.env`/environment variables. Useful for development, for running the relay on a dedicated always-on machine instead of someone's laptop, or for team sizes where a personal-laptop-as-server model doesn't fit (see "Team size and scaling" below).
-
-Whoever's device is running the relay (embedded or standalone) is "the server." Everyone else's Obsidian plugin is a client that only ever makes outbound requests and WebSocket connections to that one server - HTTPS/WSS for new embedded deployments - and never binds a port or runs its own relay for the same team (see "Do other members need to run their own server?" below).
+The relay owns all permission enforcement and keeps each room's file history in a local database. Clients hold a
+working copy of the rooms they mount.
 
 ## Security model
 
-See [SECURITY.md](SECURITY.md) for the full threat model, token storage, revocation limitations, and how to report a vulnerability. Summary below.
+See [SECURITY.md](SECURITY.md) for the threat model, token handling, and revocation limits. In short:
 
-Permissions are enforced by the relay server over synced rooms. Client-side UI is convenience only. Tokens use `tr_inv_` and `tr_dev_` prefixes, are generated with a CSPRNG (`crypto.randomBytes`), and only SHA-256 token hashes are stored in SQLite. Per-path `file:read` is enforced on every channel that carries file content - the REST download endpoint, live WebSocket broadcasts, **and** the initial room snapshot a device gets on subscribe/reconnect - so a member whose access list only grants some paths never receives the content (or even the filenames/hashes) of the paths they can't read. File writes and deletes require `sync:push` consistently over both REST and WebSocket, in addition to their file-specific permission.
+- **The relay enforces every permission**, per path, on both its request and live-sync channels. The plugin UI is
+  convenience only. A member never receives content - or even filenames - for paths they cannot read.
+- **New servers use pinned TLS.** The server has a persistent identity whose fingerprint travels in every invite,
+  and clients pin it before sending any credential. This authenticates the server and encrypts LAN traffic; it is
+  **not** end-to-end encryption - the relay handles plaintext.
+- **Creating the first owner is the only unauthenticated privileged action**, and it is gated twice so a
+  malicious web page cannot claim your server. It closes permanently once an owner exists.
+- **Built for a LAN you already trust.** Don't port-forward it or expose it to the Internet, and don't rely on it
+  to keep data from people you've already invited.
+- A server created before pinned TLS stays on plaintext until its owner runs the migration in Settings.
+- Vault Rooms cannot sandbox other Obsidian plugins: a local plugin that can read a synced file can read it.
 
-Access can be withdrawn at three granularities: remove a single ACL rule from a room, remove a user from a team, or revoke a user server-wide. A single lost/compromised device can also be revoked on its own (server owner → `POST /api/friends/:userId/devices/:deviceId/revoke`) without kicking that user's other devices - the revoked device's token stops working on its next request and its live WebSocket session is closed immediately.
+## Rooms, mounting, and access
 
-This project does not sandbox arbitrary Obsidian community plugins. If a local plugin can read a synced Markdown file in B's vault, Vault Rooms cannot prevent that local plugin from reading it.
+**Source path** is the folder in the *owner's* vault that the room shares - the one real copy everyone else
+reconciles against. **Local mount path** is where a given device keeps its working copy: the owner mounts in
+place (no second copy), while everyone else downloads the room into a folder under their mount root. Either can
+be overridden per room in its Settings.
 
-New embedded servers generate a persistent P-256 identity and serve HTTPS/WSS with a renewable certificate signed by that identity. Invites carry the server ID, internal TLS name, identity certificate, and SHA-256 SPKI fingerprint; the client pins them before it sends credentials. The embedded server still binds every network interface (`0.0.0.0`) so teammates can reach it - there is no "this device only" mode, since a server nobody else can reach isn't useful. This is transport encryption and server authentication, not E2EE: the relay and authorized clients see plaintext, and the feature does not encrypt the database or plugin settings at rest.
+Access can be withdrawn at four granularities, all enforced by the relay:
 
-The embedded identity file (`.obsidian/plugins/vault-rooms/server-data/identity.json`) contains the server identity and TLS **private keys**. The standalone equivalent is `IDENTITY_DIR/identity.json` and is created with mode `0600`. Treat either file like a server credential: restrict filesystem access, do not share it, and protect any backup or configuration-sync destination that includes it. Losing it makes existing clients hard-fail continuity checks; leaking it lets an attacker impersonate that server until clients re-pair with a fresh identity.
+- **One rule in one room** - the person keeps whatever else they were granted.
+- **A team membership** - they keep access granted directly or via another team.
+- **A whole user** - revokes their account and all their device tokens, closing their live sessions.
+- **A single device** - for a lost or compromised machine, without touching that person's other devices.
 
-The only endpoint that can provision privileged access with no pre-existing credential at all is the one-time **bootstrap** that creates the very first owner. It is protected on two independent axes so a malicious web page can't provision itself as owner via a DNS-rebinding request to your loopback/LAN address: (1) a random **bootstrap PIN** is generated per server process and required in the bootstrap request - the embedded plugin reads it in-process (transparent to you) and the standalone CLI prints it to the console; (2) the request's `Host` header must match the server's own address, which a rebinding attacker's domain never will. Once the owner exists, bootstrap is closed entirely. The standalone CLI still binds via `HOST`/`PORT` if you need a different setup.
+Deleting a **room** removes it and its history from the server; files already downloaded to someone's vault stay
+on their disk, only the sync tracking is dropped. Deleting a **team** removes its memberships and grants, not the
+rooms themselves.
 
-Three other endpoints don't require a device bearer token, by design: joining via an invite link (`POST /api/join`) is gated by its own credential - a single-use, expiring invite token, not device auth; `/health` is intentionally public (it only returns the plugin name/version, used by clients to sanity-check they've reached a Vault Rooms server before authenticating); and rate-limited `GET /api/identity/rotations` returns only public, signed identity-continuity records for the credentialless pin-mismatch probe. The rotation response never contains private-key or device-token material.
+Revocation stops future access. It cannot delete copies that were already synced to someone's device.
 
-CORS is intentionally permissive (`*`): the client talks to the relay from Obsidian's Electron process (not a browser page origin) and auth is Bearer-token, not cookie-based, so wildcard CORS carries little risk once bootstrap is PIN+Host gated. This will be revisited if the client ever moves to a real browser origin.
+**Rejoining** creates a fresh identity, and the relay's file list is always the source of truth: files it has
+newer versions of are downloaded, files it has deleted are removed locally, files already in sync are left alone,
+and local edits you never pushed are preserved as a timestamped conflict copy rather than discarded. The same
+reconciliation runs on first mount, re-mount, and reconnect.
 
-**`127.0.0.1` never means "the other machine."** It always resolves to whichever computer is asking, so an invite link embedding `127.0.0.1` only ever points teammates back at their own machine, and editing `/etc/hosts` cannot change that (it's not a name-resolution problem). The **standalone** relay (`pnpm dev:server`) auto-detects its real LAN IP (a private address like `192.168.x.x` or `10.x.x.x` - specific to your own network, never shown here) and uses that - not `127.0.0.1` - in the printed URL and in every invite link it generates; if auto-detection fails there (multiple network adapters, VPNs, some Wi-Fi drivers), set a **Public URL override** in Settings → Vault Rooms → Relay server. The **embedded** relay (running inside Obsidian) does not attempt LAN IP auto-detection at all - reading network interfaces is flagged by Obsidian's plugin review as machine fingerprinting - so it always requires a manually maintained Public URL override. The hosting panel probes that URL from the same device and blocks creation of new own-server invites when the probe fails or the override is missing; a green badge is a host-side check only, not proof that every teammate can traverse their firewall or Wi-Fi isolation.
+## How edits sync
 
-### Migrating an existing server to TLS
+By default, concurrent edits to the same file are **first save wins**: the device that saves second keeps its
+version as a **local-only conflict copy** rather than losing it. The Rooms panel lists any conflict copy with
+**Keep mine** / **Keep synced version** so you don't have to sort it out by hand.
 
-An embedded server created before pinned TLS remains in **Plaintext legacy** mode until its owner explicitly migrates it:
+Two things soften that for files which autosave constantly (a drawing plugin can save on every stroke): rapid
+edits to one file are coalesced into a single push, and a room can be set to **Owner's version always wins**
+instead of keeping both.
 
-1. On the hosting device, open Settings → Vault Rooms → Relay server → **Enable TLS migration**.
-2. Choose **Normal** only if the current LAN is trusted. Authenticated clients learn the pin from one plaintext response, switch to verified HTTPS/WSS, rotate their device token, and persist the pinned connection. An active attacker on the LAN can replace that first pin; use Strict for sensitive teams.
-3. Choose **Strict** if the old network may be hostile or the team requires independently delivered fingerprints. Legacy clients cannot fetch the pin over HTTP; create and send each member a fresh pinned invite through a trusted channel instead.
-4. Wait until Settings reports zero active devices last seen on legacy HTTP, or knowingly accept that remaining devices must rejoin. Click **Enforce TLS** to disable the HTTP/WS listener and close every authenticated socket still using a legacy token, including WSS sessions opened during migration. Real plaintext connections are then refused because no HTTP listener remains; `TLS_REQUIRED` is retained as defense-in-depth for any plaintext request that reaches the shared handler, and later legacy-token authentication over TLS also fails with `TLS_REQUIRED`.
-
-Normal and strict migration both finish over pinned HTTPS and issue a replacement device token classified as TLS-secure. Strict fresh-invite acceptance does not send the old bearer token to the invite URL: it sends a one-request HMAC proof bound to that device, invite, server ID, and pinned SPKI, which the real server verifies against its stored token hash before rotating the credential. The old token is invalidated and its authenticated sockets are closed immediately. Later owner-initiated identity rotations are signed by the old identity and applied automatically only when the client can verify the complete rotation chain; an unexpected identity remains blocked with no trust-anyway override. See [SECURITY.md](SECURITY.md) for the exact trust limitations and recovery model.
-
-## Revocation and rejoin model
-
-Revocation stops future access. It revokes the member record, device tokens, active WebSocket sessions, and future fetch/push attempts. If a file has already been synced to a collaborator's device, revocation prevents future access and writes but cannot guarantee deletion of that old local copy.
-
-Rejoin uses a new invite and creates a new user/device identity. **The relay's file listing is always the source of truth - the owner/host's copy wins, never the rejoining device's stale local copy.** Concretely, (re)mounting a room compares every file the server knows about against what was last synced locally:
-
-- A file the server has never seen locally, or has a newer version of, is downloaded and written.
-- A file whose server version already matches what was last synced is left untouched, so it doesn't clobber edits you haven't pushed yet.
-- A file the server has tombstoned (deleted) since you last synced - including everything that was deleted on the server *while you were removed from the room* - is deleted from your local mount on (re)join, not left behind as a stale copy.
-- If a file you'd edited locally without pushing (`dirty`) conflicts with an incoming server change or delete, your local copy is preserved as a timestamped conflict copy instead of being silently discarded.
-
-This is the same reconciliation path used for the initial mount, a manual re-mount, and the live snapshot a device gets when it reconnects its WebSocket subscription - so "first join" and "rejoin after being removed" behave identically: whatever the owner's room currently contains is what you end up with locally.
-
-One caveat: this reconciliation runs when you mount/re-mount a room or reconnect. If a room is deleted entirely (see below) while your device is offline, your local mount tracking for it is not cleaned up until Obsidian is running and either reconnects or you manually unmount - the files themselves are only ever removed by this reconciliation step, never by a background process.
-
-## Concurrency model
-
-Concurrent edits to the same file are "first save wins"; the losing device gets a **local-only** conflict copy (never pushed or synced - it only exists on the device that lost the race) instead of losing the edit outright. This is the default for every room and every synced file type. A room can opt a subset of its files (Markdown only) out of this model into character-level CRDT merging instead - see "CRDT sync" below.
-
-The server uses compare-and-swap file versions: every write must include the version it was based on, and a write based on a stale version is rejected (see the conflict policy above for what happens next).
-
-Two things soften "first save wins" for files that autosave very frequently (a drawing plugin can resave on every stroke), where forking on every near-simultaneous save is more annoying than useful:
-
-- **Debounce coalescing.** Rapid successive local edits to the same file are coalesced into a single push per `debounceMs` window instead of firing one independent push per change - this also serializes overlapping pushes for the same file so a fast-autosaving file can't race against and version-conflict with its own earlier, still-in-flight push.
-- **Per-room conflict policy** (Room Settings → "When edits conflict"): the default, **Keep both**, is what's described above. **Owner's version always wins** makes the room owner's writes always become canonical, even if they land a moment behind someone else's edit - non-owner writes still follow "Keep both" against each other.
-
-Whenever a local conflict copy does exist, the Rooms panel lists it under the mounted room with **Keep mine** (push your version as the new canonical one) and **Keep synced version** (discard your local copy) - no need to sort it out by hand in the file explorer.
-
-## Sync latency: how fast does a teammate's edit show up?
-
-This describes the default whole-file sync lane, which is not character-level realtime (no shared cursor, no live keystrokes). A room with CRDT sync enabled (see below) instead delivers character-level live editing for its Markdown files specifically - everything below still applies to every other file type, and to Markdown files in a room that hasn't opted in. The current sync contract is:
-
-- **Push side (debounced, not per-keystroke).** When you edit a mounted file, the plugin waits for `debounceMs` (Settings → Vault Rooms → Sync, default **300ms**) of no further local writes to that file before pushing it to the relay. This avoids pushing a partial file on every keystroke while still keeping the delay small and predictable - not "no delay," but not "wait for a manual sync" either.
-- **Pull side (live, not polled).** Every mounted room keeps an open WebSocket subscription to the relay. The moment the relay accepts a write (from REST push or another device's WebSocket push), it broadcasts the change to every other subscribed device immediately - there is no polling interval on this side. Combined with the push-side debounce, a teammate's edit typically lands on your machine well under a second after they stop typing.
-- **Reconnect catch-up.** If your Obsidian was closed, the connection dropped, or the host restarted its server, the plugin automatically reconnects (with backoff) and re-subscribes to every previously-mounted room, including a room whose prior subscription was interrupted before its snapshot arrived. It then reconciles against a fresh snapshot - you don't need to manually remount or reload Obsidian to start receiving live updates again. Each socket processes messages in receive order, and stale callbacks from a replaced socket are ignored, so an older async file operation cannot overwrite a newer event. The Rooms panel's "Connection" section shows a live badge (connected / reconnecting / offline) so you can tell at a glance whether you're actually getting real-time updates right now.
-- **Bounded handshake.** A client that receives no `hello_ok` within 10 seconds closes and follows the normal reconnect policy. The relay also closes a socket that has not authenticated within 10 seconds, so silent unauthenticated upgrades cannot retain connection slots indefinitely.
-- **No ping-pong.** Applying a remote change updates the local file's known server version/hash, so the local file watcher recognizes the resulting "modify" event as already-in-sync and does not push it back.
+Latency: after you stop typing your edit is pushed within a fraction of a second, and the relay broadcasts it to
+every mounted device immediately - there is no polling. A device that was offline reconnects on its own,
+re-subscribes, and reconciles; you never need to remount manually. The panel's connection badge tells you whether
+you're actually live.
 
 ## CRDT sync (opt-in live editing for Markdown notes)
 
-Per room, an owner (Room Settings → **"Live editing (CRDT sync)"**, default off) can turn on real-time, character-level merging for that room's Markdown (`.md`) notes. This replaces the whole-file "first save wins" model above with a CRDT (Yjs): two people typing in the same note at the same time merge deterministically, instead of one edit becoming a local-only conflict copy.
+Per room, an owner can turn on **Room Settings → "Live editing (CRDT sync)"** (default off) to get real-time,
+character-level merging for that room's Markdown notes. Two people typing in the same note merge deterministically
+instead of one edit becoming a conflict copy.
 
-Scope and behavior:
+- **Markdown only.** Every other file type in the room keeps using normal whole-file sync.
+- **Turning it on or off is non-destructive.** Existing notes are seeded from their current content; disabling
+  just returns to whole-file sync.
+- **Renames move the note**, keeping its content and history - even with the note open on both devices.
+- **Two people creating a note at once get two notes.** Every new Obsidian note starts with the same default
+  name, so the first to reach the relay keeps it and the other is filed under a name including its creator, with
+  a notice explaining why. Their text is never merged together.
+- **A name you type is never rewritten.** Renaming onto a name a teammate already used is refused with a notice
+  so you can choose another.
+- **Per-keystroke merging needs the note open in your editor.** A device with the room merely mounted still
+  receives every change, just on the ordinary latency budget above.
+- **Older plugin versions can read but not write** a note in this mode; they get a clear rejection rather than a
+  silent conflict.
+- **No new network surface** - it rides the same authenticated connection.
 
-- **Markdown (`.md`) files only.** Every other synced file type in the room (`.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw`, images, PDF) keeps using the whole-file compare-and-swap lane described above, even in a room with CRDT sync enabled.
-- **Turning it on preserves existing notes.** If the room already has `.md` files, each one is seeded from its current content when CRDT sync is enabled - nothing is discarded or reset.
-- **Turning it off is non-destructive.** Files simply go back to being served from their last-synced whole-file content; nothing is deleted.
-- **Renaming a note is atomic, not a delete-and-recreate.** Renaming a CRDT-enabled `.md` note moves it in place: its identity, edit history, and merged content carry over unchanged, nothing is re-uploaded, and the other device sees an actual rename rather than the old note vanishing and a fresh one appearing. This holds even when the note is open in an editor on both devices. (A peer still on a build from before this shipped won't apply the rename live - see "Known limitations" - and legacy whole-file-only file types keep syncing renames as delete+create.)
-- **Older Vault Rooms builds can still read, not write.** A plugin build from before CRDT sync existed (or a device that hasn't upgraded) keeps seeing up-to-date content for a CRDT-enabled note - the relay periodically writes the merged text back into the same whole-file storage regular reads use, on the same latency budget described in "Sync latency" above. That older build cannot push a direct edit to a CRDT-enabled note, though: it gets a clear rejection telling it to use the CRDT sync path (or upgrade) rather than a silent conflict-copy or lost edit.
-- **No new transport surface.** CRDT traffic rides the same authenticated `/sync` WebSocket connection, protected by whatever transport mode the server is running (pinned TLS/WSS, OS-trusted TLS, or legacy plaintext) - see "Security model" and [SECURITY.md](SECURITY.md). There is nothing new to open, pin, or expose on the network.
-
-CRDT sync is new; treat it as a beta feature within a beta plugin, and see [SECURITY.md](SECURITY.md) for its durability/compatibility characteristics.
+This is the newest part of the plugin. Enable it per room, on content you have a backup of. See
+[SECURITY.md](SECURITY.md) for its durability characteristics.
 
 ## Plugin capability model
 
-Room capabilities are metadata. A room can recommend Kanban or Tasks, and the plugin checks whether those plugins are enabled locally. Vault Rooms does not grant permission to run another user's plugin runtime.
-
-## Source path vs. local mount path
-
-When creating a room, **source path** is the folder in the *owner's* vault that the room shares - this is the one and only real copy that other members' edits ultimately reconcile against. (Rooms are always folder-scoped; the earlier single-file room option was removed because the sync engine is folder/prefix based.)
-
-**Local mount path** is where a given *device* keeps its working copy of that room, and it means something different depending on who you are:
-
-- **On the room owner's own device**, mounting defaults to the source path itself - there is no separate copy. The owner's existing files stay exactly where they are; mounting just starts watching and syncing them in place. The first time the owner mounts a room, any pre-existing files under the source path that the relay hasn't seen yet are pushed up automatically, so teammates who join afterward see real content immediately instead of an empty room.
-- **On every other member's device**, mounting downloads the room into a fresh folder - by default `<Mount root>/<mount name>` (Mount root is set in Settings → Vault Rooms → Sync) - since they have no pre-existing copy to reuse.
-
-You can override the computed default for any room/device via the "Local mount path" field in that room's Settings modal, e.g. to point a member's copy somewhere other than the default mount-root location.
-
-## Running the relay server (ports, config)
-
-The legacy/base port defaults to `8787`. If it is unset and busy, the server tries `8788` through `8797`; if explicitly set, only that port is attempted. Pinned HTTPS/WSS uses a separately remembered TLS port, defaulting to base port + 1 and scanning forward if that port is occupied. During migration the two listeners always use different ports; an enforced/fresh pinned server starts only the TLS listener.
-
-Because invite links and saved logins embed a concrete port, the embedded server **pins** the port it successfully binds (stored separately from any explicit user-set port, so an explicit choice is never overridden). Subsequent starts reuse that pinned port first; only if it is genuinely unavailable does it fall back to scanning again, and when that happens you get a persistent notice that previously issued invite links may need regenerating. A busy port that turns out to be a leftover instance of Vault Rooms itself (detected via a `/health` name probe) is called out distinctly from one held by an unrelated app.
-
-- **Embedded (in Obsidian):** configure the relay in Settings → Vault Rooms → Relay server (Public URL override, Port, Max synced file size, Start automatically), then use the Start/Stop button. Public URL override is manually maintained: after an address change, restart the server and confirm the panel's automatic LAN reachability check. A fresh server creates and persists its own pinned identity, listens on HTTPS/WSS, and bootstraps the owner through that pinned connection. There is no Host setting - the embedded server always binds every LAN interface (`0.0.0.0`). Nothing is read from `.env` in this mode.
-- **Standalone (`pnpm dev:server`):** configured via environment variables - see `apps/relay-server/.env.example`. `TLS_MODE=pinned` creates a persistent self-managed identity under `IDENTITY_DIR`; `TLS_MODE=os-trusted` requires `TLS_CERT_FILE` and `TLS_KEY_FILE`; `TLS_MODE=plain` is for development or a trusted reverse-proxy hop. `TLS_DUAL_STACK=true` is accepted only as an explicit transition for an already-bootstrapped legacy pinned migration, with `TLS_MIGRATION_MODE=non_strict|strict`; a fresh pinned server is always HTTPS-only. After clients migrate, stop the process and restart with `TLS_DUAL_STACK=false`: a persisted `tls_migrating` state is durably advanced to `tls_enforced` before the HTTPS-only listener starts. Pinned/enforced states reject dual-stack so plaintext cannot be accidentally re-enabled. Useful for development or for hosting the relay on a dedicated always-on machine rather than a personal laptop.
-
-### Running the standalone relay in Docker (NAS / always-on machine)
-
-The relay has no native dependencies, so the container image is small and needs no build toolchain on the host. From a checkout:
-
-```bash
-docker compose up -d --build
-docker compose logs vault-rooms-relay   # shows the TLS identity and the one-time Bootstrap PIN
-```
-
-Before first start, edit `docker-compose.yml`:
-
-1. Set `PUBLIC_URL` to the LAN address clients will use (e.g. `https://<nas-ip>:8787`). Inside a container the relay cannot detect the host's LAN IP, so this is required.
-2. For the very first run, set `ALLOW_REMOTE_BOOTSTRAP: "true"` — the owner bootstrap normally must come from `127.0.0.1`, but with the relay in a container you bootstrap from another machine. Complete the owner setup with the Bootstrap PIN from the logs, then set it back to `"false"` and `docker compose up -d` again.
-
-The named volume `vault-rooms-data` holds the SQLite database *and* the pinned TLS identity. Losing it means clients see a pin mismatch and all rooms/members are gone — include it in NAS backups. On Synology/Unraid/Portainer, build the image from this repo (`docker build -t vault-rooms-relay .`) and recreate the same container settings: publish port 8787, mount a persistent volume at `/app/apps/relay-server/data`, and set the environment variables above.
-
-Without Docker, a bare Linux box can run the same thing under systemd (after `pnpm install` in a checkout):
-
-```ini
-# /etc/systemd/system/vault-rooms-relay.service
-[Unit]
-Description=Vault Rooms relay
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=vaultrooms
-WorkingDirectory=/opt/vault-rooms/apps/relay-server
-Environment=HOST=0.0.0.0
-Environment=PORT=8787
-Environment=TLS_MODE=pinned
-Environment=PUBLIC_URL=https://192.168.1.10:8787
-ExecStart=/usr/bin/pnpm exec tsx src/index.ts
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`journalctl -u vault-rooms-relay` shows the startup banner with the Bootstrap PIN. Bootstrap from the same machine (`127.0.0.1`) or temporarily set `ALLOW_REMOTE_BOOTSTRAP=true` as above.
-
-## Installing the Obsidian plugin manually
-
-1. Run `pnpm build:plugin`.
-2. Copy root `manifest.json`, `main.js`, and `styles.css` into `<vault>/.obsidian/plugins/vault-rooms/`. All three files are required - the embedded relay's SQLite engine (`sql.js`'s WASM binary) is bundled directly into `main.js`, so no extra file is needed.
-3. Enable community plugins in Obsidian and enable "Vault Rooms".
-4. Use commands prefixed with `Vault Rooms:`, or open the ribbon icon.
-
-### Upgrading from v0.1.x
-
-Replace only `main.js`, `manifest.json`, and `styles.css`, then reload Obsidian. Keep the existing
-plugin `data.json` and the entire `server-data/` directory. v0.2 migrates v0.1 settings and SQLite
-data in place: saved server/device credentials, active selection, mounted-room file state, users,
-teams, rooms, files/version history, invite hashes, and audit events are retained. Before changing a
-v0.1 SQLite schema, the relay writes a one-time byte-for-byte `relay.sqlite.bak-v1` safety copy;
-read-only probes never rewrite that copy or the active database. A corrupt or unrelated file already
-using the backup name is preserved under the next `.bak-v1.invalid*` name before the canonical backup
-is created. The active database is not moved or replaced with an empty one. Regression fixtures cover the
-schema shipped by tags 0.1.0-0.1.5 (0.1.6 already contains the invite-table rebuild) as well as both
-older team-scoped layouts: the room-based shape and the earliest `shares`/`share_id` shape. Legacy
-shares, capabilities, ACL targets, files, blobs, and version history are mapped to rooms inside the
-same rollback-safe migration transaction, even when the earliest database contains `shares` but no
-`rooms` table.
-
-An upgraded v0.1 server intentionally remains on its legacy HTTP/WS transport until the owner runs
-the TLS migration described above. Existing v0.1 device tokens are marked plaintext because that is
-how they were issued; the server never trusts a client-supplied token-security value.
-
-If an interim development build already moved the old database to `.bak-v1`, start the embedded
-server. An empty replacement database is repaired automatically while retaining the existing
-`identity.json`, server ID, and SPKI pin. If the replacement already has
-data, the panel shows **Restore v0.1 data** instead of overwriting it silently; restoration first
-copies that replacement to `.pre-v01-restore`, keeps `.bak-v1`, migrates the old database, and
-recovers a new credential for the existing owner through an in-process-only lifecycle method. Do
-not delete `data.json`, `relay.sqlite`, `.bak-v1`, `identity.json`, or any recovery backup.
-
-## Invite links
-
-Creating an invite (Vault Rooms panel → **Teams** section → a team card → **Invite link**) generates a link like:
-
-```
-obsidian://vault-rooms?mode=join&server=https%3A%2F%2F<host-LAN-IP>%3A8787&token=tr_inv_...&serverId=srv_...&security=pinned-tls&tlsName=srv-....vault-rooms.internal&fp=<SPKI-SHA256>&idc=<identity-certificate-DER>
-```
-
-(`<host-LAN-IP>` is a placeholder for the host address embedded in the server's Public URL. Standalone can auto-detect a LAN address; embedded hosting requires the owner to set the Public URL override because the plugin does not read network interfaces.)
-
-Clicking it opens Obsidian, and if the Vault Rooms plugin is installed there, it pre-fills the Join form with the server URL and token - the recipient only has to add a display name and click Join. The plugin also accepts the older `obsidian://vault-rooms/join?...` path-style link for compatibility.
-
-The link only works if:
-
-1. The recipient already has the Vault Rooms plugin installed (the link cannot install it).
-2. The `server` value is a LAN IP the recipient's machine can actually reach - never `127.0.0.1` (see the security model section above). The host's server always binds every interface, but only the **standalone** runtime fills in the real LAN IP automatically. The **embedded** runtime requires a Public URL override and performs a fresh host-side probe before it issues a team, room, or friend invite token; a missing or failed probe blocks creation until the address is corrected and the server restarted.
-3. Both machines are actually on the same LAN. Use the plugin's **Test connection** action because a browser does not have the invite's private CA/TLS-name pin. Common culprits are different subnets, a firewall blocking the HTTPS port, or Wi-Fi "client/AP isolation" on a guest network (isolation prevents devices on the same Wi-Fi from reaching each other at all).
-
-## Do other members need to run their own server?
-
-No. One device hosts the relay (start it, then **Set up server**); everyone else just installs the plugin and uses **Join server** (or clicks an invite link) pointed at the host's URL. Joining members never start a server of their own, so the auto-port-selection (8787-8797) and any port-conflict handling only matters on the hosting device - it is irrelevant to everyone who only joins.
-
-If a member also wants to host their *own* separate server (e.g. for a different project), that's independent: they'd click **Start server** on their own machine, which picks whatever port is free there.
-
-## Deleting rooms/teams and removing access
-
-All of the following are enforced server-side (the UI just calls the same protected endpoints), so a client can't bypass them by editing local settings:
-
-- **Remove a member's access to one room** (owner/admin): open the room's Settings modal → Room access, and click **Remove** next to the access rule. This deletes a single ACL grant/deny rule; it does not touch team membership.
-- **Remove a member from a team** (server owner or team creator): Vault Rooms panel → **Teams** section → the team card → the member row → **Remove**. This removes only that team membership; the user's account and device tokens are untouched, and they keep access to any room granted to them directly or via another team.
-- **Revoke a user from the whole server** (server owner only): Vault Rooms panel → **Friends** section → **Revoke**. This revokes the user account and *all* of their device tokens, closing their active WebSocket sessions and blocking future fetch/push. This is the server-wide revocation described above.
-- **Revoke a single device** (server owner only): `POST /api/friends/:userId/devices/:deviceId/revoke`. Kills one lost/compromised device without touching the user's other devices - the token fails on its next request and its live WebSocket is closed at once.
-- **Delete a room** (room owner or server owner): open the room's Settings modal → Danger zone → **Delete room**. This permanently deletes the room and all of its files/version history on the server. A device that currently has it mounted forgets its local mount tracking for that room the next time it reconciles (reconnect or manual unmount). Deleting a room does **not** delete files that were already downloaded to a member's vault - only their sync tracking for that room is removed, consistent with how unmounting a room already works.
-- **Delete a team** (server owner or team creator): Vault Rooms panel → **Teams** section → the team card → **Delete team**. This deletes the team's memberships, invites, and ACL grants. It does **not** delete rooms or files - rooms are independently owned and outlive the team, so any room that was shared with the team stays intact for whoever still has direct access. Members lose access that came *only* from this team's grants.
-
-## Team size and scaling
-
-This is a star topology: one relay, many clients over REST + WebSocket. For a small team (roughly up to a few dozen people editing occasionally) this works fine on ordinary hardware - both the standalone (Fastify) and embedded (lightweight `node:http` + `ws`) runtimes comfortably handle tens of concurrent WebSocket connections, and file writes are small, infrequent, human-speed edits, not a write-heavy workload.
-
-What doesn't scale, and matters more as the team grows toward 20-50 people:
-
-- **The host's laptop is a single point of failure.** If whoever is hosting closes Obsidian, sleeps their laptop, or goes offline, sync stops for the whole team until they're back. For a team that size, prefer running the relay as a **standalone** process (`pnpm dev:server`, or a small always-on machine/NAS on the LAN) rather than embedded in one person's personal Obsidian - the protocol is identical either way, so this is purely a deployment choice, not a code change.
-- **No horizontal scaling / no clustering.** There's one process, one SQLite file (via `sql.js`). This is fine for the write volume a few dozen humans generate, but it's not designed to be load-balanced across multiple relay instances.
-- **Transport security is not E2EE.** Pinned TLS/WSS protects traffic from passive LAN observation and authenticates the server identity, but the relay still processes plaintext content and remains a single trusted host. Do not expose it directly to the Internet.
-- **ACLs are per-room, not automatic.** Every room's access still has to be granted (to the whole team or specific members/roles) after creation - there's no team size at which this becomes automatic, so plan for a bit of upfront admin work rounding up 50 people into the right room grants.
-
-## Development
-
-```bash
-pnpm install
-pnpm typecheck
-pnpm test
-pnpm build:plugin
-```
-
-Run a single test file, e.g.:
-
-```bash
-pnpm test apps/relay-server/test/sync-flow.test.ts
-```
-
-Then load the plugin in a real vault (see "Installing the Obsidian plugin manually" below) and use the panel - there is no `pnpm dev:server` step needed for normal use; that script exists only for development and for standalone hosting (see "Running the relay server" above).
-
-## Release checklist
-
-One-time repository setup (already done for this repo, but required again for a fork): on GitHub, go to **Settings → Actions → General → Workflow permissions** and select **Read and write permissions**, so `.github/workflows/release.yml` is allowed to create releases.
-
-To cut a release:
-
-1. Confirm root `manifest.json`, `main.js`, `styles.css`, `README.md`, and `LICENSE` exist, and that `manifest.json`'s `version` has been bumped.
-2. Run `pnpm typecheck`, `pnpm test`, `pnpm build:plugin`, `pnpm audit --prod`, and the Obsidian publish scanners locally. For TLS releases, also complete the two-real-machine matrix in `docs/superpowers/plans/2026-07-13-tls-pinning.md` before tagging. Commit the resulting root `manifest.json`/`main.js`/`styles.css`.
-3. Push a tag that matches `manifest.json`'s `version` exactly (no `v` prefix), e.g. `git tag -a 0.2.1 -m "0.2.1" && git push origin 0.2.1`.
-4. GitHub Actions (`.github/workflows/release.yml`) builds the plugin fresh, verifies the tag matches `manifest.json`, and creates a **draft** GitHub release with `main.js`, `manifest.json`, and `styles.css` attached. `sql-wasm.wasm` is not a separate release asset - it's bundled directly into `main.js` at build time, so the plugin works from just those three files.
-5. Open the draft release on GitHub, add release notes, and publish it.
-6. First release only: sign in at [Obsidian Community](https://community.obsidian.md), link the repository owner's GitHub account, then choose **Plugins → New plugin** and submit the repository URL. The directory reads `manifest.json` from the default branch and runs its automated review after submission; the matching GitHub release must already exist. See [Submit your plugin](https://docs.obsidian.md/Plugins/Releasing/Submit+your+plugin).
+A room can *recommend* companion plugins (Kanban, Tasks) and the panel shows whether they're enabled locally.
+Vault Rooms never grants permission to run someone else's plugin code.
 
 ## Known limitations
 
-- No end-to-end encryption or encrypted-at-rest server database. Pinned TLS/WSS protects transport and server identity; the relay and authorized clients still see plaintext content.
-- No cloud relay, NAT traversal, or mobile support.
-- Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw` (legacy Excalidraw format - newer `.excalidraw.md` files are already covered by Markdown), plus common images (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.svg`) and `.pdf`. Other binary formats (audio, video, Office docs, etc.) aren't synced yet - edits to those files won't reach teammates. Images/PDFs are base64-encoded for transport, so they count against the max file size at roughly 1.33x their real size on disk.
-- No guaranteed deletion of already-synced collaborator copies (this applies to member revocation and room/team deletion alike - see "Deleting rooms/teams and removing access").
-- No character-level co-editing outside of a room's CRDT sync opt-in (edits otherwise sync as whole-file pushes, debounced - see "Sync latency" above). CRDT sync (see "CRDT sync" above) is per-room, off by default, and Markdown-only; a client that hasn't upgraded to a CRDT-capable build can read but not write to a CRDT-enabled note; and live cursors/presence don't exist yet even in a CRDT-enabled room (see ROADMAP.md).
-- Renames and moves within a room sync. For a **CRDT-enabled** room's Markdown (`.md`) notes, a rename is an atomic move that preserves the note's identity, epoch, and edit history and re-uploads nothing (even if the note is open in an editor on both devices at the moment of the rename); a teammate on a current build sees a real rename, not an unrelated new file. Every other file type - and every file in a room without CRDT sync - still syncs a rename as a delete of the old path plus a create at the new path (no dedicated move operation, so renaming a large non-CRDT file re-uploads its contents). Caveat: a peer on a pre-rename-protocol build won't see a CRDT rename applied live and keeps its copy at the old path until its next reconnect/re-mount, which reconciles it to the current room contents (same self-healing path as any other reconnect).
-- Plugin settings store the device token in Obsidian plugin data JSON, unencrypted at rest. A leaked device can be revoked individually (see "Deleting rooms/teams and removing access"). The embedded server identity file also contains private keys; protect plugin configuration backups and sync destinations as described under "Security model."
-- No rate-limit tuning UI: the relay applies a strict per-IP limit on the unauthenticated bootstrap endpoint and a WebSocket connection cap to protect the host (the server runs inside Obsidian's process). There is intentionally no general per-request limiter on authenticated traffic - it legitimately scales with vault size (mounting/reconciling an existing room can fire well over a hundred requests in a burst), and an earlier general limiter was removed after it broke sync on established rooms.
-- Single-host star topology: whoever hosts the relay (embedded or standalone) must stay running for the team to sync; see "Team size and scaling."
-- If the host's LAN IP changes (e.g. DHCP reassigns it), previously issued invite links go stale; generate a new one. Automatic mDNS-based discovery to avoid regenerating entirely is a research item, not a scheduled feature - see [ROADMAP.md](ROADMAP.md).
-- The **embedded** relay never auto-detects your LAN IP (see "Security model" above) - you must update the Public URL override and restart the server every time your LAN IP changes. The hosting panel checks that address from the host and blocks new own-server invites when it is unreachable; even a green result cannot test a teammate's firewall or Wi-Fi isolation. The standalone relay still auto-detects.
+- No end-to-end encryption and no encrypted-at-rest database. The relay and authorized clients see plaintext.
+- No cloud relay, NAT traversal, or mobile support. Desktop, one LAN.
+- Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw`, common images, and `.pdf`.
+  Other binaries (audio, video, Office documents) are not synced. Images and PDFs count against the size limit at
+  roughly 1.33x their real size.
+- Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
+- Character-level co-editing only exists via a room's CRDT opt-in, and only for Markdown. Live cursors and
+  presence don't exist yet.
+- CRDT caveats: per-keystroke merging applies only to a note open in your editor; renaming a note that's open on
+  another device makes that device lose editor focus, which Obsidian controls; and disabling CRDT for a room stops
+  using its history without deleting it.
+- Renames are a real move only for CRDT-enabled Markdown notes. Every other file type re-uploads on rename.
+- Device tokens are stored unencrypted in Obsidian's plugin data. A lost device can be revoked on its own.
+- Single-host topology: whoever hosts must stay running. If their machine sleeps, sync stops for everyone.
+- No clustering, and not built for load-balancing - one process, one database. Fine for a small team editing
+  occasionally, not for a write-heavy workload.
+- If the host's LAN address changes, previously issued invite links go stale and the host must update its Public
+  URL override and restart.
 
 ## Troubleshooting
 
-Start with the built-in **Test** button (Settings → Vault Rooms → Servers, or next to a saved server in the panel): it walks the checks below in order - is the address a valid URL, does anything answer there, is it actually a Vault Rooms server presenting the expected identity, and is this device's saved login still accepted - and reports exactly which step failed with a hint. The items below cover what each failure means and everything the automated check can't see.
+Start with the **Test** button (Settings → Vault Rooms → Servers, or beside a saved server in the panel). It
+checks the address, whether anything answers, whether it's a Vault Rooms server with the expected identity, and
+whether this device's login still works - then names the step that failed.
 
-- `Destination file already exists!` immediately after manually replacing the v0.2 plugin artifacts: rebuild and copy the latest `main.js`, `manifest.json`, and `styles.css` together, then reload Obsidian. An interim v0.2 build used a `DataAdapter.rename()` pattern that could not replace the existing embedded database. Do **not** delete `server-data`, `relay.sqlite`, or `identity.json`; the corrected build preserves and reuses them.
-- `Bootstrap has already been completed` after upgrading: the relay data still has its original owner but an interim build erased the local saved connection. Start the embedded server and use **Recover server access**. This adds a new device credential to the existing owner through the same process; it does not reopen bootstrap or recreate users/teams/rooms. If the panel also reports an archived v0.1 database, use **Restore v0.1 data** first.
-- `Test connection` says wrong service: another process is answering on that port.
-- A teammate can't reach the server at all: on the host, confirm **LAN share: reachable from this device** and that the advertised URL uses the current LAN IP, not `127.0.0.1`. If it is unreachable, update Public URL override, restart the server, and wait for the automatic LAN check. Then use **Test connection** on the teammate's plugin; a green host badge cannot detect the teammate's firewall or Wi-Fi client isolation, and a browser cannot validate the embedded server's private CA and internal TLS name.
-- B cannot join: confirm the invite server URL embeds the actual bound port and A's real LAN IP, not `127.0.0.1`. If A is hosting the **embedded** server, this is expected until A sets a Public URL override (embedded never auto-detects); if A is hosting **standalone** and LAN IP auto-detection failed, set a Public URL override in Settings → Vault Rooms → Relay server (or `PUBLIC_URL` for standalone) and restart the server.
-- **Test connection** reaches the server but the invite link does nothing when clicked: confirm the Vault Rooms plugin is installed and enabled on B's machine - the link only opens the Join form, it can't install the plugin.
-- `TLS_REQUIRED`: the owner enforced TLS and this saved connection still uses legacy HTTP/WS. Use the original connection's migration flow if it is still available; otherwise obtain a fresh fingerprint-carrying invite from the owner. Changing `http://` to `https://` by hand is insufficient because the client also needs the server ID, TLS name, identity certificate, and SPKI pin.
-- **Server identity mismatch** / `pin_mismatch`: the peer presented a different identity from the one saved for this server, and Vault Rooms stopped before sending credentials. Do not edit the fingerprint or look for a trust-anyway bypass. Confirm the host/address first. A planned rotation is accepted automatically only with a valid signature chain from the old identity; after a reinstall or lost identity, get a fresh invite and verify its fingerprint with the owner through a trusted channel.
-- Writes are denied: inspect ACL grants for the user/team and path pattern.
-- Conflicts are expected when two actors edit the same file version.
-- A teammate's edits aren't showing up: confirm both devices show the room as mounted (not just visible) - only mounted rooms hold a live sync subscription.
-- "Invalid or expired credentials" on one team/server but not another: that team's saved device token no longer matches anything in that server's data (most often because the server's data was reset/recreated after the token was issued - e.g. a fresh reinstall, a wiped `server-data` folder, or switching between embedded and standalone mode with different data files). The plugin marks the server entry `revoked` in Settings → Vault Rooms → **Servers** when this happens; use **Forget** there to remove the stale entry (this only forgets it locally, it does not touch the server), then set up or join that server again to get a working identity. This is unrelated to which *room* you have open - a device token is per-server, not per-room.
+- **A teammate can't reach the server:** on the host, confirm the LAN share badge is green and that the advertised
+  address is the current LAN address, not `127.0.0.1`. A browser can't validate a pinned server, so it isn't a
+  useful check.
+- **The invite link does nothing:** the plugin must already be installed and enabled on that device - the link
+  can't install it.
+- **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live
+  editing (CRDT) for the active note"**. It names the missing link. Most often live editing is simply off - it's
+  per room and default-off, so a room created after you last enabled it starts without it.
+- **A teammate's edits aren't showing up:** confirm both devices show the room as **mounted**, not just visible.
+  Only mounted rooms hold a live subscription.
+- **Server identity mismatch:** the peer presented a different identity, so Vault Rooms stopped before sending
+  credentials. Confirm the address; after a reinstall, get a fresh invite and verify its fingerprint with the
+  owner through a channel you trust. There is deliberately no trust-anyway override.
+- **"Invalid or expired credentials" on one server only:** that server's data was reset after your token was
+  issued. Forget the stale entry in Settings → Vault Rooms → Servers, then join again.
+- **Writes are denied:** check the access rules for that user or team and path pattern.
 
 ## License
 

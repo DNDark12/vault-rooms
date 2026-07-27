@@ -564,6 +564,71 @@ describe("RoomSyncSocket reconnect ordering", () => {
   });
 });
 
+describe("RoomSyncSocket room subscription lifecycle", () => {
+  it("sends unsubscribe_room and does not restore that room after reconnect", async () => {
+    const sockets = stubControllableWebSockets();
+    let reconnect: (() => void) | undefined;
+    vi.spyOn(window, "setTimeout").mockImplementation(((callback: TimerHandler, delay?: number) => {
+      if (delay === 1000) reconnect = callback as () => void;
+      return 1;
+    }) as typeof window.setTimeout);
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const socket = new RoomSyncSocket(createServer(), createDeps());
+
+    socket.subscribe("room_1");
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+
+    socket.unsubscribe("room_1");
+    expect(sockets[0]?.sent.map((raw) => JSON.parse(raw))).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "unsubscribe_room", roomId: "room_1" })])
+    );
+
+    sockets[0]?.emit("close", { code: 1006 });
+    reconnect?.();
+    await flushAsyncWork();
+    sockets[1]?.emit("open");
+    sockets[1]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_2" }) });
+    await flushAsyncWork();
+
+    expect(sockets[1]?.sent.filter((raw) => JSON.parse(raw).type === "subscribe_room")).toHaveLength(0);
+    socket.disconnect();
+  });
+
+  it("drops CRDT messages for a room that is no longer mounted", async () => {
+    const handleServerMessage = vi.fn(async () => undefined);
+    const crdt: CrdtWsBridge = {
+      handleServerMessage,
+      handleRoomSnapshot: () => undefined,
+      onConnected: () => undefined,
+      registerKnownEpoch: () => undefined,
+      isSessionOpen: () => false
+    };
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => undefined,
+      crdt
+    });
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+
+    await handleMessage(
+      JSON.stringify({
+        type: "remote_crdt_update",
+        roomId: "room_1",
+        relativePath: "Board.md",
+        epoch: 1,
+        update: "",
+        updatedBy: { userId: "user_2", displayName: "Teammate" }
+      })
+    );
+
+    expect(handleServerMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("RoomSyncSocket room_mode_changed", () => {
   it("reports the new crdtEnabled flag via onRoomModeChanged and still re-subscribes a desired room", async () => {
     const sockets = stubControllableWebSockets();

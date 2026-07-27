@@ -158,6 +158,38 @@ export class RoomSettingsModal extends Modal {
         .addToggle((toggle) =>
           toggle.setValue(this.crdtEnabled).onChange((value) => {
             this.crdtEnabled = value;
+            // Applied immediately rather than waiting for "Save room settings" further down. This
+            // toggle reads as a switch, and it sits in a modal with several *other* buttons ("Apply
+            // access", "Delete room"), so flipping it and then leaving - or pressing one of those -
+            // silently discarded it. That cost a full round of real-hardware debugging: the room
+            // genuinely had live editing off the whole time while it looked switched on, which
+            // presents as "edits take ~3 seconds" because everything falls back to the whole-file
+            // lane. Only `crdtEnabled` is sent, alongside the room's *persisted* values rather than
+            // this form's possibly half-edited ones, so an unsaved name/path edit is never committed
+            // as a side effect of touching this switch.
+            void (async () => {
+              try {
+                await this.plugin.updateRoomSettings(
+                  this.room.id,
+                  {
+                    name: this.room.name,
+                    type: this.room.type,
+                    sourcePath: this.room.sourcePath,
+                    mountName: this.room.mountName,
+                    conflictPolicy: this.room.conflictPolicy,
+                    capabilities: this.capabilities,
+                    crdtEnabled: value
+                  },
+                  this.localMountPath
+                );
+                this.room = this.plugin.visibleRooms.find((room) => room.id === this.room.id) ?? this.room;
+                new Notice(value ? "Vault Rooms: live editing is now ON for this room." : "Vault Rooms: live editing is now OFF for this room.");
+              } catch (error) {
+                this.crdtEnabled = !value;
+                toggle.setValue(!value);
+                new Notice(error instanceof Error ? error.message : "Could not change live editing for this room.");
+              }
+            })();
           })
         );
     }

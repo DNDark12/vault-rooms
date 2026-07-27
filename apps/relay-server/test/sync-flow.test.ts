@@ -180,6 +180,44 @@ describe("WebSocket sync", () => {
     expect(await nextMessage(b3, "hello_error")).toMatchObject({ code: "UNAUTHORIZED" });
   });
 
+  it("stops room fanout after an authenticated client unsubscribes", async () => {
+    const { app, owner, member, room } = await setupSyncFlow();
+    const a = await connect(app);
+    const b = await connect(app);
+
+    a.sendJson({
+      type: "hello",
+      requestId: "hello-a",
+      token: owner.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.2.0", deviceName: "A laptop" }
+    });
+    b.sendJson({
+      type: "hello",
+      requestId: "hello-b",
+      token: member.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.2.0", deviceName: "B laptop" }
+    });
+    await nextMessage(a, "hello_ok");
+    await nextMessage(b, "hello_ok");
+    a.sendJson({ type: "subscribe_room", requestId: "sub-a", roomId: room.id });
+    b.sendJson({ type: "subscribe_room", requestId: "sub-b", roomId: room.id });
+    await nextMessage(a, "room_snapshot");
+    await nextMessage(b, "room_snapshot");
+
+    b.sendJson({ type: "unsubscribe_room", requestId: "unsub-b", roomId: room.id });
+    a.sendJson({
+      type: "file_change",
+      requestId: "change-after-unsubscribe",
+      roomId: room.id,
+      relativePath: "Board.md",
+      baseVersion: 1,
+      content: "# Board\nOnly A\n"
+    });
+
+    await nextMessage(a, "file_change_ack");
+    await expect(nextMessage(b, "remote_file_change")).rejects.toThrow(/Timed out/);
+  });
+
   it("broadcasts REST-pushed writes and deletes to subscribed WebSocket peers", async () => {
     // Regression test: the Obsidian plugin's local edits push over REST (PUT/POST), not the WS
     // file_change/file_delete messages. Other devices only see those edits if the REST routes

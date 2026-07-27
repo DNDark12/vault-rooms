@@ -1,6 +1,7 @@
 # Security
 
-Vault Rooms is pre-1.0 software. Versions through v0.1.6 use plaintext HTTP/WS. Version v0.2.1 introduces the pinned TLS/WSS model described below; verify the installed manifest version before relying on it. See the main [README](README.md) for the full security model, revocation model, and known limitations sections this file summarizes and points back to.
+Vault Rooms is pre-1.0 software. This file is the authoritative description of its threat model, transport
+security, and known limitations.
 
 ## Threat model
 
@@ -15,66 +16,76 @@ Within that scope, Vault Rooms enforces: per-path, deny-by-default access contro
 
 ## Transport security modes
 
-Vault Rooms has three transport modes:
+- **Pinned TLS** - the default for new servers. The server holds a persistent identity, signs its own renewable
+  certificate with it, and puts that identity's fingerprint in every invite. The client pins it *before* sending
+  any token or data, and renewing the certificate doesn't change the pin.
+- **OS-trusted TLS** - for a standalone relay where an operator supplies a certificate the client OS already
+  trusts.
+- **Plaintext legacy** - exists only so an older HTTP server can migrate. Tokens, file contents, filenames, and
+  ACL rules are all readable and modifiable by anyone who can watch the LAN. Don't start a new deployment this
+  way or leave a migration unfinished.
 
-- **Pinned TLS** is the default for new embedded servers. The server creates a persistent ECDSA identity, uses it to sign its renewable TLS leaf certificate, and places the identity certificate, TLS name, server ID, and SHA-256 SPKI fingerprint in every invite. The client pins that identity before sending an invite token, device token, Authorization header, or sync data. Normal traffic uses HTTPS/WSS with certificate verification enabled; renewing the leaf certificate does not change the pin.
-- **OS-trusted TLS** is available to the standalone relay when an operator supplies a certificate and key trusted by the client operating system, normally behind the team's existing certificate-management process. It uses ordinary HTTPS/WSS trust rather than Vault Rooms' self-managed identity pin.
-- **Plaintext legacy mode** exists only so an existing HTTP/WS server can migrate. In this mode device tokens, invite tokens, file contents, filenames, and ACL rules are unencrypted and can be read or modified by an attacker able to observe or intercept LAN traffic. Do not create a new deployment in this mode or leave migration unfinished.
-
-Pinned TLS is transport encryption and server authentication, not end-to-end encryption: the relay and each authorized client necessarily see plaintext content, the server database is not encrypted by this feature, and client device tokens remain subject to the storage limitation below. Vault Rooms is still LAN-only and is not designed to be exposed directly to the Internet.
+Pinned TLS is transport encryption and server authentication, **not** end-to-end encryption: the relay and every
+authorized client see plaintext, and the database is not encrypted by this feature.
 
 ### Migrating a legacy server
 
-The v0.1-to-v0.2 data upgrade is non-destructive. The relay makes a one-time
-byte-identical `relay.sqlite.bak-v1` copy and migrates the active database in place. Read-only schema
-inspection does not flush either file. A corrupt or unrelated file at the canonical backup path is
-quarantined without deletion before a create-only atomic backup is installed. This covers both the exact
-schema shipped by 0.1.0-0.1.6 and the older team-scoped development shapes, including the earliest
-`shares`/`share_id` layout; the structural conversion is transactional. The plugin converts its saved server entries without
-discarding plaintext device tokens or mounted-room state.
-Those historical tokens are classified as `plain` from server-side migration context. If a prior
-development build already archived the database, automatic recovery is limited to an empty
-replacement and retains an existing identity's server ID and pin. Restoring over a non-empty
-replacement is an explicit owner action that first keeps a separate `.pre-v01-restore` copy.
+The owner picks one of two ceremonies in Settings:
 
-An erased local owner credential is not a reason to reopen `POST /api/bootstrap`. The embedded
-plugin can create a replacement device only for the already-recorded server owner through an
-in-process lifecycle method. Credential creation and audit persistence complete durably before the
-token is returned, token security comes from the actual running listener, and a plugin-settings
-write failure revokes the temporary recovery device. There is no public recovery endpoint.
+- **Normal** - a client already authenticated over HTTP can fetch the new identity, pin it, and finish over
+  verified HTTPS, receiving a replacement token. Convenient, but it trusts that one plaintext response; an active
+  LAN attacker could substitute the pin.
+- **Strict** - pin material never travels over HTTP. Each member rejoins with a fresh fingerprint-carrying invite
+  delivered through a channel you trust. Use this if the LAN may already be hostile.
 
-The embedded owner chooses one of two migration ceremonies:
+Enforcing TLS afterwards closes the plaintext listener and every session still using a legacy token; those
+devices must rejoin with a pinned invite. The owner can see how many devices are still on plaintext first.
 
-- **Normal migration** keeps HTTP/WS and HTTPS/WSS available together. An already-authenticated legacy client may obtain the new server identity over its existing HTTP connection, pin it, complete migration over verified HTTPS, and receive a replacement device token. The old token is invalidated and every authenticated socket using it is closed. This is convenient, but it trusts one authenticated plaintext response: an active LAN attacker can replace that first pin. Use Strict for sensitive teams. Normal protects subsequent traffic only if that first response was not intercepted.
-- **Strict migration** never delivers pin material over HTTP. Each client must use a fresh fingerprint-carrying invite from the owner, transferred through a channel the team trusts. This is the correct choice when the existing LAN may already be hostile or when the fingerprint needs independent verification.
+Upgrading an older server's data is non-destructive: the relay keeps a one-time byte-identical backup, migrates
+in place inside a transaction, and never silently overwrites a non-empty database. Saved credentials and
+mounted-room state are preserved; tokens issued before pinned TLS are classified as plaintext, because that is
+what they were.
 
-The owner can see how many active devices were last observed on legacy HTTP before enforcing TLS. Enforcement disables the plaintext listener and closes every authenticated socket still using a legacy token, including one opened over WSS during migration; the same shared authentication check rejects that token on later REST and WebSocket attempts with `TLS_REQUIRED`. A device that did not migrate must rejoin using a fresh pinned invite.
+### Pin mismatch and identity rotation
 
-WebSocket admission is bounded at both ends: the relay closes a connection that does not authenticate within 10 seconds, and the plugin closes/retries when `hello_ok` does not arrive within 10 seconds. On reconnect the plugin re-subscribes every desired room and processes messages in receive order; socket replacement invalidates stale callbacks from the old generation.
-
-For the standalone runtime, dual-stack is an explicit operator transition: start an existing plaintext server with `TLS_MODE=pinned`, `TLS_DUAL_STACK=true`, and `TLS_MIGRATION_MODE=non_strict|strict`; after clients migrate, stop it and restart with `TLS_DUAL_STACK=false`. That restart durably advances `tls_migrating` to `tls_enforced` and starts only HTTPS/WSS. A fresh pinned server and an already pinned/enforced server reject dual-stack instead of exposing an unnecessary plaintext listener.
-
-### Pin mismatch and planned identity rotation
-
-Pinned REST and WSS fail before sending credentials if certificate verification fails. The client may then make one separate, credentialless probe to classify the failure. If the peer presents the same pinned identity, the original expiry, hostname, or network error remains the error. If it presents a different identity, the connection enters a blocking `pin_mismatch` state and no authenticated retry is made.
-
-A deliberate owner rotation is the only automatic recovery path. Rotation records are signed by the previously pinned identity; the client verifies the complete oldest-to-newest chain and persists applied rotation IDs so replay protection survives a plugin restart. An unsigned, expired, replayed, incomplete, or wrong-server chain remains blocked. There is no **Trust anyway** button. If the old identity was lost through a reinstall or data reset, obtain a fresh invite from the owner and verify its fingerprint through a trusted channel.
+If certificate verification fails, pinned connections stop **before** sending credentials. A different identity
+puts the connection into a blocking mismatch state with no authenticated retry and deliberately no
+trust-anyway override. A planned rotation is accepted automatically only when the client can verify a signature
+chain from the previously pinned identity; after a reinstall or a lost identity file, members need a fresh invite
+whose fingerprint they verify with the owner out of band.
 
 ## CRDT sync (opt-in, per room)
 
-A room can opt into CRDT sync (Room Settings → "Live editing (CRDT sync)", default off) for real-time, character-level merging of its Markdown (`.md`) files, using Yjs. This adds no new network listener or transport mode: CRDT messages are JSON on the same authenticated `/sync` WebSocket connection every room already uses, protected by whatever transport mode the server is running (pinned TLS/WSS, OS-trusted TLS, or legacy plaintext - see "Transport security modes" above), and gated by the same per-path `file:read`/`file:write`/`file:create` ACL checks as every other sync message.
+A room can opt into character-level live editing for its Markdown notes (Room Settings → "Live editing (CRDT
+sync)", default off). It adds no new listener or transport: the messages ride the same authenticated sync
+connection every room already uses, under whatever transport mode the server is in, and are gated by the same
+per-path ACL checks.
 
-- **Bounded update-loss-on-crash, not corruption.** A CRDT edit is applied to the relay's in-memory document and appended to its update log on the ordinary (not `durable()`-committed) write path - the same accepted bounded-loss stance the whole-file sync lane already has for its own debounced push (README's "Sync latency"). A relay crash in the narrow window between accepting an edit and that log entry's background flush reaching disk can lose that specific edit; it cannot corrupt the document or resurrect deleted content, and the relay never reports an edit as accepted to other room members until it has actually landed in the log. Room/file lifecycle transitions that affect CRDT state (enabling CRDT for a room, deleting/recreating a file) do go through the stronger `durable()` commit path, matching every other lifecycle transition in this document.
-- **Legacy-client compatibility is read-capable, not write-capable.** A Vault Rooms client that hasn't upgraded to advertise CRDT support can still read a CRDT-enabled room's Markdown files - the relay periodically writes the merged text back into the same whole-file storage regular REST/legacy reads use. It cannot write to a CRDT-enabled path directly: a whole-file REST or WebSocket write to that path is rejected with a specific error instructing the client to use CRDT sync (or upgrade), rather than silently corrupting the document or losing the legacy client's edit. One read-side gap: an atomic CRDT **rename** (see README's "CRDT sync") is broadcast only as a `remote_crdt_rename` message a pre-rename-protocol client ignores, and is not accompanied by a compensating whole-file delete/create - so such a client keeps the note at its old path until its next reconnect/re-mount reconciles it to current room contents. This is a stale-view window that self-heals on reconnect, never data loss.
+- **Bounded update loss on a crash, never corruption.** An accepted edit is applied in memory and appended to a
+  durable log on the ordinary write path - the same accepted trade-off the normal sync lane already makes for its
+  debounced push. A crash in the narrow window before that entry reaches disk can lose that one edit; it cannot
+  corrupt the note or resurrect deleted content, and no edit is reported to other members until it has landed.
+  Lifecycle changes (enabling CRDT, deleting or recreating a file) use the stronger durable commit path.
+- **Older clients can read but not write.** A build without CRDT support keeps seeing current content, because the
+  relay periodically writes the merged text back into normal whole-file storage. A direct write from such a client
+  is refused with a clear error rather than silently losing an edit. One gap: a *rename* is only delivered as a
+  CRDT message such a client ignores, so it keeps the old filename until its next reconnect reconciles it.
+- **An open editor owns its note, not the file on disk.** Obsidian's autosave may lag behind what you typed, so
+  for a note bound to an editor the plugin never reconciles the older on-disk copy back into the shared document -
+  doing so would turn "not saved yet" into a real deletion for everyone. Notes with no editor open are still
+  reconciled, which is what recovers offline or external edits.
+- **Unmounting a room is one atomic teardown**: inbound traffic gated, subscription dropped, that room's editors
+  unbound, and its in-memory and persisted documents disposed before it returns.
 
-CRDT sync's own manual two-real-device verification is still pending (see ROADMAP.md) - treat it as a newer, less-tested surface than the rest of the sync engine.
+This is the newest and least-proven surface in the sync engine, despite extended two-device testing on a real
+LAN. Enable it per room, on content you have a backup of.
 
 ## Token storage
 
 - Invite tokens (`tr_inv_...`) and device tokens (`tr_dev_...`) are generated with a CSPRNG (`crypto.randomBytes`).
 - The relay only ever stores a **SHA-256 hash** of each token, never the token itself - a stolen database dump cannot be used to reconstruct working tokens.
 - The **client** side is weaker: the plugin stores its own device token in Obsidian's plugin data JSON (`data.json` under the plugin's folder in `.obsidian/plugins/vault-rooms/`), in plaintext, unencrypted at rest. This is standard practice for Obsidian plugin settings generally, but it means anyone with filesystem access to that device (or a backup of it) can read the token and use it to impersonate that device against the relay until it's revoked.
-- A leaked/stolen device should be revoked individually (see "Revocation limitations" below and the README's "Deleting rooms/teams and removing access" section) - this invalidates the specific token immediately, without affecting the same user's other devices.
+- A leaked/stolen device should be revoked individually (see "Revocation limitations" below) - this invalidates the specific token immediately, without affecting the same user's other devices.
 
 ## Server identity-key storage
 
@@ -110,7 +121,3 @@ The only endpoint that can provision privileged access with no pre-existing cred
 Please **do not** open a public GitHub issue for a security vulnerability. Instead, use GitHub's private disclosure feature: open this repository's **Security** tab → **Report a vulnerability** (GitHub Security Advisories). This lets us discuss and fix the issue before it's publicly visible.
 
 If you're unsure whether something qualifies (e.g. a "known limitation" documented above vs. a genuine bug), err on the side of reporting privately - worst case, we point you to the relevant section of this document.
-
-## Supported versions
-
-Vault Rooms is pre-1.0. Only the latest published release is supported; there is no backport/LTS policy at this stage. Always update to the latest version before reporting an issue.

@@ -6,10 +6,27 @@ export type SyncClientCapabilities = { crdt?: boolean };
 export type SyncClientMessage =
   | { type: "hello"; requestId: string; token: string; client: { kind: "obsidian-plugin"; version: string; deviceName: string }; capabilities?: SyncClientCapabilities }
   | { type: "subscribe_room"; requestId: string; roomId: string }
+  | { type: "unsubscribe_room"; requestId: string; roomId: string }
   | { type: "file_change"; requestId: string; roomId: string; relativePath: string; baseVersion: number; content: string }
   | { type: "file_delete"; requestId: string; roomId: string; relativePath: string; baseVersion: number }
   // --- CRDT sync (contract 1.3/1.8/1.10) - all scoped by roomId + relativePath + epoch. ---
-  | { type: "crdt_create"; requestId: string; roomId: string; relativePath: string }
+  | {
+      type: "crdt_create";
+      requestId: string;
+      roomId: string;
+      relativePath: string;
+      /**
+       * `true` when the sender is (re)establishing a session for a note it *already has* - reopening
+       * after an unmount/remount, binding an editor, reacting to a remote update - rather than
+       * announcing a brand-new note the user just made. The distinction decides what happens when the
+       * path is already taken server-side: adopt that existing document, or treat this as a second,
+       * different note and give it a disambiguated name. Getting it wrong in the "adopt" direction
+       * merges two unrelated notes; getting it wrong in the other direction duplicated a note on every
+       * remount, renaming the local file to `… (device 1)` / `… (device 2)` (fifteenth hardware-testing
+       * round). Absent is treated as `false` so an older client keeps the previous behavior.
+       */
+      adoptIfExists?: boolean;
+    }
   | { type: "crdt_sync_step1"; requestId: string; roomId: string; relativePath: string; epoch: number; stateVector: string }
   | { type: "crdt_sync_step2"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string }
   | { type: "crdt_update"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string }
@@ -55,7 +72,23 @@ export type SyncServerMessage =
   | { type: "room_access_revoked"; roomId: string }
   | { type: "security_upgrade_available"; httpsUrl: string; wssUrl: string }
   // --- CRDT sync (contract 1.3/1.8/1.10/1.11) ---
-  | { type: "crdt_created"; requestId: string; roomId: string; relativePath: string; documentId: string; epoch: number }
+  | {
+      type: "crdt_created";
+      requestId: string;
+      roomId: string;
+      relativePath: string;
+      documentId: string;
+      epoch: number;
+      /**
+       * `true` when this answer *adopted* a document that already existed at the path rather than
+       * creating one. The client must not seed an adopted document from its local disk copy: the
+       * server's document already holds that content, so seeding duplicates it - and because unmounting
+       * clears the client's persisted state, every remount duplicated the note again (seventeenth
+       * hardware-testing round). Absent/false means the document was genuinely created by this request,
+       * in which case the local disk copy is its only content and must be seeded.
+       */
+      adopted?: boolean;
+    }
   | { type: "crdt_sync_step1"; roomId: string; relativePath: string; epoch: number; stateVector: string }
   | { type: "crdt_sync_step2"; requestId: string; roomId: string; relativePath: string; epoch: number; update: string }
   | { type: "remote_crdt_update"; roomId: string; relativePath: string; epoch: number; update: string; updatedBy: { userId: string; displayName: string } }

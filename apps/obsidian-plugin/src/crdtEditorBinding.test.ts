@@ -12,6 +12,7 @@ import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 import type { DataAdapter } from "obsidian";
 import * as Y from "yjs";
+import type { SyncClientMessage } from "@vault-rooms/protocol";
 import { CrdtDocStore } from "./crdtDocStore.js";
 import { CrdtEditorController, buildCrdtEditorExtension } from "./crdtEditorBinding.js";
 import { CrdtSessionManager } from "./crdtSession.js";
@@ -51,17 +52,33 @@ class FakeDataAdapter {
   }
 }
 
-function makeManager(): CrdtSessionManager {
+function makeManager(diskText = "", sent: SyncClientMessage[] = [], autoAckHandshake = true): CrdtSessionManager {
   const adapter = new FakeDataAdapter();
   const docStore = new CrdtDocStore(adapter as unknown as DataAdapter, "vault-rooms/crdt");
-  return new CrdtSessionManager({
-    send: () => undefined,
+  let manager!: CrdtSessionManager;
+  manager = new CrdtSessionManager({
+    send: (message) => {
+      sent.push(message);
+      if (autoAckHandshake && message.type === "crdt_sync_step1") {
+        window.setTimeout(() => {
+          void manager.handleServerMessage({
+            type: "crdt_sync_step2",
+            requestId: message.requestId,
+            roomId: message.roomId,
+            relativePath: message.relativePath,
+            epoch: message.epoch,
+            update: Buffer.from(Y.encodeStateAsUpdate(new Y.Doc())).toString("base64")
+          });
+        }, 0);
+      }
+    },
     docStore,
     isRoomCrdtEnabled: () => true,
-    readDiskText: async () => "",
+    readDiskText: async () => diskText,
     writeDiskText: async () => undefined,
     renameDiskFile: async () => undefined
   });
+  return manager;
 }
 
 /** Mirrors the real production wiring: `registerEditorExtension(compartment.of([]))` is registered
@@ -157,6 +174,34 @@ describe("CrdtEditorController.syncOpenViews", () => {
     expect(manager.isSessionOpen("room_1", "Board.md")).toBe(true);
     const session = await manager.ensureSession("room_1", "Board.md");
     expect(session.ytext.toString()).toBe("bound");
+    view.destroy();
+  });
+
+  // Sixteenth hardware-testing round (2026-07-24): binding must ATTACH, never ALLOCATE. Obsidian moves
+  // the open editor's file during a rename and can deliver that workspace event before the vault rename
+  // event, so a creating bind pass allocated a fresh document at the rename's destination and the rename
+  // arriving ~5ms later collided with it (crdt_create .450, crdt_rename .455, crdt_rejected FILE_EXISTS
+  // .469 in a real WS trace). A document's existence is owned by the vault "create" event and the
+  // server's snapshot - not by opening an editor.
+  it("does not create a document for a path it knows no epoch for - it leaves the view unbound", async () => {
+    const manager = makeManager();
+    // Deliberately NO handleRoomSnapshot: this path is unknown to the client.
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: (path) => (path === "Rooms/Demo/Fresh.md" ? { roomId: "room_1", relativePath: "Fresh.md" } : undefined)
+    });
+    const view = editorViewWithCompartment(controller);
+
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Fresh.md", view }]);
+
+    expect(manager.isSessionOpen("room_1", "Fresh.md")).toBe(false);
+    expect(controller.isBound(view)).toBe(false);
+
+    // Once the document is established (as the vault "create" event does), the next pass binds it.
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Fresh.md", crdtEpoch: 0 }]);
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Fresh.md", view }]);
+    expect(manager.isSessionOpen("room_1", "Fresh.md")).toBe(true);
+    expect(controller.isBound(view)).toBe(true);
     view.destroy();
   });
 
@@ -369,5 +414,119 @@ describe("CrdtEditorController.syncOpenViews", () => {
 
     viewOne.destroy();
     viewTwo.destroy();
+  });
+
+  it("unbindRoom retires only views belonging to that room", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    manager.handleRoomSnapshot("room_2", [{ relativePath: "Other.md", crdtEpoch: 0 }]);
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: (path) => {
+        if (path === "Rooms/One/Board.md") return { roomId: "room_1", relativePath: "Board.md" };
+        if (path === "Rooms/Two/Other.md") return { roomId: "room_2", relativePath: "Other.md" };
+        return undefined;
+      }
+    });
+    const roomOneView = editorViewWithCompartment(controller);
+    const roomTwoView = editorViewWithCompartment(controller);
+    await controller.syncOpenViews([
+      { vaultPath: "Rooms/One/Board.md", view: roomOneView },
+      { vaultPath: "Rooms/Two/Other.md", view: roomTwoView }
+    ]);
+
+    controller.unbindRoom("room_1");
+
+    expect(controller.isBound(roomOneView)).toBe(false);
+    expect(controller.isBound(roomTwoView)).toBe(true);
+    expect((await manager.ensureSession("room_1", "Board.md")).boundToEditor).toBe(false);
+    expect((await manager.ensureSession("room_2", "Other.md")).boundToEditor).toBe(true);
+
+    roomOneView.destroy();
+    roomTwoView.destroy();
+  });
+
+  it("rebinds the same view to a replacement Y.Doc without duplicating its existing text", async () => {
+    let manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    await manager.ensureSession("room_1", "Board.md");
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: (path) => (path === "Rooms/Demo/Board.md" ? { roomId: "room_1", relativePath: "Board.md" } : undefined)
+    });
+    const view = editorViewWithCompartment(controller);
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]);
+    view.dispatch({ changes: { from: 0, insert: "hello" } });
+    expect(view.state.doc.toString()).toBe("hello");
+
+    controller.unbindRoom("room_1");
+    await manager.disposeRoom("room_1");
+    const sent: SyncClientMessage[] = [];
+    manager = makeManager("hello", sent, false);
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const binding = controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]);
+    await vi.waitFor(() => expect(sent.some((message) => message.type === "crdt_sync_step1")).toBe(true));
+    const step1 = sent.find((message) => message.type === "crdt_sync_step1") as Extract<
+      SyncClientMessage,
+      { type: "crdt_sync_step1" }
+    >;
+    const serverDoc = new Y.Doc();
+    serverDoc.getText("content").insert(0, "hello");
+    await manager.handleServerMessage({
+      type: "crdt_sync_step2",
+      requestId: step1.requestId,
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 0,
+      update: Buffer.from(Y.encodeStateAsUpdate(serverDoc)).toString("base64")
+    });
+    await binding;
+    const replacement = await manager.ensureSession("room_1", "Board.md");
+
+    expect(view.state.doc.toString()).toBe("hello");
+    expect(replacement.ytext.toString()).toBe("hello");
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
+
+    expect(view.state.doc.toString()).toBe("hello!");
+    expect(replacement.ytext.toString()).toBe("hello!");
+    view.destroy();
+  });
+
+  it("awaits an existing in-flight bind when syncOpenViews is called again for the same target", async () => {
+    const sent: SyncClientMessage[] = [];
+    const manager = makeManager("", sent, false);
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const view = editorViewWithCompartment(controller);
+
+    const first = controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]);
+    await vi.waitFor(() => expect(sent.some((message) => message.type === "crdt_sync_step1")).toBe(true));
+    let secondResolved = false;
+    const second = controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]).then(() => {
+      secondResolved = true;
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(secondResolved).toBe(false);
+
+    const step1 = sent.find((message) => message.type === "crdt_sync_step1") as Extract<
+      SyncClientMessage,
+      { type: "crdt_sync_step1" }
+    >;
+    await manager.handleServerMessage({
+      type: "crdt_sync_step2",
+      requestId: step1.requestId,
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 0,
+      update: Buffer.from(Y.encodeStateAsUpdate(new Y.Doc())).toString("base64")
+    });
+    await Promise.all([first, second]);
+
+    expect(secondResolved).toBe(true);
+    expect(controller.isBound(view)).toBe(true);
+    view.destroy();
   });
 });

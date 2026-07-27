@@ -191,7 +191,10 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     internals.watchMountedRoom("room_1");
     vaultAdapter.emit({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" });
 
-    expect(ensureSession).toHaveBeenCalledWith("room_1", "Board.md");
+    // The third argument marks whether this is a note that did not exist a moment ago. A "modify" never
+    // is, so it must adopt whatever document already holds the path rather than risk forking a renamed
+    // duplicate (fifteenth hardware-testing round).
+    expect(ensureSession).toHaveBeenCalledWith("room_1", "Board.md", { brandNewNote: false });
     // The legacy CAS-lane coordinator must never have marked this path dirty - that's exactly the
     // state that later causes VaultSyncEngine.applyRemoteChange to fabricate a conflict copy.
     expect(roomState.files["Board.md"]).toBeUndefined();
@@ -203,7 +206,10 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     internals.watchMountedRoom("room_1");
     vaultAdapter.emit({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" });
 
-    expect(ensureSession).toHaveBeenCalledWith("room_1", "Board.md");
+    // The third argument marks whether this is a note that did not exist a moment ago. A "modify" never
+    // is, so it must adopt whatever document already holds the path rather than risk forking a renamed
+    // duplicate (fifteenth hardware-testing round).
+    expect(ensureSession).toHaveBeenCalledWith("room_1", "Board.md", { brandNewNote: false });
     expect(roomState.files["Board.md"]).toBeUndefined();
   });
 

@@ -71,6 +71,13 @@ export type CrdtSession = {
    *  `remote_crdt_update`/handshake merge landed in the Y.Doc while a `readDiskText` await was in
    *  flight - see that method's doc comment for the data-loss bug this closes. */
   revision: number;
+  /** Exact callback registered with Y.Doc, retained so retirement can remove it before destroy. */
+  updateHandler: (update: Uint8Array, origin: unknown) => void;
+  /** Resolves after the first server step2 has hydrated/reconciled this document. Editor binding
+   *  waits for this so an already-populated CM6 view is never attached to a still-empty replacement
+   *  Y.Doc during remount. */
+  initialSync: Promise<void>;
+  resolveInitialSync: () => void;
 };
 
 export type CrdtSessionManagerDeps = {
@@ -91,6 +98,10 @@ export type CrdtSessionManagerDeps = {
    *  doesn't exist locally (e.g. this device never downloaded the file before the rename). */
   renameDiskFile: (roomId: string, oldRelativePath: string, newRelativePath: string) => Promise<void>;
   onSessionChanged?: (roomId: string, relativePath: string) => void;
+  /** Synchronously removes editor bindings before a session's Y.Doc is destroyed. */
+  onSessionRetiring?: (roomId: string, relativePath: string) => void;
+  /** Lets the editor controller attach open views after a replacement/new session becomes live. */
+  onSessionOpened?: (roomId: string, relativePath: string) => void;
   /** Called when the server assigned this device's brand-new note a different path than the one it
    *  asked for, because another device had already created a note at that path first (every new
    *  Obsidian note starts with the same default name, so this is routine, not an error). The local
@@ -143,7 +154,11 @@ export class CrdtSessionManager implements CrdtWsBridge {
   private readonly knownEpoch = new Map<string, number>();
   private readonly pendingCreate = new Map<
     string,
-    { key: string; resolve: (created: { epoch: number; relativePath: string }) => void; reject: (error: Error) => void }
+    {
+      key: string;
+      resolve: (created: { epoch: number; relativePath: string; documentCreatedNow: boolean }) => void;
+      reject: (error: Error) => void;
+    }
   >();
   /** Coalesces concurrent `ensureSession` callers for the same (roomId, relativePath) onto one
    *  in-flight open (see `ensureSession`'s doc comment for why this needs to wrap the whole open,
@@ -228,6 +243,35 @@ export class CrdtSessionManager implements CrdtWsBridge {
     this.knownEpoch.set(key, epoch);
   }
 
+  /**
+   * Opens a session **only** for a document this device already knows an epoch for (from a room
+   * snapshot, an announce, or an earlier open) - returning undefined instead of allocating a new
+   * document when it doesn't.
+   *
+   * This is what the editor-binding pass uses. Binding an editor must never *create* a document,
+   * because Obsidian moves the open editor's file as part of a rename and can deliver the resulting
+   * workspace event *before* the vault rename event: the bind pass then allocated a fresh document at
+   * the rename's destination path, and the rename that arrived milliseconds later collided with it
+   * (`crdt_create` at .450, `crdt_rename` at .455, `crdt_rejected FILE_EXISTS` at .469 in a real WS
+   * trace). Claiming the destination inside `renameSession` only helps when the rename is seen first,
+   * which is why that guard alone did not close this. A document's existence is owned by the vault
+   * "create" watcher event (and by the server's own snapshot/announce); the editor only ever attaches
+   * to one. A brand-new note therefore binds a beat later - once its create event has established the
+   * document - rather than racing it.
+   */
+  async ensureSessionIfKnown(roomId: string, relativePath: string): Promise<CrdtSession | undefined> {
+    if (!this.deps.isRoomCrdtEnabled(roomId) || !isCrdtEligiblePath(relativePath)) {
+      return undefined;
+    }
+    const key = sessionKey(roomId, relativePath);
+    if (!this.sessions.has(key) && this.knownEpoch.get(key) === undefined) {
+      return undefined;
+    }
+    const session = await this.ensureSession(roomId, relativePath);
+    await session.initialSync;
+    return this.sessions.get(key) === session ? session : undefined;
+  }
+
   /** Marks a session as currently bound to an open CM6 editor - see CrdtSession.boundToEditor. */
   bindToEditor(roomId: string, relativePath: string): void {
     const session = this.sessions.get(sessionKey(roomId, relativePath));
@@ -246,7 +290,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * wires update forwarding, and kicks off the handshake. Safe to call repeatedly - returns the
    * existing live session unless its epoch has been superseded.
    */
-  async ensureSession(roomId: string, relativePath: string): Promise<CrdtSession> {
+  async ensureSession(roomId: string, relativePath: string, options: { brandNewNote?: boolean } = {}): Promise<CrdtSession> {
     if (!this.deps.isRoomCrdtEnabled(roomId) || !isCrdtEligiblePath(relativePath)) {
       throw new Error(`ensureSession called for a non-CRDT target: ${roomId}/${relativePath}`);
     }
@@ -269,7 +313,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (inFlight) {
       return inFlight;
     }
-    const opening = this.openSession(roomId, relativePath, key).finally(() => {
+    const opening = this.openSession(roomId, relativePath, key, options.brandNewNote === true).finally(() => {
       this.pendingSessionOpen.delete(key);
     });
     this.pendingSessionOpen.set(key, opening);
@@ -404,8 +448,8 @@ export class CrdtSessionManager implements CrdtWsBridge {
     await this.deps.docStore.rename(roomId, oldRelativePath, newRelativePath, epoch);
   }
 
-  private async openSession(roomId: string, requestedPath: string, requestedKey: string): Promise<CrdtSession> {
-    const created = await this.ensureEpoch(roomId, requestedPath);
+  private async openSession(roomId: string, requestedPath: string, requestedKey: string, brandNewNote: boolean): Promise<CrdtSession> {
+    const created = await this.ensureEpoch(roomId, requestedPath, brandNewNote);
     const epoch = created.epoch;
     let relativePath = requestedPath;
     let key = requestedKey;
@@ -449,22 +493,48 @@ export class CrdtSessionManager implements CrdtWsBridge {
       if (diskText !== null) {
         reconcileYTextWithDiskText(ytext, diskText, LOCAL_ORIGIN);
       }
-    } else if (diskText) {
-      // Genuinely first time this device has held this document. Seeding it with the current disk
-      // content here is an ordinary "first write" (see crdtPersistenceReconcileSpike.test.ts's
-      // reasoning for why this differs from re-seeding a stale baseline) - if a document already
-      // existed server-side, the handshake below merges it in, and the post-handshake reconcile
-      // (in the crdt_sync_step2 handler) diffs disk text against the *merged* result, so nothing is
-      // lost either way.
+    } else if (diskText && created.documentCreatedNow) {
+      // Seed from disk ONLY when the server confirmed this request actually *created* the document, so
+      // the local copy is its only content. Note the signal is the server's `adopted: false`, not the
+      // caller's "is this a brand-new note" hint: recovery after a NOT_FOUND, for instance, is not a new
+      // note but does genuinely (re)create the document, and its disk text must still be seeded.
+      //
+      // Seeding whenever there was no persisted state (the previous behaviour) corrupted content on
+      // every unmount/remount cycle: unmounting deletes this device's persisted CRDT state by design,
+      // so remounting found none, seeded the doc with the file's text, and then the handshake merged in
+      // the server's document - which already held that same text. The note ended up with two copies,
+      // and each cycle doubled it again, which is exactly the "content keeps getting copied further and
+      // further down" report (seventeenth hardware-testing round, 2026-07-24; the growing `crdt_update`
+      // payloads - 4KB, 9.4KB, 12.9KB - are the duplication being pushed back out as real edits).
+      //
+      // For every other case the server's document is authoritative, and local divergence is not lost:
+      // the post-handshake reconcile (in the `crdt_sync_step2` handler) diffs the disk text against the
+      // merged result and emits the difference as local ops - which is the mechanism contract 1.12
+      // relies on for offline edits anyway.
       doc.transact(() => {
         ytext.insert(0, diskText);
       }, LOCAL_ORIGIN);
     }
 
-    const session: CrdtSession = { roomId, relativePath, epoch, doc, ytext, boundToEditor: existing?.boundToEditor ?? false, revision: 0 };
+    let resolveInitialSync!: () => void;
+    const initialSync = new Promise<void>((resolve) => {
+      resolveInitialSync = resolve;
+    });
+    const session: CrdtSession = {
+      roomId,
+      relativePath,
+      epoch,
+      doc,
+      ytext,
+      boundToEditor: existing?.boundToEditor ?? false,
+      revision: 0,
+      updateHandler: () => undefined,
+      initialSync,
+      resolveInitialSync
+    };
     this.sessions.set(key, session);
 
-    doc.on("update", (update: Uint8Array, origin: unknown) => {
+    session.updateHandler = (update: Uint8Array, origin: unknown) => {
       // Bumped first, unconditionally, for every applied update regardless of origin - this is the
       // signal reconcileAgainstDisk uses to detect "something changed the doc while I was awaiting a
       // disk read" and must run before anything else in this handler could itself await.
@@ -493,9 +563,11 @@ export class CrdtSessionManager implements CrdtWsBridge {
         epoch,
         update: toBase64(update)
       });
-    });
+    };
+    doc.on("update", session.updateHandler);
 
     this.startHandshake(session);
+    this.deps.onSessionOpened?.(session.roomId, session.relativePath);
     return session;
   }
 
@@ -587,6 +659,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
         this.knownEpoch.delete(key);
       }
     }
+    for (const [requestId, pending] of [...this.pendingCreate.entries()]) {
+      if (pending.key.startsWith(`${roomId}\0`)) {
+        this.pendingCreate.delete(requestId);
+        pending.reject(new Error(`CRDT room ${roomId} was disposed.`));
+      }
+    }
     await this.deps.docStore.deleteRoom(roomId);
   }
 
@@ -611,7 +689,9 @@ export class CrdtSessionManager implements CrdtWsBridge {
         const pending = this.pendingCreate.get(message.requestId);
         if (pending) {
           this.pendingCreate.delete(message.requestId);
-          pending.resolve({ epoch: message.epoch, relativePath: message.relativePath });
+          // `adopted` decides whether the local disk copy is this document's only content (created now)
+          // or a duplicate of what the server already holds - see openSession's seeding branch.
+          pending.resolve({ epoch: message.epoch, relativePath: message.relativePath, documentCreatedNow: message.adopted !== true });
         }
         return;
       }
@@ -675,8 +755,13 @@ export class CrdtSessionManager implements CrdtWsBridge {
         Y.applyUpdate(session.doc, fromBase64(message.update), REMOTE_ORIGIN);
         // Post-handshake reconcile: catches "existing doc, no persisted local state" divergence -
         // any local disk content not already captured by the pre-handshake reconcile above is
-        // diffed against the now-merged doc.
-        await this.reconcileAgainstDisk(session, session.roomId, session.relativePath, LOCAL_ORIGIN);
+        // diffed against the now-merged doc. A bound editor is the live source of truth, however:
+        // Obsidian's autosave is allowed to lag behind its CM6/Y.Doc content, so reconciling that
+        // stale disk snapshot here would emit a real local delete and clear the editor/server.
+        if (!session.boundToEditor) {
+          await this.reconcileAgainstDisk(session, session.roomId, session.relativePath, LOCAL_ORIGIN);
+        }
+        session.resolveInitialSync();
         return;
       }
       case "crdt_sync_step1": {
@@ -707,10 +792,25 @@ export class CrdtSessionManager implements CrdtWsBridge {
           // roughly three seconds behind the keystroke, which is exactly the "edits take ~3s to show
           // up, or appear all at once when I click away" latency reported from real hardware
           // (thirteenth hardware-testing round, 2026-07-24). Live receipt must not depend on the
-          // editor-binding pass having run: open the session now, and its handshake pulls in this
-          // update plus anything else missed. Not awaited - the open waits on server replies that can
-          // only arrive on later messages, so awaiting here would deadlock message processing.
-          void this.ensureSession(message.roomId, message.relativePath).catch(() => undefined);
+          // editor-binding pass having run: open the session now, then apply this exact update.
+          // The handshake remains the catch-up mechanism for anything else missed, but cannot be the
+          // only carrier for this update: another socket's update and this device's step1 can cross
+          // so the server answers the step1 from its pre-update state even though this fanout is
+          // already queued locally. Applying the same Yjs update again if the handshake also carried
+          // it is idempotent. Not awaited - the open may itself wait on later socket replies.
+          const update = fromBase64(message.update);
+          void this.ensureSession(message.roomId, message.relativePath)
+            .then((opened) => {
+              if (
+                !this.disposed &&
+                this.deps.isRoomCrdtEnabled(message.roomId) &&
+                this.sessions.get(key) === opened &&
+                opened.epoch === message.epoch
+              ) {
+                Y.applyUpdate(opened.doc, update, REMOTE_ORIGIN);
+              }
+            })
+            .catch(() => undefined);
           return;
         }
         if (session.epoch !== message.epoch) return;
@@ -722,11 +822,17 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
   }
 
-  private async ensureEpoch(roomId: string, relativePath: string): Promise<{ epoch: number; relativePath: string }> {
+  private async ensureEpoch(
+    roomId: string,
+    relativePath: string,
+    brandNewNote: boolean
+  ): Promise<{ epoch: number; relativePath: string; documentCreatedNow: boolean }> {
     const key = sessionKey(roomId, relativePath);
     const known = this.knownEpoch.get(key);
     if (known !== undefined) {
-      return { epoch: known, relativePath };
+      // An epoch we already knew (room snapshot, announce, earlier open) always describes a document
+      // that exists server-side, so its content comes from the handshake - never from seeding.
+      return { epoch: known, relativePath, documentCreatedNow: false };
     }
     // Only ever called from openSession, which ensureSession's pendingSessionOpen already
     // serializes per key - so there is no concurrent-caller case to coalesce here.
@@ -735,9 +841,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
     // Obsidian note starts with the same default name) is assigned a disambiguated one instead. The
     // `crdt_created` handler resolves this promise with whatever path was actually assigned.
     const requestId = this.createRequestId();
-    return new Promise<{ epoch: number; relativePath: string }>((resolve, reject) => {
+    return new Promise<{ epoch: number; relativePath: string; documentCreatedNow: boolean }>((resolve, reject) => {
       this.pendingCreate.set(requestId, { key, resolve, reject });
-      this.deps.send({ type: "crdt_create", requestId, roomId, relativePath });
+      // `adoptIfExists` unless this is a note the user *just created*. Reopening something we already
+      // have (remount, editor bind, remote update, recovery) must attach to the existing document; only
+      // a genuinely new note may be treated as a second, different note and disambiguated.
+      this.deps.send({ type: "crdt_create", requestId, roomId, relativePath, adoptIfExists: !brandNewNote });
     });
   }
 
@@ -853,6 +962,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
 
   private teardownSession(session: CrdtSession): void {
     const key = sessionKey(session.roomId, session.relativePath);
+    this.deps.onSessionRetiring?.(session.roomId, session.relativePath);
     const persistTimer = this.persistTimers.get(key);
     if (persistTimer !== undefined) {
       this.cancel(persistTimer);
@@ -863,6 +973,14 @@ export class CrdtSessionManager implements CrdtWsBridge {
       this.cancel(materializeTimer);
       this.materializeTimers.delete(key);
     }
+    for (const [requestId, pendingKey] of [...this.pendingHandshake.entries()]) {
+      if (pendingKey === key) {
+        this.pendingHandshake.delete(requestId);
+      }
+    }
+    session.doc.off("update", session.updateHandler);
+    session.resolveInitialSync();
+    session.doc.destroy();
   }
 
   private createRequestId(): string {

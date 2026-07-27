@@ -1072,7 +1072,7 @@ export class RelayRepository {
     this.crdt.purgeCrdtState(fileId, epoch);
   }
 
-  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string; actorDisplayName?: string }): {
+  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string; actorDisplayName?: string; adoptIfExists?: boolean }): {
     fileId: string;
     epoch: number;
     relativePath: string;

@@ -105,7 +105,9 @@ describe("RoomMountController", () => {
       renderOpenRoomsViews: vi.fn(),
       stopWatchingRoom: vi.fn(),
       watchMountedRoom: vi.fn(),
-      subscribeRoom: vi.fn()
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: vi.fn(),
+      unbindCrdtRoom: vi.fn()
     };
 
     await new RoomMountController(deps).mountRoom(room);
@@ -166,7 +168,9 @@ describe("RoomMountController", () => {
       renderOpenRoomsViews: vi.fn(),
       stopWatchingRoom: vi.fn(),
       watchMountedRoom: vi.fn(),
-      subscribeRoom: vi.fn()
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: vi.fn(),
+      unbindCrdtRoom: vi.fn()
     };
 
     await new RoomMountController(deps).mountRoom(room);
@@ -263,7 +267,9 @@ describe("RoomMountController", () => {
       renderOpenRoomsViews: vi.fn(),
       stopWatchingRoom: vi.fn(),
       watchMountedRoom: vi.fn(),
-      subscribeRoom: vi.fn()
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: vi.fn(),
+      unbindCrdtRoom: vi.fn()
     };
     const controller = new RoomMountController(deps);
 
@@ -272,5 +278,72 @@ describe("RoomMountController", () => {
     expect(controller.listRoomConflicts("room_1")).toEqual([]);
     expect([...vaultAdapter.files.keys()].some((path) => path.includes("(conflict "))).toBe(false);
     expect(roomState.files["Board.md"]).toMatchObject({ serverVersion: 3, serverSha256: "server-3", dirty: false });
+  });
+
+  it("marks a room unmounted, unsubscribes and unbinds it, then waits for CRDT disposal before saving", async () => {
+    const events: string[] = [];
+    let finishDispose!: () => void;
+    const disposeBlocked = new Promise<void>((resolve) => {
+      finishDispose = resolve;
+    });
+    const roomState: MountedRoomState = {
+      roomId: "room_1",
+      serverId: "server_1",
+      mountPath: "demo",
+      crdtEnabled: true,
+      files: {}
+    };
+    const room: RoomSummary = {
+      id: "room_1",
+      name: "Demo",
+      type: "folder",
+      sourcePath: "demo",
+      mountName: "Demo",
+      ownerUserId: "user_1",
+      conflictPolicy: "keep_both",
+      permissions: ["sync:subscribe", "sync:push"],
+      capabilities: [],
+      crdtEnabled: true
+    };
+    const saveSettings = vi.fn(async () => {
+      events.push("save");
+    });
+    const deps: RoomMountControllerDeps = {
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: {
+        mountedRooms: { room_1: roomState },
+        roomMountPaths: {},
+        mountRoot: "Vault Rooms"
+      } as unknown as RoomMountControllerDeps["settings"],
+      visibleRooms: [room],
+      vaultAdapter: new FakeVaultAdapter(),
+      getSyncEngine: () => ({}) as VaultSyncEngine,
+      apiFor: vi.fn() as unknown as RoomMountControllerDeps["apiFor"],
+      requireActiveServer: vi.fn() as unknown as RoomMountControllerDeps["requireActiveServer"],
+      saveSettings,
+      renderOpenRoomsViews: vi.fn(),
+      stopWatchingRoom: () => events.push("stop-watcher"),
+      watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: () => events.push("unsubscribe"),
+      unbindCrdtRoom: () => events.push("unbind"),
+      disposeCrdtRoom: async () => {
+        events.push("dispose-start");
+        await disposeBlocked;
+        events.push("dispose-end");
+      }
+    };
+
+    const unmounting = new RoomMountController(deps).unmountRoom("room_1");
+    await Promise.resolve();
+
+    expect(roomState.unmounted).toBe(true);
+    expect(events).toEqual(["stop-watcher", "unsubscribe", "unbind", "dispose-start"]);
+    expect(saveSettings).not.toHaveBeenCalled();
+
+    finishDispose();
+    await unmounting;
+
+    expect(events).toEqual(["stop-watcher", "unsubscribe", "unbind", "dispose-start", "dispose-end", "save"]);
   });
 });

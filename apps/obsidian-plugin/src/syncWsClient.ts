@@ -120,6 +120,15 @@ export class RoomSyncSocket {
     }
   }
 
+  unsubscribe(roomId: string): void {
+    if (!this.desiredSubscriptions.delete(roomId)) {
+      return;
+    }
+    if (this.helloAcked) {
+      this.send({ type: "unsubscribe_room", requestId: createRequestId(), roomId });
+    }
+  }
+
   private async open(): Promise<void> {
     const generation = ++this.socketGeneration;
     this.clearHelloAckTimer();
@@ -431,6 +440,12 @@ export class RoomSyncSocket {
       case "remote_crdt_update":
       case "crdt_renamed":
       case "remote_crdt_rename": {
+        // An unmount marks MountedRoomState.unmounted before it unsubscribes/disposes. A CRDT
+        // message already queued on the socket can therefore arrive after local ownership ended;
+        // never let it recreate a session or mutate a retired document for that room.
+        if (!this.deps.getMountedRoom(message.roomId)) {
+          return;
+        }
         await this.enqueueRemoteApply(() => this.deps.crdt?.handleServerMessage(message) ?? Promise.resolve());
         return;
       }
