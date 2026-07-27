@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PRODUCT_VERSION } from "@vault-rooms/protocol";
 import { createApp } from "../src/app.js";
 
 describe("health", () => {
@@ -8,7 +9,11 @@ describe("health", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["access-control-allow-origin"]).toBe("*");
-    expect(response.json()).toEqual({ ok: true, name: "vault-rooms", version: "0.2.1" });
+    // Asserted against PRODUCT_VERSION rather than a hardcoded number: clients use /health to confirm
+    // they reached a Vault Rooms server, so this response must track the shipped version automatically
+    // instead of needing a manual edit at every release (it was missed once, leaving the relay reporting
+    // an older version than the manifest claimed).
+    expect(response.json()).toEqual({ ok: true, name: "vault-rooms", version: PRODUCT_VERSION });
   });
 
   it("handles browser preflight requests", async () => {

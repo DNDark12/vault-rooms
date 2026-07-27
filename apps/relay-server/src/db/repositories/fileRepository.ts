@@ -355,14 +355,20 @@ export class RelayFileRepository {
     // *create* disambiguates (a rename never does), and the client no longer re-submits an assigned
     // name as a fresh request.
     const base = hasExtension ? relativePath.slice(0, lastDot) : relativePath;
-    const safeName = (actorDisplayName ?? "")
-      // eslint-disable-next-line no-control-regex -- strip separators and control chars from a
-      // user-chosen display name before it becomes part of a filename.
-      // Control chars are escaped as \u0000-\u001f rather than written as literal bytes: the raw form
-      // put real NUL bytes in this source file, which makes git classify it as binary and makes grep
-      // render them as blanks - exactly what hid a genuine NUL-vs-space key mismatch in main.ts from a
-      // grep-based audit. Keeping sources free of literal control bytes keeps text tooling trustworthy.
-      .replace(/[/\\:*?"<>|\u0000-\u001f]/g, " ")
+    // A display name is user-chosen, so neutralize anything that shouldn't end up inside a filename:
+    // path separators, characters Windows rejects, and control characters. Done by code point rather
+    // than with a regex character class on purpose - a class spanning control characters trips
+    // `no-control-regex` however it is written (literal bytes or `\u` escapes), and literal bytes are
+    // worse still: they made git treat this file as binary and made `grep` render them as blanks, which
+    // is exactly what hid a real NUL-vs-space key mismatch elsewhere from a grep-based audit.
+    const forbiddenInFilename = new Set([...'/\\:*?"<>|']);
+    const safeName = [...(actorDisplayName ?? "")]
+      .map((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        const isControl = codePoint < 0x20 || codePoint === 0x7f;
+        return isControl || forbiddenInFilename.has(character) ? " " : character;
+      })
+      .join("")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 40);
