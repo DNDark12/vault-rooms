@@ -142,7 +142,9 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       roomId: room.id,
       relativePath,
       baseVersion: body.baseVersion,
-      actorUserId: principal.userId
+      actorUserId: principal.userId,
+      // Same reasoning as the WS file_delete branch - see deleteFile's `crdtAuthoritative` doc comment.
+      crdtAuthoritative: Boolean(room.crdt_enabled) && isCrdtEligiblePath(relativePath)
     });
     if (beforeDelete) {
       options.crdtDocManager?.evictDocument(beforeDelete.id, beforeDelete.crdt_epoch);

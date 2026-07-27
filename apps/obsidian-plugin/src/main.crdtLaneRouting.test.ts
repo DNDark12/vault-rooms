@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import VaultRoomsPlugin from "./main.js";
-import type { CrdtSessionManager } from "./crdtSession.js";
+import { CrdtRejectedError, type CrdtSessionManager } from "./crdtSession.js";
 import type { ServerConnection, VaultRoomsSettings } from "./settings.js";
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter, type VaultChangeEvent } from "./syncClient.js";
 
@@ -87,6 +87,9 @@ function settingsWithRoom(server: ServerConnection, roomState: MountedRoomState)
 
 type WatchMountedRoomInternals = {
   app: { vault: { configDir: string } };
+  /** Normally a class field initializer; these tests build the plugin via Object.create, so field
+   *  initializers never run and it has to be supplied explicitly (see setUp). */
+  selfInflictedRenames: Set<string>;
   vaultAdapter: VaultAdapter;
   syncEngine: VaultSyncEngine;
   crdtSessionManager: CrdtSessionManager;
@@ -170,6 +173,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     };
     const internals = plugin as unknown as WatchMountedRoomInternals;
     internals.app = { vault: { configDir: ".obsidian" } };
+    internals.selfInflictedRenames = new Set<string>();
     internals.vaultAdapter = vaultAdapter;
     internals.syncEngine = new VaultSyncEngine(vaultAdapter, api);
     internals.crdtSessionManager = { ensureSession, forgetLocalDelete, renameSession } as unknown as CrdtSessionManager;
@@ -233,9 +237,16 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
       expect(ensureSession).not.toHaveBeenCalled();
     });
 
-    it("falls back to forgetLocalDelete+ensureSession when renameSession rejects", async () => {
-      const rejectingRenameSession = vi.fn().mockRejectedValue(new Error("FILE_EXISTS"));
-      const { internals, ensureSession, forgetLocalDelete } = setUp({ persistedCrdtEnabled: true, renameSession: rejectingRenameSession });
+    // Superseded by the sixth-round behavior below: a rejection with no server error code (a transport
+    // error, a dropped socket, anything unclassified) is now treated as non-recoverable rather than as
+    // license to create a second document at the new path. Forking on *any* failure was the bug - the
+    // original document is still alive at the old path, so creating another one duplicates the note.
+    it("does not fork a second document when renameSession rejects with no server error code", async () => {
+      const rejectingRenameSession = vi.fn().mockRejectedValue(new Error("socket closed"));
+      const { internals, ensureSession, forgetLocalDelete, renameSession } = setUp({
+        persistedCrdtEnabled: true,
+        renameSession: rejectingRenameSession
+      });
 
       internals.watchMountedRoom("room_1");
       (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
@@ -244,8 +255,9 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
         oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
       });
 
-      await vi.waitFor(() => expect(forgetLocalDelete).toHaveBeenCalledWith("room_1", "Old.md"));
-      expect(ensureSession).toHaveBeenCalledWith("room_1", "New.md");
+      await vi.waitFor(() => expect(renameSession).toHaveBeenCalledWith("room_1", "Old.md", "New.md"));
+      expect(ensureSession).not.toHaveBeenCalled();
+      expect(forgetLocalDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -278,6 +290,83 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
       expect(renameSession).not.toHaveBeenCalled();
       expect(ensureSession).not.toHaveBeenCalled();
       expect(forgetLocalDelete).not.toHaveBeenCalled();
+    });
+
+    // Sixth hardware-testing round (2026-07-24): "crdt_rename failed ... A file already exists at the
+    // new path" for a name that never existed locally. The fallback used to call ensureSession(newPath)
+    // on ANY rejection, which crdt_creates a second document while the original is still alive at the
+    // old path - forking the note in two (and, once a stray sat at the target name, making every later
+    // rename to it fail FILE_EXISTS forever). Creating is now only correct when the old path genuinely
+    // wasn't on the server.
+    it("does NOT fork a second document when the rename is rejected FILE_EXISTS", async () => {
+      const rejecting = vi.fn().mockRejectedValue(new CrdtRejectedError("FILE_EXISTS", "A file already exists at the new path."));
+      const { internals, ensureSession, forgetLocalDelete, renameSession } = setUp({ persistedCrdtEnabled: true, renameSession: rejecting });
+
+      internals.watchMountedRoom("room_1");
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "rename",
+        path: "Vault Rooms/demo/Projects Demo/New.md",
+        oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
+      });
+
+      await vi.waitFor(() => expect(renameSession).toHaveBeenCalledWith("room_1", "Old.md", "New.md"));
+      // Nothing is created at the new path, and the old session is left intact - the note stays a
+      // single document; the next reconnect snapshot reconciles this device.
+      expect(ensureSession).not.toHaveBeenCalled();
+      expect(forgetLocalDelete).not.toHaveBeenCalled();
+    });
+
+    it("DOES create at the new path when the old path genuinely wasn't on the server (NOT_FOUND)", async () => {
+      const rejecting = vi.fn().mockRejectedValue(new CrdtRejectedError("NOT_FOUND", "File not found."));
+      const { internals, ensureSession, forgetLocalDelete } = setUp({ persistedCrdtEnabled: true, renameSession: rejecting });
+
+      internals.watchMountedRoom("room_1");
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "rename",
+        path: "Vault Rooms/demo/Projects Demo/New.md",
+        oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
+      });
+
+      // There was nothing to rename, so this really is a first create - the note must still sync.
+      await vi.waitFor(() => expect(ensureSession).toHaveBeenCalledWith("room_1", "New.md"));
+      expect(forgetLocalDelete).toHaveBeenCalledWith("room_1", "Old.md");
+    });
+
+    // Ninth hardware-testing round (2026-07-24): a rename the *plugin itself* performed (applying a
+    // peer's rename, or adopting a server-assigned name for a colliding new note) fires an ordinary
+    // Obsidian vault rename event. Treating it as a user rename pushed a crdt_rename the server could
+    // only reject ("A file already exists at the new path"), and that echo is what let a single name
+    // collision escalate without bound into `Untitled (a) (b) (a) (b)…` across two devices.
+    it("ignores a rename this plugin performed itself, pushing no crdt_rename and forking nothing", () => {
+      const { plugin, internals, ensureSession, forgetLocalDelete, renameSession } = setUp({ persistedCrdtEnabled: true });
+      (plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.add("room_1 Old.md New.md");
+
+      internals.watchMountedRoom("room_1");
+      (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
+        type: "rename",
+        path: "Vault Rooms/demo/Projects Demo/New.md",
+        oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
+      });
+
+      expect(renameSession).not.toHaveBeenCalled();
+      expect(ensureSession).not.toHaveBeenCalled();
+      expect(forgetLocalDelete).not.toHaveBeenCalled();
+      // Consumed, so a later genuine user rename of the same pair is still honored.
+      expect((plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.size).toBe(0);
+    });
+
+    it("still honors a genuine user rename of the same pair after the self-inflicted one was consumed", () => {
+      const { plugin, internals, renameSession } = setUp({ persistedCrdtEnabled: true });
+      (plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.add("room_1 Old.md New.md");
+      internals.watchMountedRoom("room_1");
+      const emit = (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit.bind(internals.vaultAdapter);
+
+      const event = { type: "rename", path: "Vault Rooms/demo/Projects Demo/New.md", oldPath: "Vault Rooms/demo/Projects Demo/Old.md" };
+      emit(event);
+      expect(renameSession).not.toHaveBeenCalled();
+
+      emit(event);
+      expect(renameSession).toHaveBeenCalledWith("room_1", "Old.md", "New.md");
     });
 
     it("does NOT fork via ensureSession for a plain .md create/modify while canPushLocalEdits is false", () => {

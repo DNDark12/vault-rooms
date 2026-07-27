@@ -201,6 +201,30 @@ async function handleMessage(
         return;
       }
       connection.subscriptions.add(room.id);
+      // Bring every CRDT document's whole-file content up to date *before* answering with the snapshot.
+      // A CRDT document's authoritative text lives in `crdt_updates` and only reaches
+      // `files`/`file_versions` when a materialize fires, so a subscribing device reconciles against
+      // whatever was last materialized. After a relay restart (or a cache eviction, or simply nobody
+      // typing since the last flush) that content is stale or empty, so the device downloads nothing
+      // and the two vaults end up with different file counts until somebody *opens* the note and the
+      // resulting handshake triggers a materialize - the reported "only syncs when I open the file"
+      // behaviour (twelfth hardware-testing round, 2026-07-24). `materializeNow` no-ops for a document
+      // already current, so this is a cheap comparison per file in the common case.
+      if (room.crdt_enabled) {
+        for (const file of repo.listFiles(room.id)) {
+          if (file.deleted_at || !isCrdtEligiblePath(file.relative_path)) continue;
+          try {
+            options.crdtDocManager.materializeNow({
+              fileId: file.id,
+              epoch: file.crdt_epoch,
+              materializedContent: repo.latestFileVersion(file.id)?.content ?? null,
+              fallbackActor: { userId: file.updated_by_user_id ?? room.owner_user_id, displayName: "" }
+            });
+          } catch (error) {
+            console.error(`Vault Rooms relay: could not refresh "${file.relative_path}" before a room snapshot`, error);
+          }
+        }
+      }
       const snapshotAclRules = repo.listAclRulesForRoom(room.id);
       sendJson(connection.socket, {
         type: "room_snapshot",
@@ -321,7 +345,11 @@ async function handleMessage(
         roomId: room.id,
         relativePath,
         baseVersion: message.baseVersion,
-        actorUserId: connection.principal.userId
+        actorUserId: connection.principal.userId,
+        // The CRDT lane owns this path's content and moves `files.version` on its own materialize
+        // debounce, so the client's tracked version is stale by design - see deleteFile's
+        // `crdtAuthoritative` doc comment for the "file becomes undeletable" bug this closes.
+        crdtAuthoritative: Boolean(room.crdt_enabled) && isCrdtEligiblePath(relativePath)
       });
       if (beforeDelete) {
         options.crdtDocManager.evictDocument(beforeDelete.id, beforeDelete.crdt_epoch);
@@ -370,16 +398,58 @@ async function handleMessage(
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath: normalizedPath });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:create", relativePath: normalizedPath });
       const createdBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
-      const created = repo.createCrdtFile({ roomId: room.id, relativePath: normalizedPath, actorUserId: connection.principal.userId });
+      const created = repo.createCrdtFile({
+        roomId: room.id,
+        relativePath: normalizedPath,
+        actorUserId: connection.principal.userId,
+        actorDisplayName: connection.principal.userDisplayName
+      });
       options.crdtDocManager.createDocument(created.fileId, created.epoch, createdBy);
+      // `created.relativePath` may differ from what was asked for: first creator keeps the name, and a
+      // second device creating a *different* note at the same path (Obsidian's identical default name
+      // for every new note) is given its own disambiguated path instead of being rejected or merged
+      // into the first note. Ack the path actually assigned - the client renames its local file to
+      // match (see CrdtSessionManager.openSession).
       sendJson(connection.socket, {
         type: "crdt_created",
         requestId: message.requestId,
         roomId: room.id,
-        relativePath: normalizedPath,
+        relativePath: created.relativePath,
         documentId: created.fileId,
         epoch: created.epoch
       });
+      // Announce the new (empty) document to everyone else right away. Without this, a brand-new note
+      // was invisible to every other device until their next subscribe_room: `crdt_create` had no
+      // broadcast at all, and the materialized `remote_file_change` substitute is driven by
+      // CrdtDocManager's *update* debounce - so a note created and not yet typed into produces no
+      // update, never materializes, and never reaches anyone (eighth hardware-testing round,
+      // 2026-07-24). Sent as an ordinary empty `remote_file_change` so CRDT-capable and legacy peers
+      // alike just create the file; a CRDT peer that later opens it handshakes into the real document.
+      const createdFile = repo.getFile(room.id, created.relativePath);
+      if (createdFile && !createdFile.deleted_at) {
+        const createAclRules = repo.listAclRulesForRoom(room.id);
+        registry.broadcastToRoom(
+          room.id,
+          {
+            type: "remote_file_change",
+            roomId: room.id,
+            relativePath: created.relativePath,
+            version: createdFile.version,
+            sha256: createdFile.sha256 ?? "",
+            content: "",
+            updatedBy: createdBy,
+            // Tells a CRDT-capable receiver this path is an existing document at this epoch, so its
+            // own watcher's "create" event adopts it instead of issuing a colliding crdt_create.
+            crdtEpoch: created.epoch,
+            updatedAt: new Date().toISOString()
+          },
+          {
+            exclude: connection,
+            canReceive: (principal) =>
+              hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: created.relativePath, aclRules: createAclRules })
+          }
+        );
+      }
     } catch (error) {
       sendCrdtRejection(connection.socket, message.requestId, roomId, relativePath, error);
     }
@@ -411,7 +481,11 @@ async function handleMessage(
         roomId: room.id,
         oldRelativePath: normalizedOldPath,
         relativePath: normalizedNewPath,
-        actorUserId: connection.principal.userId
+        actorUserId: connection.principal.userId,
+        // Used only when the requested name is already held by another live document: the rename then
+        // lands on a disambiguated path (same policy as a colliding create) and the ack below reports
+        // whichever path it actually landed on, rather than rejecting with no way forward.
+        actorDisplayName: connection.principal.userDisplayName
       });
       sendJson(connection.socket, {
         type: "crdt_renamed",
@@ -577,13 +651,18 @@ function sendCrdtRejection(socket: SyncSocket, requestId: string | undefined, ro
     });
     return;
   }
+  // A non-AppError here is an *unexpected* server-side exception (e.g. a SQLite constraint failure),
+  // and collapsing it to a bare "could not be applied" made one genuinely undiagnosable from the
+  // client's log on real hardware. Keep the generic code, but surface the underlying reason and log it
+  // server-side so the next one is traceable.
+  console.error(`Vault Rooms relay: unexpected error handling a CRDT message for "${relativePath}"`, error);
   sendJson(socket, {
     type: "crdt_rejected",
     requestId,
     roomId,
     relativePath,
     code: "VALIDATION_ERROR",
-    message: "CRDT message could not be applied."
+    message: `CRDT message could not be applied: ${error instanceof Error ? error.message : String(error)}`
   });
 }
 

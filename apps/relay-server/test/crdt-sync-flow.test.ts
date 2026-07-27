@@ -177,15 +177,191 @@ describe("CRDT sync flow (Phase 4)", () => {
     expect(typeof created.documentId).toBe("string");
   });
 
-  it("crdt_create on an existing (non-deleted) file is rejected with FILE_EXISTS", async () => {
+  // Seventh hardware-testing round (2026-07-24): two devices creating a note at the same path are
+  // creating two *different* notes, and every new Obsidian note starts with the same default name
+  // ("Untitled"/"Chưa đặt tên.md"), so this collides constantly. It used to be rejected with
+  // FILE_EXISTS - an unrecoverable dead end where the client's session never opened, so that note
+  // never synced at all. Now the first creator keeps the name and the second gets its own
+  // disambiguated path, which the ack reports back so the client can rename its local file to match.
+  it("crdt_create on a path another live file already holds assigns a distinct path instead of rejecting", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+    socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    const first = await nextMessage(socket, "crdt_created");
+    expect(first).toMatchObject({ relativePath: "note.md" });
+
+    // Content on the first note, so a second create that wrongly merged/re-seeded would be obvious.
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "the first note's own content");
+    socket.sendJson({
+      type: "crdt_update",
+      requestId: "u1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: 0,
+      update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64")
+    });
+
+    socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "note.md" });
+    const second = await nextMessage(socket, "crdt_created");
+
+    // A separate document at a separate, creator-disambiguated path - never a rejection, never the
+    // same document, and the first creator's path is untouched.
+    expect(second.requestId).toBe("c2");
+    expect(second.relativePath).not.toBe("note.md");
+    expect(second.relativePath).toMatch(/^note \(.+\)\.md$/);
+    expect(second.documentId).not.toBe(first.documentId);
+
+    // The first note still holds its own content - the second create neither merged into nor reset it.
+    socket.sendJson({
+      type: "crdt_sync_step1",
+      requestId: "h1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: 0,
+      stateVector: Buffer.from(Y.encodeStateVector(new Y.Doc())).toString("base64")
+    });
+    const step2 = await nextMessage(socket, "crdt_sync_step2");
+    const merged = new Y.Doc();
+    Y.applyUpdate(merged, new Uint8Array(Buffer.from(step2.update, "base64")));
+    expect(merged.getText(CRDT_TEXT_KEY).toString()).toBe("the first note's own content");
+  });
+
+  // Eighth hardware-testing round (2026-07-24): "A creates a new note, B never receives it".
+  // crdt_create had no broadcast at all, and the materialized remote_file_change substitute is driven
+  // by CrdtDocManager's *update* debounce - so a note created but not yet typed into produced no
+  // update, never materialized, and stayed invisible to every other device until their next
+  // subscribe_room.
+  it("announces a newly created CRDT document to other subscribers immediately, before anything is typed", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const creator = await connect(app);
+    await helloAndSubscribe(creator, owner.deviceToken, room.id);
+    const peer = await connect(app);
+    await helloAndSubscribe(peer, owner.deviceToken, room.id);
+
+    creator.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "brand-new.md" });
+    await nextMessage(creator, "crdt_created");
+
+    // The peer learns about it right away - no typing, no materialize debounce, no re-subscribe.
+    const announced = await nextMessage(peer, "remote_file_change");
+    expect(announced).toMatchObject({ roomId: room.id, relativePath: "brand-new.md", content: "" });
+    // Carries the epoch so the peer records it and its own vault-watcher "create" (caused by writing
+    // this file to disk) adopts the document instead of issuing a colliding crdt_create - the loop
+    // that produced `Untitled (a) (b) (a) (b)…` on real hardware (ninth hardware-testing round).
+    expect(announced.crdtEpoch).toBe(0);
+  });
+
+  // Twelfth hardware-testing round (2026-07-24): "after restarting the server the two vaults have
+  // different file counts, and the other side only syncs a file once I open it". A CRDT document's
+  // authoritative text lives in crdt_updates and only reaches files/file_versions on the materialize
+  // debounce, so a subscribing device reconciled against stale (often empty) whole-file content and
+  // downloaded nothing - until somebody opened the note and the handshake triggered a materialize.
+  it("serves current CRDT text in the snapshot's whole-file content without waiting for anyone to open the note", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const writer = await connect(app);
+    await helloAndSubscribe(writer, owner.deviceToken, room.id);
+    writer.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    await nextMessage(writer, "crdt_created");
+
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "content that only exists in the CRDT lane so far");
+    writer.sendJson({
+      type: "crdt_update",
+      requestId: "u1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: 0,
+      update: base64OfUpdate(Y.encodeStateAsUpdate(doc))
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Deliberately do NOT fire the materialize debounce - this is the state a relay is in when it
+    // restarts, or when nobody has typed since the last flush.
+
+    // A second device subscribes. Its snapshot must already reflect the real text.
+    const joiner = await connect(app);
+    await helloAndSubscribe(joiner, owner.deviceToken, room.id);
+    const readBack = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=note.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(readBack.statusCode).toBe(200);
+    expect(readBack.json().content).toBe("content that only exists in the CRDT lane so far");
+  });
+
+  it("disambiguates repeated creates of the same name by numbering, preserving the user's stem", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+    socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    expect(await nextMessage(socket, "crdt_created")).toMatchObject({ relativePath: "note.md" });
+    socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "note.md" });
+    const second = await nextMessage(socket, "crdt_created");
+    socket.sendJson({ type: "crdt_create", requestId: "c3", roomId: room.id, relativePath: "note.md" });
+    const third = await nextMessage(socket, "crdt_created");
+
+    // Each collision on the *same requested* name gets its own path, and the requested stem is always
+    // preserved verbatim - a name the user typed is never rewritten back to some other stem, which is
+    // what made renames swap names chaotically and loop on real hardware.
+    expect(second.relativePath).not.toBe("note.md");
+    expect(third.relativePath).not.toBe(second.relativePath);
+    for (const path of [second.relativePath, third.relativePath]) {
+      expect(path.startsWith("note (")).toBe(true);
+      expect(path.endsWith(".md")).toBe(true);
+    }
+  });
+
+  // Same round: materializeCrdtContent bumps files.version on its own debounce and nothing carries
+  // that new version back to a client's per-file tracking, so a CRDT file's tracked serverVersion is
+  // stale by design the moment anyone types - and every delete the client attempted failed
+  // VERSION_CONFLICT forever, making the file permanently undeletable ("The file changed on the server
+  // before your edit was applied", repeatedly, on real hardware).
+  it("deletes a CRDT-owned file even when the client's baseVersion is stale", async () => {
     const { app, owner, room } = await setupCrdtRoom();
     const socket = await connect(app);
     await helloAndSubscribe(socket, owner.deviceToken, room.id);
     socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
     await nextMessage(socket, "crdt_created");
 
+    // A deliberately stale baseVersion, exactly like a client whose tracking predates a materialize.
+    socket.sendJson({ type: "file_delete", requestId: "d1", roomId: room.id, relativePath: "note.md", baseVersion: 0 });
+    expect(await nextMessage(socket, "file_delete_ack")).toMatchObject({ requestId: "d1", relativePath: "note.md" });
+  });
+
+  it("still enforces the compare-and-swap version gate for a non-CRDT-eligible path in a CRDT room", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+    // .canvas stays on the whole-file CAS lane even in a CRDT room, so its version gate must survive.
+    socket.sendJson({ type: "file_change", requestId: "w1", roomId: room.id, relativePath: "board.canvas", baseVersion: 0, content: "{}" });
+    await nextMessage(socket, "file_change_ack");
+
+    socket.sendJson({ type: "file_delete", requestId: "d1", roomId: room.id, relativePath: "board.canvas", baseVersion: 0 });
+    expect(await nextMessage(socket, "file_change_rejected")).toMatchObject({ requestId: "d1", code: "VERSION_CONFLICT" });
+  });
+
+  it("keeps disambiguating when the suffixed path is also taken, and still revives a tombstoned path in place", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+    socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    await nextMessage(socket, "crdt_created");
     socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "note.md" });
-    expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({ requestId: "c2", code: "FILE_EXISTS" });
+    const second = await nextMessage(socket, "crdt_created");
+    socket.sendJson({ type: "crdt_create", requestId: "c3", roomId: room.id, relativePath: "note.md" });
+    const third = await nextMessage(socket, "crdt_created");
+    expect(third.relativePath).not.toBe("note.md");
+    expect(third.relativePath).not.toBe(second.relativePath);
+
+    // A *tombstoned* path is not a collision - delete-then-recreate must still reuse the same path
+    // (contract 1.5/1.9), not start suffixing.
+    socket.sendJson({ type: "file_delete", requestId: "d1", roomId: room.id, relativePath: "note.md", baseVersion: 1 });
+    await nextMessage(socket, "file_delete_ack");
+    socket.sendJson({ type: "crdt_create", requestId: "c4", roomId: room.id, relativePath: "note.md" });
+    expect(await nextMessage(socket, "crdt_created")).toMatchObject({ requestId: "c4", relativePath: "note.md" });
   });
 
   it("rejects every CRDT message type on a room that has not enabled CRDT", async () => {
@@ -641,7 +817,12 @@ describe("CRDT sync flow (Phase 4)", () => {
       await expect(nextMessage(renamer, "remote_crdt_rename")).rejects.toThrow(/Timed out/);
     });
 
-    it("rejects with FILE_EXISTS when the new path is already taken by another live file", async () => {
+    // Eleventh hardware-testing round (2026-07-24): a rename whose target is held by another live
+    // document is now disambiguated rather than rejected - the same first-come-first-served policy a
+    // colliding create already used. Rejecting was a dead end: the note stayed unsynced under a name
+    // the server would never accept, and it happens routinely (two devices renaming toward the same
+    // title, or renaming to a name this device doesn't hold locally but another already published).
+    it("disambiguates instead of rejecting when the new path is already taken by another live file", async () => {
       const { app, owner, room } = await setupCrdtRoom();
       const socket = await connect(app);
       await helloAndSubscribe(socket, owner.deviceToken, room.id);
@@ -651,7 +832,42 @@ describe("CRDT sync flow (Phase 4)", () => {
       await nextMessage(socket, "crdt_created");
 
       socket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "a.md", relativePath: "b.md" });
+
+      // A rename is NEVER auto-disambiguated: the name a user typed is authoritative, so a genuine
+      // conflict is reported rather than silently filed under a machine-picked name. (An earlier round
+      // did disambiguate here and it was wrong - each rewritten name collided again and drove an
+      // unbounded rename loop on real hardware. The client's handling of this rejection is
+      // non-destructive: it creates nothing and leaves both documents alone.)
       expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({ requestId: "r1", code: "FILE_EXISTS" });
+    });
+
+    // Tenth hardware-testing round (2026-07-24): renaming onto a name that had merely been *deleted*
+    // failed with the useless generic "CRDT message could not be applied." A tombstoned row is not a
+    // logical conflict, but it still occupies the unique(room_id, relative_path) slot, so the update
+    // threw a raw SQLite constraint error that could only be reported generically.
+    it("renames onto a previously-deleted path instead of failing with a constraint error", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const socket = await connect(app);
+      await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+      // Create and delete "taken.md", leaving a tombstone holding that path.
+      socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "taken.md" });
+      await nextMessage(socket, "crdt_created");
+      socket.sendJson({ type: "file_delete", requestId: "d1", roomId: room.id, relativePath: "taken.md", baseVersion: 1 });
+      await nextMessage(socket, "file_delete_ack");
+
+      socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "source.md" });
+      const created = await nextMessage(socket, "crdt_created");
+      socket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "source.md", relativePath: "taken.md" });
+
+      // Succeeds, keeping the renamed document's identity/epoch - no constraint error, no generic
+      // rejection.
+      expect(await nextMessage(socket, "crdt_renamed")).toMatchObject({
+        requestId: "r1",
+        oldRelativePath: "source.md",
+        relativePath: "taken.md",
+        epoch: created.epoch
+      });
     });
 
     it("rejects with NOT_FOUND when the source path does not exist", async () => {

@@ -55,6 +55,16 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     if (!existing) {
       return;
     }
+    if (normalizedOld === normalizedNew) {
+      return;
+    }
+    // Obsidian throws "Destination file already exists!" rather than reporting it, and that rejection
+    // used to propagate all the way out of a remote-rename apply as an uncaught error. Treat an
+    // already-occupied destination as nothing-to-do: the local vault, not this move, decides what
+    // lives at that path, and the room's next reconciliation settles any real divergence.
+    if (this.app.vault.getAbstractFileByPath(normalizedNew)) {
+      return;
+    }
     await this.ensureFolder(normalizedNew);
     // FileManager.renameFile (not Vault#rename) so backlinks get updated the same way they would
     // for a user-driven rename in Obsidian's own UI - this is applying someone else's rename, not

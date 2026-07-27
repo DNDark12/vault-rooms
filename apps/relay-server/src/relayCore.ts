@@ -64,6 +64,7 @@ export function createCrdtMaterializedHandler(
     const room = repo.getRoom(event.roomId);
     if (!room) return;
     const aclRules = repo.listAclRulesForRoom(event.roomId);
+    const materializedFile = repo.getFile(event.roomId, event.relativePath);
     connectionRegistry.broadcastToRoom(
       event.roomId,
       {
@@ -74,6 +75,10 @@ export function createCrdtMaterializedHandler(
         sha256: event.sha256,
         content: event.content,
         updatedBy: event.updatedBy,
+        // This path *is* a CRDT document - tell CRDT-capable receivers its epoch so the vault-watcher
+        // "create"/"modify" event caused by writing this content to disk adopts the existing document
+        // rather than issuing a colliding `crdt_create` for it (ninth hardware-testing round).
+        ...(materializedFile ? { crdtEpoch: materializedFile.crdt_epoch } : {}),
         updatedAt: new Date().toISOString()
       },
       {

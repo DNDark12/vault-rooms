@@ -30,7 +30,24 @@ export type SyncServerMessage =
     }
   | { type: "file_change_ack"; requestId: string; roomId: string; relativePath: string; version: number; sha256: string }
   | { type: "file_delete_ack"; requestId: string; roomId: string; relativePath: string; version: number }
-  | { type: "remote_file_change"; roomId: string; relativePath: string; version: number; sha256: string; content: string; updatedBy: { userId: string; displayName: string }; updatedAt: string }
+  | {
+      type: "remote_file_change";
+      roomId: string;
+      relativePath: string;
+      version: number;
+      sha256: string;
+      content: string;
+      updatedBy: { userId: string; displayName: string };
+      updatedAt: string;
+      /** Present when this path is a live CRDT document (creation announce and materialized fanout).
+       *  A CRDT-capable receiver records it as the known epoch for the path, so a later
+       *  `ensureSession` for the file it just wrote to disk *adopts* that document instead of trying
+       *  to `crdt_create` it. Without this the receiving device's own vault-watcher "create" event
+       *  fired a `crdt_create` that collided with the very document it had just been sent - which,
+       *  once collisions started auto-renaming instead of failing, became an unbounded
+       *  rename/announce feedback loop between the two devices (ninth hardware-testing round). */
+      crdtEpoch?: number;
+    }
   | { type: "remote_file_delete"; roomId: string; relativePath: string; version: number; deletedBy: { userId: string; displayName: string }; deletedAt: string }
   | { type: "file_change_rejected"; requestId: string; code: string; message: string; serverVersion?: number; serverSha256?: string | null; serverContent?: string }
   | { type: "revoked"; message: string }

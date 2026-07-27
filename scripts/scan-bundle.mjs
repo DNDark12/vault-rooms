@@ -58,6 +58,17 @@
 //     setInterval(/clearInterval(/globalThis/fetch(/process.env/console.log( occurrences - this
 //     phase added no new third-party dependency (yjs/y-codemirror.next were already bundled since
 //     Phase 4), only first-party code.
+//   - 2026-07-24 twelfth hardware-testing round (CrdtDocManager.materializeNow added):
+//     clearTimeout( 21->22 (+1). Read at the source: the one new occurrence is
+//     `this.timerHost.clearTimeout(cached.materializeTimer)` inside `materializeNow`, which cancels a
+//     document's pending materialize debounce before flushing it immediately (a subscribing device
+//     must see current whole-file content rather than waiting for the debounce - see the round's entry
+//     in docs/superpowers/plans/2026-07-20-crdt-sync.md). It is the same injected-timer-host call the
+//     three existing CrdtDocManager entries above cover - real Node timers in appCore.ts,
+//     `window.*` in embeddedRelayApp.ts - so CLAUDE.md rule 2 compliant by construction; the
+//     scanner's substring match simply can't see the `this.timerHost.` prefix. No new
+//     setTimeout(/setInterval(/clearInterval(/globalThis/fetch(/process.env/console.log(
+//     occurrences, and no new third-party dependency: first-party code only.
 //
 // The scanning logic is exported so apps/obsidian-plugin/test/crdtBundleGuard.test.ts can run the
 // exact same checks under `pnpm test` without duplicating the tier tables (duplication would let
@@ -74,7 +85,7 @@ export const TIER2_STRICT_ZERO = ["fastify", "Fastify", "ajv", "new Function", "
 export const TIER3_APPROVED_BASELINE = {
   "setTimeout(": 19,
   "setInterval(": 3,
-  "clearTimeout(": 21,
+  "clearTimeout(": 22,
   "clearInterval(": 3,
   "globalThis": 10,
   "fetch(": 2,

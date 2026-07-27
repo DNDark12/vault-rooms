@@ -1009,11 +1009,23 @@ export class RelayRepository {
     return this.files.writeFile(input);
   }
 
-  deleteFile(input: { roomId: string; relativePath: string; baseVersion: number; actorUserId: string }): FileDeleteResult {
+  deleteFile(input: {
+    roomId: string;
+    relativePath: string;
+    baseVersion: number;
+    actorUserId: string;
+    crdtAuthoritative?: boolean;
+  }): FileDeleteResult {
     return this.files.deleteFile(input);
   }
 
-  renameFile(input: { roomId: string; oldRelativePath: string; relativePath: string; actorUserId: string }): FileRenameResult {
+  renameFile(input: {
+    roomId: string;
+    oldRelativePath: string;
+    relativePath: string;
+    actorUserId: string;
+    actorDisplayName?: string;
+  }): FileRenameResult {
     return this.files.renameFile(input);
   }
 
@@ -1060,7 +1072,11 @@ export class RelayRepository {
     this.crdt.purgeCrdtState(fileId, epoch);
   }
 
-  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string }): { fileId: string; epoch: number } {
+  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string; actorDisplayName?: string }): {
+    fileId: string;
+    epoch: number;
+    relativePath: string;
+  } {
     return this.files.createCrdtFile(input);
   }
 

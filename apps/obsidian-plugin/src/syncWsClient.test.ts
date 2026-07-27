@@ -72,8 +72,11 @@ class FakeApi implements RelayFileApi {
 }
 
 /** Minimal CrdtWsBridge test double - the remote_file_change gating tests below only need
- *  isSessionOpen() to return a fixed answer; the other three methods are never exercised there. */
+ *  isSessionOpen() to return a fixed answer, plus a record of registerKnownEpoch calls (ninth
+ *  hardware-testing round); the remaining methods are never exercised there. */
 class FakeCrdtBridge implements CrdtWsBridge {
+  readonly registeredEpochs: Array<{ roomId: string; relativePath: string; epoch: number }> = [];
+
   constructor(private readonly sessionOpen: boolean) {}
 
   async handleServerMessage(): Promise<void> {}
@@ -81,6 +84,10 @@ class FakeCrdtBridge implements CrdtWsBridge {
   handleRoomSnapshot(): void {}
 
   onConnected(): void {}
+
+  registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void {
+    this.registeredEpochs.push({ roomId, relativePath, epoch });
+  }
 
   isSessionOpen(): boolean {
     return this.sessionOpen;

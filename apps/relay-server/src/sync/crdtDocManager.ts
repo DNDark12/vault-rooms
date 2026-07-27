@@ -300,6 +300,39 @@ export class CrdtDocManager {
     return cached;
   }
 
+  /**
+   * Brings a document's whole-file content up to date *now*, rather than on the materialize debounce.
+   * Called when a device subscribes to a room, because a CRDT document's authoritative text lives in
+   * `crdt_updates` and only reaches `files`/`file_versions` when a materialize fires - so a device that
+   * (re)subscribes reconciles against whatever was last materialized. If the relay restarted, or the
+   * doc was evicted, or nobody has typed since the last flush, that content is stale or empty and the
+   * subscribing device downloads nothing, leaving the two vaults with different file counts until
+   * somebody *opens* the note and the resulting handshake/update triggers a materialize - exactly the
+   * behaviour reported from real hardware (twelfth hardware-testing round, 2026-07-24). Loads the doc
+   * if needed (lazy reconstruction from snapshot + updates), and no-ops when the durable text already
+   * matches, so a room of already-current files costs one hash comparison each.
+   */
+  materializeNow(input: { fileId: string; epoch: number; materializedContent: string | null; fallbackActor: CrdtUpdatedBy }): void {
+    if (this.disposed) return;
+    const cached = this.load(input.fileId, input.epoch);
+    const text = cached.doc.getText(CRDT_TEXT_KEY).toString();
+    // Nothing to do when the durable whole-file content already equals the document's text - the common
+    // case for a room whose files are all current, so a subscribe costs one string comparison per file.
+    // The caller supplies that content because this class's repository port is deliberately narrow.
+    if (input.materializedContent === text) {
+      return;
+    }
+    // A doc reconstructed from durable state has no `lastUpdatedBy` (nobody has pushed an update to it
+    // in this process), and `materialize` refuses to run without one. This only labels the resulting
+    // broadcast; it has no effect on content.
+    cached.lastUpdatedBy ??= input.fallbackActor;
+    if (cached.materializeTimer !== undefined) {
+      this.timerHost.clearTimeout(cached.materializeTimer);
+      cached.materializeTimer = undefined;
+    }
+    this.materialize(cached);
+  }
+
   private compact(cached: CachedDoc): void {
     const stateVector = Y.encodeStateVector(cached.doc);
     const snapshot = Y.encodeStateAsUpdate(cached.doc);

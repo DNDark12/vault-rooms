@@ -12,7 +12,7 @@ import {
 } from "./apiClient.js";
 import { CrdtEditorController } from "./crdtEditorBinding.js";
 import { CrdtDocStore } from "./crdtDocStore.js";
-import { CrdtSessionManager } from "./crdtSession.js";
+import { CrdtRejectedError, CrdtSessionManager } from "./crdtSession.js";
 import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
@@ -82,6 +82,13 @@ export default class VaultRoomsPlugin extends Plugin {
    *  own lifecycle - CRDT session state (in-memory Y.Docs, pending handshakes) is meaningless once
    *  detached from a specific server's rooms/epochs. */
   private crdtSessionManager: CrdtSessionManager | null = null;
+  /** Renames this plugin performed itself (applying another device's rename, or adopting a
+   *  server-assigned name for a colliding new note), keyed `"<roomId> <oldPath> <newPath>"`. Obsidian
+   *  fires an indistinguishable vault "rename" event for these, and treating one as a user rename
+   *  pushes a crdt_rename the server must reject - which is what turned a name collision into an
+   *  unbounded rename/announce loop between two devices. Consumed (removed) by the first matching
+   *  watcher event; see renameCrdtDiskFile and watchMountedRoom's callback. */
+  private readonly selfInflictedRenames = new Set<string>();
   private readonly crdtEditorController: CrdtEditorController = new CrdtEditorController({
     getSessionManager: () => this.crdtSessionManager ?? undefined,
     resolveCrdtTarget: (vaultPath) => this.resolveCrdtTarget(vaultPath)
@@ -1110,7 +1117,18 @@ export default class VaultRoomsPlugin extends Plugin {
     const roomState = this.settings.mountedRooms[roomId];
     if (!roomState) return;
     const mountPath = roomState.mountPath.replace(/\/+$/, "");
-    await this.vaultAdapter.rename(`${mountPath}/${oldRelativePath}`, `${mountPath}/${newRelativePath}`);
+    // Mark this as the plugin's own move before performing it: Obsidian fires an ordinary vault
+    // "rename" event for it, which the watcher would otherwise treat as a user-initiated rename and
+    // push back as a crdt_rename - an echo the server can only reject (it already holds the document
+    // at the new path), and one that fed the unbounded rename/announce loop. See the suppression
+    // check in watchMountedRoom's callback.
+    this.selfInflictedRenames.add(`${roomId} ${oldRelativePath} ${newRelativePath}`);
+    try {
+      await this.vaultAdapter.rename(`${mountPath}/${oldRelativePath}`, `${mountPath}/${newRelativePath}`);
+    } catch (error) {
+      this.selfInflictedRenames.delete(`${roomId} ${oldRelativePath} ${newRelativePath}`);
+      throw error;
+    }
   }
 
   private resetSessionState(): void {
@@ -1213,6 +1231,26 @@ export default class VaultRoomsPlugin extends Plugin {
         // an unrelated new file appear (and the old one never went away) - the "rename produced a
         // duplicate" hardware bug (fifth round, 2026-07-24). The edit is safe on disk and reconciles
         // once canPushLocalEdits resolves true.
+        // This plugin performed this exact rename itself (applying a peer's rename, or adopting a
+        // server-assigned name for a colliding new note). Obsidian's vault event for it is
+        // indistinguishable from a user rename, so without this the watcher pushes a crdt_rename the
+        // server can only reject - the echo that made a name collision escalate without bound.
+        // Consumed here so a later genuine user rename of the same pair is still honored.
+        // fileWatcher emits the delete half first, then the create half, so the marker is only
+        // *consumed* by the create half - checking-without-consuming on the delete half keeps it
+        // available for its partner. A genuine later user rename of the same pair re-adds nothing and
+        // is therefore still honored.
+        if (renameHint && "renamedToRelativePath" in renameHint) {
+          if (this.selfInflictedRenames.has(`${roomId} ${relativePath} ${renameHint.renamedToRelativePath}`)) {
+            return;
+          }
+        }
+        if (renameHint && "renamedFromRelativePath" in renameHint) {
+          if (this.selfInflictedRenames.delete(`${roomId} ${renameHint.renamedFromRelativePath} ${relativePath}`)) {
+            return;
+          }
+        }
+
         if (
           changeType === "delete" &&
           crdtEnabled &&
@@ -1224,14 +1262,31 @@ export default class VaultRoomsPlugin extends Plugin {
           if (canPushLocalEdits) {
             const newRelativePath = renameHint.renamedToRelativePath;
             void this.crdtSessionManager?.renameSession(roomId, relativePath, newRelativePath).catch((error) => {
-              // Falls back to the pre-existing delete+create handling on a rejected rename (the new
-              // path already taken, permission denied, etc.) - so the file still ends up synced
-              // *somehow* rather than left stuck half-renamed with no server-side effect at all.
-              console.error(`Vault Rooms: crdt_rename failed for "${relativePath}" -> "${newRelativePath}", falling back to delete+create`, error);
-              void this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath).catch(() => undefined);
-              void this.crdtSessionManager?.ensureSession(roomId, newRelativePath).catch((ensureError) => {
-                console.error(`Vault Rooms: failed to open CRDT session for "${newRelativePath}"`, ensureError);
-              });
+              const code = error instanceof CrdtRejectedError ? error.code : undefined;
+              // Only create a document at the new path when the old path genuinely wasn't on the
+              // server (so there was nothing to rename and this is really a first create). Doing it
+              // unconditionally is how duplicate files used to appear: a rename rejected because the
+              // *new* path is already taken (FILE_EXISTS) can't be recovered by creating that same
+              // path - crdt_create rejects it too - and a rename rejected for any other reason leaves
+              // the original document alive at the old path, so creating a second one at the new path
+              // forks the note in two (sixth hardware-testing round, 2026-07-24).
+              if (code === "NOT_FOUND" || code === "FILE_DELETED") {
+                console.warn(
+                  `Vault Rooms: nothing to rename at "${relativePath}" (${code}) - creating "${newRelativePath}" as a new note instead`
+                );
+                void this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath).catch(() => undefined);
+                void this.crdtSessionManager?.ensureSession(roomId, newRelativePath).catch((ensureError) => {
+                  console.error(`Vault Rooms: failed to open CRDT session for "${newRelativePath}"`, ensureError);
+                });
+                return;
+              }
+              // Non-recoverable: leave every side's state exactly as it was (the note is still live at
+              // its old path server-side, and still present locally under its new name) rather than
+              // forking a duplicate. The next reconnect's room snapshot reconciles this device.
+              console.error(`Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}"`, error);
+              new Notice(
+                `Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}" - ${error instanceof Error ? error.message : String(error)}`
+              );
             });
           }
           return;
@@ -1337,7 +1392,13 @@ export default class VaultRoomsPlugin extends Plugin {
       isRoomCrdtEnabled: (roomId) => resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), this.settings.mountedRooms[roomId]),
       readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
       writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
-      renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath)
+      renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath),
+      // First creator of a name keeps it; this device's own new note was given a distinct name instead
+      // of being merged into someone else's note or silently failing to sync. Worth telling the user,
+      // since the note they just created visibly changed name in their own vault.
+      onPathReassigned: (_roomId, requestedRelativePath, relativePath) => {
+        new Notice(`Vault Rooms: "${requestedRelativePath}" already exists in this room - your note was saved as "${relativePath}".`);
+      }
     });
     // A session manager didn't exist a moment ago (unbindAll()/dispose() above tore down the
     // previous one, if any) - retroactively re-run the full open-pane reconcile, so every note that

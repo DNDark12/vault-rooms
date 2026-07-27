@@ -364,6 +364,15 @@ export class RoomSyncSocket {
           // always returns false for a path that was never a CRDT target (or when there's no CRDT
           // bridge at all, e.g. a non-CRDT room), so this is a no-op change for the ordinary CAS-lane
           // case - every relative_path gets applied exactly as before.
+          // Record the document's epoch BEFORE writing anything to disk. That write makes this
+          // device's own vault watcher fire a local "create"/"modify", which calls ensureSession -
+          // and without a known epoch that would crdt_create a path the server already has a document
+          // at. Once collisions auto-renamed instead of failing, each such collision produced a fresh
+          // suffixed name that got announced back, escalating without bound between devices
+          // (`Untitled (a) (b) (a) (b)…` - ninth hardware-testing round, 2026-07-24).
+          if (message.crdtEpoch !== undefined) {
+            this.deps.crdt?.registerKnownEpoch(message.roomId, message.relativePath, message.crdtEpoch);
+          }
           if (this.deps.crdt?.isSessionOpen(message.roomId, message.relativePath)) {
             return;
           }

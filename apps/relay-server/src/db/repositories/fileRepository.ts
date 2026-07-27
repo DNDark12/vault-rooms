@@ -139,13 +139,29 @@ export class RelayFileRepository {
     return write();
   }
 
-  deleteFile(input: { roomId: string; relativePath: string; baseVersion: number; actorUserId: string }): FileDeleteResult {
+  deleteFile(input: {
+    roomId: string;
+    relativePath: string;
+    baseVersion: number;
+    actorUserId: string;
+    /** Set for a path whose content the CRDT lane owns, which makes the compare-and-swap
+     *  `baseVersion` gate below meaningless and actively harmful: `materializeCrdtContent` bumps
+     *  `files.version` on its own debounce, with no `file_change_ack`/`remote_file_change` carrying
+     *  that new version back to the deleting client's per-file tracking. So a client's `serverVersion`
+     *  for a CRDT file is stale by design the moment anyone types, and every delete it attempts fails
+     *  `VERSION_CONFLICT` *forever* - the file becomes locally undeletable, which is what surfaced on
+     *  real hardware as repeated "The file changed on the server before your edit was applied" errors
+     *  (eighth hardware-testing round, 2026-07-24). Skipping the check restores the same intent the
+     *  CAS lane has - "delete what's there" - for a lane where `version` is not the client's to track.
+     *  Deletion remains fully permission-gated (`sync:push` + `file:delete`) at both call sites. */
+    crdtAuthoritative?: boolean;
+  }): FileDeleteResult {
     const remove = this.db.transaction(() => {
       const existing = this.getFile(input.roomId, input.relativePath);
       if (!existing) {
         throw new AppError("NOT_FOUND", "File not found.", 404);
       }
-      if (existing.version !== input.baseVersion) {
+      if (!input.crdtAuthoritative && existing.version !== input.baseVersion) {
         throw this.versionConflict(existing);
       }
       const version = existing.version + 1;
@@ -175,24 +191,51 @@ export class RelayFileRepository {
    * cache stays valid across the rename automatically. Does not bump `version`: content is
    * unchanged, only the path is, so no new `file_versions` row is written either.
    */
-  renameFile(input: { roomId: string; oldRelativePath: string; relativePath: string; actorUserId: string }): FileRenameResult {
+  renameFile(input: {
+    roomId: string;
+    oldRelativePath: string;
+    relativePath: string;
+    actorUserId: string;
+    actorDisplayName?: string;
+  }): FileRenameResult {
     const rename = this.db.transaction(() => {
       const existing = this.getFile(input.roomId, input.oldRelativePath);
       if (!existing || existing.deleted_at) {
         throw new AppError(existing?.deleted_at ? "FILE_DELETED" : "NOT_FOUND", existing?.deleted_at ? "The file has been deleted." : "File not found.", 404);
       }
-      if (input.oldRelativePath !== input.relativePath) {
-        const conflict = this.getFile(input.roomId, input.relativePath);
+      // A rename's target is NEVER auto-disambiguated, unlike a colliding create. The name a user
+      // typed is authoritative: silently filing their note under a machine-picked name is both worse
+      // UX and - as a real-hardware run proved - unstable, because each rewritten name collides again
+      // and drives an unbounded rename loop (twelfth hardware-testing round, 2026-07-24; the eleventh
+      // round's attempt to share one policy between create and rename was simply wrong). A create's
+      // name is machine-generated ("Untitled") and therefore safe to adjust; a rename's is not. A
+      // genuine conflict is reported so the client can tell the user to pick another name - and the
+      // client's handling of that rejection is non-destructive (it forks nothing).
+      const targetPath = input.relativePath;
+      if (input.oldRelativePath !== targetPath) {
+        const conflict = this.getFile(input.roomId, targetPath);
         if (conflict && !conflict.deleted_at) {
           throw new AppError("FILE_EXISTS", "A file already exists at the new path.", 409, { serverVersion: conflict.version });
+        }
+        if (conflict) {
+          // A *tombstoned* row is not a logical conflict (the path is free as far as users are
+          // concerned) but it still occupies the `unique(room_id, relative_path)` slot - so the update
+          // below would fail the constraint with a raw SQLite error, which `sendCrdtRejection` could
+          // only report as the useless generic "CRDT message could not be applied." That is exactly
+          // what renaming a note onto a previously-deleted name produced on real hardware (tenth
+          // hardware-testing round, 2026-07-24). Retire the dead row so the rename can land: its
+          // content is already unreachable, and the rename's own broadcast tells peers the new state.
+          this.bumpCrdtEpochStatements(conflict.id);
+          this.db.prepare("delete from file_versions where file_id = ?").run(conflict.id);
+          this.db.prepare("delete from files where id = ?").run(conflict.id);
         }
       }
       const now = new Date().toISOString();
       this.db
         .prepare("update files set relative_path = ?, content_type = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
-        .run(input.relativePath, contentTypeForPath(input.relativePath), input.actorUserId, now, existing.id);
-      this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, input.relativePath, existing.version);
-      return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: input.relativePath, epoch: existing.crdt_epoch };
+        .run(targetPath, contentTypeForPath(targetPath), input.actorUserId, now, existing.id);
+      this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, targetPath, existing.version);
+      return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: targetPath, epoch: existing.crdt_epoch };
     });
     return rename();
   }
@@ -208,12 +251,24 @@ export class RelayFileRepository {
    *  bump here would just burn an epoch number on every delete+recreate cycle for no reason, and
    *  would be inconsistent with `writeFile`'s own tombstone-revival path (contract 1.9), which also
    *  does not bump. */
-  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string }): { fileId: string; epoch: number } {
+  createCrdtFile(input: { roomId: string; relativePath: string; actorUserId: string; actorDisplayName?: string }): {
+    fileId: string;
+    epoch: number;
+    relativePath: string;
+  } {
     const create = this.db.transaction(() => {
-      const existing = this.getFile(input.roomId, input.relativePath);
-      if (existing && !existing.deleted_at) {
-        throw new AppError("FILE_EXISTS", "The file already exists.", 409, { serverVersion: existing.version });
-      }
+      // Two devices creating a note at the same path are creating two *different* notes - each has
+      // its own identity - not one shared note (seventh hardware-testing round, 2026-07-24). This is
+      // the single most ordinary case there is, because Obsidian names every new note with the same
+      // default ("Untitled"/"Chưa đặt tên.md"), so both devices pressing Ctrl+N collide immediately.
+      // Rejecting the second one with FILE_EXISTS was an unrecoverable dead end (the client's session
+      // never opened, so that note never synced at all), and merging them into one document would
+      // interleave two unrelated notes' text. Instead the colliding creator gets its own distinct
+      // path, disambiguated by who created it - mirroring how Obsidian itself resolves a local name
+      // clash. The caller relays the assigned path back to the client, which renames its local file
+      // to match (see syncServer.ts / CrdtSessionManager.ensureEpoch).
+      const relativePath = this.freeCrdtPath(input.roomId, input.relativePath, input.actorDisplayName);
+      const existing = this.getFile(input.roomId, relativePath);
       const now = new Date().toISOString();
       const version = existing ? existing.version + 1 : 1;
       // Reviving a tombstone reuses the epoch as-is - do NOT bump again here. `deleteFile` already
@@ -239,13 +294,66 @@ export class RelayFileRepository {
           .prepare(
             "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, crdt_epoch) values (?, ?, ?, 'file', ?, ?, ?, ?, null, ?, ?, ?, ?)"
           )
-          .run(fileId, input.roomId, input.relativePath, contentTypeForPath(input.relativePath), version, sha256, sizeBytes, input.actorUserId, now, now, epoch);
+          .run(fileId, input.roomId, relativePath, contentTypeForPath(relativePath), version, sha256, sizeBytes, input.actorUserId, now, now, epoch);
       }
       this.insertFileVersion({ fileId, version, sha256, sizeBytes, storageKey, content: "", actorUserId: input.actorUserId, now });
-      this.auditFileEvent(input.roomId, input.actorUserId, "file.crdt_created", fileId, input.relativePath, version);
-      return { fileId, epoch };
+      this.auditFileEvent(input.roomId, input.actorUserId, "file.crdt_created", fileId, relativePath, version);
+      return { fileId, epoch, relativePath };
     });
     return create();
+  }
+
+  /**
+   * Resolves `relativePath` to a path with no *live* file at it, disambiguating a collision with the
+   * creator's name (`Untitled.md` -> `Untitled (B laptop).md`, then ` (B laptop) 2`, ...) - see
+   * `createCrdtFile`'s doc comment for why a collision means "a second, different note" rather than
+   * "the same note". A tombstoned path is NOT a collision: reviving it in place is the established
+   * delete-then-recreate behavior (contract 1.5/1.9), so only `deleted_at === null` rows block.
+   * The suffix goes before the extension so the result stays CRDT-eligible (`.md`), and the display
+   * name is stripped of path separators/control characters so it can never escape the room subtree or
+   * produce an unwritable filename. Bounded: after enough taken candidates it falls back to the file
+   * id-shaped unique suffix rather than looping.
+   */
+  private freeCrdtPath(roomId: string, relativePath: string, actorDisplayName?: string): string {
+    const isTaken = (candidate: string): boolean => {
+      const row = this.getFile(roomId, candidate);
+      return Boolean(row && !row.deleted_at);
+    };
+    if (!isTaken(relativePath)) {
+      return relativePath;
+    }
+    const lastDot = relativePath.lastIndexOf(".");
+    const lastSlash = relativePath.lastIndexOf("/");
+    const hasExtension = lastDot > lastSlash + 1;
+    const extension = hasExtension ? relativePath.slice(lastDot) : "";
+    // Deliberately NOT stripping any pre-existing " (name)"/" (name) 2" looking suffix. An earlier
+    // attempt to do that (as belt-and-braces against suffix accumulation) could not tell a
+    // machine-added suffix from a name the user genuinely typed, so it rewrote real titles like
+    // "Report12 (DNDark) 27" back to the "Report12" stem and then picked an arbitrary free number -
+    // renames swapped names chaotically and drove an unbounded loop on real hardware (twelfth
+    // hardware-testing round, 2026-07-24). Accumulation is prevented at the source instead: only a
+    // *create* disambiguates (a rename never does), and the client no longer re-submits an assigned
+    // name as a fresh request.
+    const base = hasExtension ? relativePath.slice(0, lastDot) : relativePath;
+    const safeName = (actorDisplayName ?? "")
+      // eslint-disable-next-line no-control-regex -- strip separators and control chars from a
+      // user-chosen display name before it becomes part of a filename.
+      .replace(/[/\\:*?"<>| -]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 40);
+    const label = safeName.length > 0 ? safeName : "copy";
+    const first = `${base} (${label})${extension}`;
+    if (!isTaken(first)) {
+      return first;
+    }
+    for (let counter = 2; counter <= 50; counter++) {
+      const candidate = `${base} (${label}) ${counter}${extension}`;
+      if (!isTaken(candidate)) {
+        return candidate;
+      }
+    }
+    return `${base} (${label}) ${createId("fil").slice(-8)}${extension}`;
   }
 
   /** Writes a CRDT-materialized text snapshot into `files`/`file_versions` (contract 1.6) - always

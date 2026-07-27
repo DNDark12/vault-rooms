@@ -115,6 +115,143 @@ describe("CrdtSessionManager - first create", () => {
     const harness = createHarness({ isRoomCrdtEnabled: () => false });
     await expect(harness.manager.ensureSession("room_1", "Board.md")).rejects.toThrow();
   });
+
+  // Thirteenth hardware-testing round (2026-07-24): edits took ~3s to appear on the other device (or
+  // arrived in a lump when the editor lost focus). A live remote_crdt_update was silently dropped when
+  // no session existed for the path, so the receiving device had to wait for the server's *debounced*
+  // materialize to arrive as a remote_file_change instead. Live receipt must not depend on the
+  // editor-binding pass having run first.
+  it("opens a session on a live remote_crdt_update for a path it has none for, instead of dropping it", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "note.md", crdtEpoch: 2 }]);
+    expect(harness.manager.isSessionOpen("room_1", "note.md")).toBe(false);
+
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "typed on the other device a moment ago");
+    await ack(harness, {
+      type: "remote_crdt_update",
+      roomId: "room_1",
+      relativePath: "note.md",
+      epoch: 2,
+      update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64"),
+      updatedBy: { userId: "user_2", displayName: "Teammate" }
+    });
+
+    // The session is opened (and its handshake will pull in what this update carried) rather than the
+    // update being discarded and the device left waiting on the materialize debounce.
+    await vi.waitFor(() => expect(harness.manager.isSessionOpen("room_1", "note.md")).toBe(true));
+    const session = await harness.manager.ensureSession("room_1", "note.md");
+    expect(session.epoch).toBe(2);
+    // No crdt_create either - the epoch was already known from the room snapshot.
+    expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(false);
+  });
+
+  // Ninth hardware-testing round (2026-07-24): breaking the receive->create feedback loop. Applying an
+  // announce/materialize writes the file to disk, which fires this device's own watcher "create" and
+  // calls ensureSession. Without a known epoch that issued a crdt_create for a path the server already
+  // had a document at; once collisions auto-renamed instead of failing, every such collision produced
+  // a new suffixed name that was announced back, escalating forever between the two devices.
+  it("adopts an announced document instead of creating one, after registerKnownEpoch", async () => {
+    const harness = createHarness();
+    harness.disk.set("room_1/announced.md", "content the peer sent us");
+
+    // Exactly what syncWsClient does on a remote_file_change carrying crdtEpoch.
+    harness.manager.registerKnownEpoch("room_1", "announced.md", 3);
+
+    const session = await harness.manager.ensureSession("room_1", "announced.md");
+
+    // No crdt_create at all - the epoch was already known, so this adopts the existing document.
+    expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(false);
+    expect(session.epoch).toBe(3);
+  });
+
+  // Tenth hardware-testing round (2026-07-24): the WS log showed an endless
+  // crdt_update -> crdt_rejected stream while the note refused to sync. A rejection with no
+  // currentEpoch (NOT_FOUND: no document at this path at all) had no recovery, so the session kept
+  // pushing updates the server kept refusing and the edits were stranded forever.
+  it("re-establishes the document when the server reports NOT_FOUND for a path it is pushing to", async () => {
+    const harness = createHarness();
+    harness.disk.set("room_1/note.md", "text the user typed and must not lose");
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "note.md", crdtEpoch: 4 }]);
+    await harness.manager.ensureSession("room_1", "note.md");
+    harness.sent.length = 0;
+
+    // The server says there is no document here (and offers no newer epoch to move to).
+    await ack(harness, {
+      type: "crdt_rejected",
+      roomId: "room_1",
+      relativePath: "note.md",
+      code: "NOT_FOUND",
+      message: "No CRDT document exists at this path yet - send crdt_create first."
+    });
+
+    // Recovery re-establishes it rather than leaving the session pushing into the void.
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+    const created = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+    expect(created).toMatchObject({ roomId: "room_1", relativePath: "note.md" });
+    await ack(harness, { type: "crdt_created", requestId: created.requestId, roomId: "room_1", relativePath: "note.md", documentId: "file_9", epoch: 5 });
+
+    // The user's on-disk text is what seeds the re-established document, so nothing is lost.
+    const session = await harness.manager.ensureSession("room_1", "note.md");
+    expect(session.epoch).toBe(5);
+    expect(session.ytext.toString()).toBe("text the user typed and must not lose");
+  });
+
+  it("registerKnownEpoch never downgrades a newer epoch and never disturbs an open session", async () => {
+    const harness = createHarness();
+    harness.manager.registerKnownEpoch("room_1", "note.md", 5);
+    harness.manager.registerKnownEpoch("room_1", "note.md", 2);
+    const session = await harness.manager.ensureSession("room_1", "note.md");
+    expect(session.epoch).toBe(5);
+
+    // A late announce for a path this device already has open must not disturb it.
+    harness.manager.registerKnownEpoch("room_1", "note.md", 9);
+    expect(await harness.manager.ensureSession("room_1", "note.md")).toBe(session);
+    expect(session.epoch).toBe(5);
+  });
+
+  // Seventh hardware-testing round (2026-07-24): every new Obsidian note starts with the same default
+  // name, so two devices creating one collide constantly. The first creator keeps the name; this
+  // device is told its note was filed under a different path, and must move its local file to match
+  // so the file the user sees and the document being synced are the same thing.
+  it("adopts a server-assigned path when the requested name was already taken, moving the local file", async () => {
+    const reassignments: Array<{ requested: string; assigned: string }> = [];
+    const harness = createHarness({
+      onPathReassigned: (_roomId, requested, assigned) => reassignments.push({ requested, assigned })
+    });
+    harness.disk.set("room_1/Untitled.md", "my brand-new note");
+
+    const sessionPromise = harness.manager.ensureSession("room_1", "Untitled.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+    const createMessage = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+    expect(createMessage).toMatchObject({ relativePath: "Untitled.md" });
+
+    await ack(harness, {
+      type: "crdt_created",
+      requestId: createMessage.requestId,
+      roomId: "room_1",
+      relativePath: "Untitled (B laptop).md",
+      documentId: "file_2",
+      epoch: 0
+    });
+    const session = await sessionPromise;
+
+    // The session lives at the assigned path, the vault file moved there with its content, and the
+    // user was told why their note is now called something else.
+    expect(session.relativePath).toBe("Untitled (B laptop).md");
+    expect(harness.manager.isSessionOpen("room_1", "Untitled (B laptop).md")).toBe(true);
+    expect(harness.manager.isSessionOpen("room_1", "Untitled.md")).toBe(false);
+    expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "Untitled.md", newRelativePath: "Untitled (B laptop).md" });
+    expect(harness.disk.get("room_1/Untitled (B laptop).md")).toBe("my brand-new note");
+    expect(harness.disk.has("room_1/Untitled.md")).toBe(false);
+    expect(reassignments).toEqual([{ requested: "Untitled.md", assigned: "Untitled (B laptop).md" }]);
+
+    // A later edit forwards under the assigned path, not the one originally requested.
+    harness.sent.length = 0;
+    session.doc.transact(() => session.ytext.insert(0, "!"), null);
+    const update = harness.sent.find((message) => message.type === "crdt_update") as Extract<SyncClientMessage, { type: "crdt_update" }>;
+    expect(update).toMatchObject({ relativePath: "Untitled (B laptop).md" });
+  });
 });
 
 describe("CrdtSessionManager - persistence across a simulated restart", () => {
@@ -519,6 +656,165 @@ describe("CrdtSessionManager - atomic rename (fourth hardware-testing round, 202
     // The vault file still gets moved on disk too - a session being open doesn't own the vault's
     // own notion of this file's identity/filename, only the CRDT content does.
     expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "old-title.md", newRelativePath: "new-title.md" });
+  });
+});
+
+describe("CrdtSessionManager - rename ordering (sixth hardware-testing round, 2026-07-24)", () => {
+  it("waits for an in-flight crdt_create of the OLD path before sending crdt_rename (create-then-immediately-retitle)", async () => {
+    // The reported duplicate: a brand-new "Untitled" note retitled a keystroke later. Its crdt_create
+    // was still in flight, so the rename hit a path the server didn't have yet (NOT_FOUND) and the
+    // queued create then materialized the OLD path afterwards - leaving the original next to the
+    // renamed note on every other device.
+    const harness = createHarness();
+    const opening = harness.manager.ensureSession("room_1", "Untitled.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+
+    const renamePromise = harness.manager.renameSession("room_1", "Untitled.md", "a.md");
+    // Nothing may be sent while the create is unacked - sending now is exactly what raced.
+    await Promise.resolve();
+    expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(false);
+
+    const createMessage = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+    await ack(harness, { type: "crdt_created", requestId: createMessage.requestId, roomId: "room_1", relativePath: "Untitled.md", documentId: "file_1", epoch: 0 });
+    await opening;
+
+    // Only once the old path really exists server-side does the rename go out.
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    expect(renameMessage).toMatchObject({ oldRelativePath: "Untitled.md", relativePath: "a.md" });
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "Untitled.md",
+      relativePath: "a.md",
+      epoch: 0
+    });
+    await renamePromise;
+    expect(harness.manager.isSessionOpen("room_1", "a.md")).toBe(true);
+    expect(harness.manager.isSessionOpen("room_1", "Untitled.md")).toBe(false);
+  });
+
+  it("serializes a chain of renames so each starts from the path the previous one established", async () => {
+    // Obsidian fires one rename per inline-title commit, so retitling in steps ("a" -> "ab" -> "abc")
+    // arrives as a burst the caller never awaits. Run concurrently these overlapped and 404'd.
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "a.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "a.md");
+    harness.sent.length = 0;
+
+    const first = harness.manager.renameSession("room_1", "a.md", "ab.md");
+    const second = harness.manager.renameSession("room_1", "ab.md", "abc.md");
+
+    // Only the first rename is in flight; the second waits its turn.
+    await vi.waitFor(() => expect(harness.sent.filter((message) => message.type === "crdt_rename")).toHaveLength(1));
+    const firstMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    expect(firstMessage).toMatchObject({ oldRelativePath: "a.md", relativePath: "ab.md" });
+
+    await ack(harness, { type: "crdt_renamed", requestId: firstMessage.requestId, roomId: "room_1", oldRelativePath: "a.md", relativePath: "ab.md", epoch: 0 });
+    await first;
+
+    await vi.waitFor(() => expect(harness.sent.filter((message) => message.type === "crdt_rename")).toHaveLength(2));
+    const secondMessage = harness.sent.filter((message) => message.type === "crdt_rename")[1] as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    expect(secondMessage).toMatchObject({ oldRelativePath: "ab.md", relativePath: "abc.md" });
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: secondMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "ab.md",
+      relativePath: "abc.md",
+      epoch: 0
+    });
+    await second;
+    expect(harness.manager.isSessionOpen("room_1", "abc.md")).toBe(true);
+  });
+
+  // Eleventh hardware-testing round (2026-07-24), diagnosed from a real WS trace: Obsidian's rename
+  // moves the open editor's file, which fires active-leaf-change and re-runs the pane bind pass, so
+  // ensureSession was called for the rename's DESTINATION while the rename was still in flight. That
+  // allocated a competing brand-new document there ~5ms early, and the rename then collided with its
+  // own device's creation (`crdt_create "X1.md"` -> `crdt_created` -> `crdt_rename … -> "X1.md"` ->
+  // `crdt_rejected FILE_EXISTS`).
+  it("does not create a competing document when ensureSession races a rename to the same destination", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Untitled.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "Untitled.md");
+    harness.sent.length = 0;
+
+    const renamePromise = harness.manager.renameSession("room_1", "Untitled.md", "Untitled1.md");
+    // The editor rebind for the destination path, exactly as it arrives on real hardware.
+    const bindPromise = harness.manager.ensureSession("room_1", "Untitled1.md");
+
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    // Crucially: no crdt_create for the destination - it waits for the rename instead of racing it.
+    expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(false);
+
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "Untitled.md",
+      relativePath: "Untitled1.md",
+      epoch: 0
+    });
+    await renamePromise;
+
+    // The rebind resolves onto the *renamed* document, still with no create ever sent.
+    const bound = await bindPromise;
+    expect(bound.relativePath).toBe("Untitled1.md");
+    expect(bound.epoch).toBe(0);
+    expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(false);
+  });
+
+  it("adopts a server-disambiguated rename target, moving the local file and reporting it", async () => {
+    const reassignments: Array<{ requested: string; assigned: string }> = [];
+    const harness = createHarness({
+      onPathReassigned: (_roomId, requested, assigned) => reassignments.push({ requested, assigned })
+    });
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "a.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "a.md");
+    harness.disk.set("room_1/b.md", "the note the user just renamed");
+
+    const renamePromise = harness.manager.renameSession("room_1", "a.md", "b.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+
+    // The server took "b.md" already, so it filed this document under a disambiguated name.
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "a.md",
+      relativePath: "b (huynd2).md",
+      epoch: 0
+    });
+    await renamePromise;
+
+    expect(harness.manager.isSessionOpen("room_1", "b (huynd2).md")).toBe(true);
+    expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "b.md", newRelativePath: "b (huynd2).md" });
+    expect(harness.disk.get("room_1/b (huynd2).md")).toBe("the note the user just renamed");
+    expect(reassignments).toEqual([{ requested: "b.md", assigned: "b (huynd2).md" }]);
+  });
+
+  it("rejects a failed rename with the server's error code so the caller can tell FILE_EXISTS from NOT_FOUND", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "a.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "a.md");
+
+    const renamePromise = harness.manager.renameSession("room_1", "a.md", "taken.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    await ack(harness, {
+      type: "crdt_rejected",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      relativePath: "taken.md",
+      code: "FILE_EXISTS",
+      message: "A file already exists at the new path."
+    });
+
+    await expect(renamePromise).rejects.toMatchObject({ code: "FILE_EXISTS" });
   });
 });
 

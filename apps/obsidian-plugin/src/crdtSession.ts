@@ -37,6 +37,24 @@ function sessionKey(roomId: string, relativePath: string): string {
   return `${roomId}\0${relativePath}`;
 }
 
+/**
+ * A `crdt_rejected` answer to one of this manager's requests, carrying the server's error `code`
+ * alongside its message. Callers need the code, not just the text: main.ts's rename fallback must
+ * treat "the old path was never on the server" (NOT_FOUND/FILE_DELETED - creating at the new path is
+ * the correct recovery) differently from "the new path is already taken" (FILE_EXISTS - creating is
+ * both impossible and how stray duplicate files used to get manufactured; see the sixth
+ * hardware-testing round in docs/superpowers/plans/2026-07-20-crdt-sync.md).
+ */
+export class CrdtRejectedError extends Error {
+  constructor(
+    readonly code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "CrdtRejectedError";
+  }
+}
+
 export type CrdtSession = {
   roomId: string;
   relativePath: string;
@@ -73,6 +91,12 @@ export type CrdtSessionManagerDeps = {
    *  doesn't exist locally (e.g. this device never downloaded the file before the rename). */
   renameDiskFile: (roomId: string, oldRelativePath: string, newRelativePath: string) => Promise<void>;
   onSessionChanged?: (roomId: string, relativePath: string) => void;
+  /** Called when the server assigned this device's brand-new note a different path than the one it
+   *  asked for, because another device had already created a note at that path first (every new
+   *  Obsidian note starts with the same default name, so this is routine, not an error). The local
+   *  file has already been moved to `relativePath` by the time this fires - main.ts uses it to tell
+   *  the user why the note they just made is now called something else. */
+  onPathReassigned?: (roomId: string, requestedRelativePath: string, relativePath: string) => void;
   createRequestId?: () => string;
   schedule?: (fn: () => void, ms: number) => number;
   cancel?: (id: number) => void;
@@ -89,6 +113,10 @@ export interface CrdtWsBridge {
    *  edit made while offline, since the server's reply to this step1 request is what will surface
    *  it wants the client's missing update). */
   onConnected(): void;
+  /** Records a document's epoch learned from a `remote_file_change` announce/materialize, so the disk
+   *  write it triggers can't make this device try to create a document the server already has - see
+   *  the implementation's doc comment for the feedback loop this prevents. */
+  registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void;
   /** Whether a live CRDT session is already open for (roomId, relativePath) - used by
    *  syncWsClient.ts's `remote_file_change` handler (second-hardware-testing-round item 1) to decide
    *  whether the materialized fallback broadcast should still be applied to disk. When a session is
@@ -113,7 +141,10 @@ export interface CrdtWsBridge {
 export class CrdtSessionManager implements CrdtWsBridge {
   private readonly sessions = new Map<string, CrdtSession>();
   private readonly knownEpoch = new Map<string, number>();
-  private readonly pendingCreate = new Map<string, { key: string; resolve: (epoch: number) => void; reject: (error: Error) => void }>();
+  private readonly pendingCreate = new Map<
+    string,
+    { key: string; resolve: (created: { epoch: number; relativePath: string }) => void; reject: (error: Error) => void }
+  >();
   /** Coalesces concurrent `ensureSession` callers for the same (roomId, relativePath) onto one
    *  in-flight open (see `ensureSession`'s doc comment for why this needs to wrap the whole open,
    *  not just the epoch fetch). */
@@ -121,7 +152,21 @@ export class CrdtSessionManager implements CrdtWsBridge {
   private readonly pendingHandshake = new Map<string, string>();
   /** Correlates an in-flight `crdt_rename` request with its `crdt_renamed`/`crdt_rejected` answer -
    *  see `renameSession`. */
-  private readonly pendingRename = new Map<string, { resolve: (epoch: number) => void; reject: (error: Error) => void }>();
+  private readonly pendingRename = new Map<
+    string,
+    { resolve: (acked: { epoch: number; relativePath: string }) => void; reject: (error: Error) => void }
+  >();
+  /** One promise chain per room, serializing `renameSession` calls - see its doc comment for the
+   *  duplicate-file race this closes. Keyed by room (not by path) deliberately: a rename chain's
+   *  whole point is that each link's path depends on the previous link's outcome. */
+  private readonly renameChains = new Map<string, Promise<unknown>>();
+  /** Paths with an in-flight `recoverMissingDocument` attempt - see that method for why re-entrancy
+   *  here has to be blocked rather than retried. */
+  private readonly recoveringPaths = new Set<string>();
+  /** Destination paths of in-flight renames. `ensureSession` waits for the rename rather than creating
+   *  a competing document at a path a rename is about to move an existing document onto - see
+   *  `renameSession` for the self-collision this closes. */
+  private readonly pendingRenameTargets = new Set<string>();
   private readonly persistTimers = new Map<string, number>();
   private readonly materializeTimers = new Map<string, number>();
   private readonly schedule: (fn: () => void, ms: number) => number;
@@ -156,6 +201,33 @@ export class CrdtSessionManager implements CrdtWsBridge {
     return this.sessions.has(sessionKey(roomId, relativePath));
   }
 
+  /**
+   * Records the epoch of a document this device learned about from the server *without* opening a
+   * session for it - specifically a `remote_file_change` carrying `crdtEpoch` (a creation announce or
+   * materialized fanout). This is what stops a receive→create feedback loop: applying that broadcast
+   * writes the file to disk, which makes this device's own vault watcher fire a local "create", which
+   * calls `ensureSession`. With no known epoch, `ensureSession` would `crdt_create` a path the server
+   * already has a document at - and once collisions started auto-renaming rather than failing, each
+   * such collision produced a new suffixed name that was announced back, escalating without bound
+   * between the two devices (`Untitled (a) (b) (a) (b)…`). Knowing the epoch makes that same
+   * `ensureSession` adopt the existing document instead. Never downgrades a newer epoch, and never
+   * touches an already-open session (that path has its own epoch/handshake handling).
+   */
+  registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void {
+    if (!isCrdtEligiblePath(relativePath) || !this.deps.isRoomCrdtEnabled(roomId)) {
+      return;
+    }
+    const key = sessionKey(roomId, relativePath);
+    if (this.sessions.has(key)) {
+      return;
+    }
+    const known = this.knownEpoch.get(key);
+    if (known !== undefined && known >= epoch) {
+      return;
+    }
+    this.knownEpoch.set(key, epoch);
+  }
+
   /** Marks a session as currently bound to an open CM6 editor - see CrdtSession.boundToEditor. */
   bindToEditor(roomId: string, relativePath: string): void {
     const session = this.sessions.get(sessionKey(roomId, relativePath));
@@ -179,6 +251,15 @@ export class CrdtSessionManager implements CrdtWsBridge {
       throw new Error(`ensureSession called for a non-CRDT target: ${roomId}/${relativePath}`);
     }
     const key = sessionKey(roomId, relativePath);
+    // A rename is already in flight to move an existing document onto this exact path. Creating one
+    // here would race it and win, so the rename would then collide with this device's own brand-new
+    // document (FILE_EXISTS) - the self-collision confirmed from a real WS trace, where Obsidian's
+    // rename moved the open editor's file, the pane bind pass fired ensureSession for the destination,
+    // and that allocated a competing document ~5ms before the rename arrived. Wait for the rename
+    // instead: once it lands, the epoch for this path is known and the code below adopts it.
+    if (this.pendingRenameTargets.has(key)) {
+      await (this.renameChains.get(roomId) ?? Promise.resolve()).catch(() => undefined);
+    }
     // Coalesce concurrent callers for the same path (e.g. the vault watcher's "create" event and
     // the editor-open path both firing for a brand-new note at nearly the same time) onto one
     // in-flight open, end to end - not just the crdt_create request. Without this, two callers that
@@ -206,12 +287,63 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * side of this, which does need to move the file.
    */
   async renameSession(roomId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+    // Serialized per room, because Obsidian emits one rename event per *commit* of an inline title
+    // edit - retitling a note in several steps ("Untitled" -> "a" -> "ab" -> "abc") fires a chain of
+    // renames in quick succession, and the caller (main.ts's watcher) fires each one without
+    // awaiting. Run concurrently, request N+1's `oldRelativePath` could reach the server before
+    // request N had moved the file there, so it 404'd - and the old code's fallback then created a
+    // *new* document at the new path, leaving the original behind as a duplicate. Chaining makes each
+    // rename start from the path the previous one actually established. A failed link doesn't break
+    // the chain (`.catch`) - the next rename still runs and is judged on its own answer.
+    // Claim the destination *synchronously*, before anything is sent or awaited. Obsidian's own rename
+    // moves the open editor's file, which fires active-leaf-change and re-runs the pane bind pass - so
+    // `ensureSession` gets called for the destination path while this rename is still in flight. With
+    // no session or known epoch there yet, that call allocated a brand-new document at the destination,
+    // and the rename then collided with the document its own device had just created ~5ms earlier
+    // (`FILE_EXISTS`, confirmed from a real WS trace - eleventh hardware-testing round, 2026-07-24).
+    // `ensureSession` consults this set and waits for the rename instead of creating.
+    const destinationKey = sessionKey(roomId, newRelativePath);
+    this.pendingRenameTargets.add(destinationKey);
+    const previous = this.renameChains.get(roomId) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.performRename(roomId, oldRelativePath, newRelativePath))
+      .finally(() => {
+        this.pendingRenameTargets.delete(destinationKey);
+      });
+    this.renameChains.set(
+      roomId,
+      run.catch(() => undefined)
+    );
+    return run;
+  }
+
+  private async performRename(roomId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+    // A brand-new note renamed immediately ("Untitled" created, then retitled a keystroke later) has
+    // its `crdt_create` for the OLD path still in flight at this point. Renaming ahead of it made the
+    // server 404 the rename (the old path didn't exist server-side *yet*) and then honour the
+    // still-queued create afterwards - so the old path was (re)created server-side after the local
+    // file had already moved on, surfacing on every other device as a leftover duplicate next to the
+    // renamed file. Waiting for that open to settle first means the rename operates on a path the
+    // server actually has. Its failure is not ours to handle (the ensureSession caller owns it).
+    const opening = this.pendingSessionOpen.get(sessionKey(roomId, oldRelativePath));
+    if (opening) {
+      await opening.catch(() => undefined);
+    }
     const requestId = this.createRequestId();
-    const epoch = await new Promise<number>((resolve, reject) => {
+    const acked = await new Promise<{ epoch: number; relativePath: string }>((resolve, reject) => {
       this.pendingRename.set(requestId, { resolve, reject });
       this.deps.send({ type: "crdt_rename", requestId, roomId, oldRelativePath, relativePath: newRelativePath });
     });
-    await this.rekeyLocalState(roomId, oldRelativePath, newRelativePath, epoch);
+    await this.rekeyLocalState(roomId, oldRelativePath, acked.relativePath, acked.epoch);
+    if (acked.relativePath !== newRelativePath) {
+      // The requested name was already held by another live document, so the server filed this one
+      // under a disambiguated name instead of rejecting (same policy as a colliding create). Move the
+      // local file to match and tell the user - otherwise the note the user is looking at and the
+      // document being synced would sit at different paths.
+      await this.deps.renameDiskFile(roomId, newRelativePath, acked.relativePath);
+      this.deps.onPathReassigned?.(roomId, newRelativePath, acked.relativePath);
+    }
   }
 
   /**
@@ -272,8 +404,21 @@ export class CrdtSessionManager implements CrdtWsBridge {
     await this.deps.docStore.rename(roomId, oldRelativePath, newRelativePath, epoch);
   }
 
-  private async openSession(roomId: string, relativePath: string, key: string): Promise<CrdtSession> {
-    const epoch = await this.ensureEpoch(roomId, relativePath);
+  private async openSession(roomId: string, requestedPath: string, requestedKey: string): Promise<CrdtSession> {
+    const created = await this.ensureEpoch(roomId, requestedPath);
+    const epoch = created.epoch;
+    let relativePath = requestedPath;
+    let key = requestedKey;
+    if (created.relativePath !== requestedPath) {
+      // Name collision: someone else already owns this path, so the server gave *this* note its own
+      // disambiguated one. Move the local vault file to match before opening the session, so the
+      // file the user is looking at and the document being synced are the same thing. Everything
+      // below then proceeds entirely under the assigned path.
+      relativePath = created.relativePath;
+      key = sessionKey(roomId, relativePath);
+      await this.deps.renameDiskFile(roomId, requestedPath, relativePath);
+      this.deps.onPathReassigned?.(roomId, requestedPath, relativePath);
+    }
     const existing = this.sessions.get(key);
     if (existing && existing.epoch === epoch) {
       if (!existing.boundToEditor) {
@@ -400,6 +545,34 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
   }
 
+  /**
+   * Recovers from "the server has no document at this path" (a `crdt_rejected` NOT_FOUND/FILE_DELETED
+   * carrying no `currentEpoch`). Drops the stale session/known-epoch/persisted state for the path and
+   * re-opens it, which re-establishes the document (adopting an existing one or creating it) and
+   * re-seeds it from the on-disk text through the normal handshake - so the user's local content is
+   * offered to the server instead of being stranded behind an endless rejection loop. Guarded by
+   * `recoveringPaths` so a recovery that itself fails can't spin: the next rejection for that path is
+   * ignored until this attempt settles.
+   */
+  private async recoverMissingDocument(roomId: string, relativePath: string): Promise<void> {
+    if (!isCrdtEligiblePath(relativePath) || !this.deps.isRoomCrdtEnabled(roomId)) {
+      return;
+    }
+    const key = sessionKey(roomId, relativePath);
+    if (this.recoveringPaths.has(key)) {
+      return;
+    }
+    this.recoveringPaths.add(key);
+    try {
+      await this.forgetLocalDelete(roomId, relativePath);
+      await this.ensureSession(roomId, relativePath);
+    } catch (error) {
+      console.warn(`Vault Rooms: could not re-establish the CRDT document for "${relativePath}"`, error);
+    } finally {
+      this.recoveringPaths.delete(key);
+    }
+  }
+
   /** Drops every in-memory session for `roomId` and deletes their persisted state (contract 1.12:
    *  cleanup on leaving/unmounting a room). */
   async disposeRoom(roomId: string): Promise<void> {
@@ -430,12 +603,15 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (this.disposed) return;
     switch (message.type) {
       case "crdt_created": {
+        // Keyed by the path the server actually assigned, which may differ from the requested one on a
+        // name collision (see ensureEpoch) - keying by the request's original path would leave
+        // knownEpoch pointing at a path no document lives at.
         const key = sessionKey(message.roomId, message.relativePath);
         this.knownEpoch.set(key, message.epoch);
         const pending = this.pendingCreate.get(message.requestId);
         if (pending) {
           this.pendingCreate.delete(message.requestId);
-          pending.resolve(message.epoch);
+          pending.resolve({ epoch: message.epoch, relativePath: message.relativePath });
         }
         return;
       }
@@ -451,10 +627,28 @@ export class CrdtSessionManager implements CrdtWsBridge {
         const pendingRenameEntry = message.requestId ? this.pendingRename.get(message.requestId) : undefined;
         if (pendingRenameEntry && message.requestId) {
           this.pendingRename.delete(message.requestId);
-          pendingRenameEntry.reject(new Error(message.message));
+          // Carries the server's code (not just its text) so main.ts's fallback can tell a genuinely
+          // absent old path apart from an already-taken new path - see CrdtRejectedError.
+          pendingRenameEntry.reject(new CrdtRejectedError(message.code, message.message));
         }
         if (message.currentEpoch !== undefined) {
           await this.resyncAtEpoch(message.roomId, message.relativePath, message.currentEpoch);
+          return;
+        }
+        // No `currentEpoch` means the server isn't telling us to move to a newer epoch - for
+        // NOT_FOUND/FILE_DELETED it's saying "there is no document at this path at all". Until now
+        // that had *no recovery*: the session stayed alive pointing at a document the server doesn't
+        // have, so every subsequent `crdt_update` was rejected the same way and the user's edits were
+        // silently stranded forever - visible on real hardware as an endless
+        // `crdt_update` -> `crdt_rejected` stream in the WS log while the note refused to sync
+        // (tenth hardware-testing round, 2026-07-24). Re-establish the document instead: the local
+        // text is safe on disk, so dropping the stale session/epoch and re-opening adopts (or creates)
+        // the right document and re-seeds it from that disk text via the normal handshake.
+        if (!pendingCreateEntry && !pendingRenameEntry && (message.code === "NOT_FOUND" || message.code === "FILE_DELETED")) {
+          // Deliberately not awaited: recovery re-opens the session, which waits for a `crdt_created`
+          // ack that can only arrive on a *later* message - awaiting it here would deadlock the socket's
+          // message processing against its own reply. `recoveringPaths` provides the re-entrancy guard.
+          void this.recoverMissingDocument(message.roomId, message.relativePath);
         }
         return;
       }
@@ -462,7 +656,9 @@ export class CrdtSessionManager implements CrdtWsBridge {
         const pending = this.pendingRename.get(message.requestId);
         if (pending) {
           this.pendingRename.delete(message.requestId);
-          pending.resolve(message.epoch);
+          // `message.relativePath` is the path the rename actually landed on, which differs from the
+          // requested one when that name was already held by another live document.
+          pending.resolve({ epoch: message.epoch, relativePath: message.relativePath });
         }
         return;
       }
@@ -505,7 +701,19 @@ export class CrdtSessionManager implements CrdtWsBridge {
       case "remote_crdt_update": {
         const key = sessionKey(message.roomId, message.relativePath);
         const session = this.sessions.get(key);
-        if (!session || session.epoch !== message.epoch) return;
+        if (!session) {
+          // No session yet, so this live update would be dropped and this device would not see the
+          // change until the server's *debounced* materialize arrived as a `remote_file_change` -
+          // roughly three seconds behind the keystroke, which is exactly the "edits take ~3s to show
+          // up, or appear all at once when I click away" latency reported from real hardware
+          // (thirteenth hardware-testing round, 2026-07-24). Live receipt must not depend on the
+          // editor-binding pass having run: open the session now, and its handshake pulls in this
+          // update plus anything else missed. Not awaited - the open waits on server replies that can
+          // only arrive on later messages, so awaiting here would deadlock message processing.
+          void this.ensureSession(message.roomId, message.relativePath).catch(() => undefined);
+          return;
+        }
+        if (session.epoch !== message.epoch) return;
         Y.applyUpdate(session.doc, fromBase64(message.update), REMOTE_ORIGIN);
         return;
       }
@@ -514,16 +722,20 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
   }
 
-  private async ensureEpoch(roomId: string, relativePath: string): Promise<number> {
+  private async ensureEpoch(roomId: string, relativePath: string): Promise<{ epoch: number; relativePath: string }> {
     const key = sessionKey(roomId, relativePath);
     const known = this.knownEpoch.get(key);
     if (known !== undefined) {
-      return known;
+      return { epoch: known, relativePath };
     }
     // Only ever called from openSession, which ensureSession's pendingSessionOpen already
     // serializes per key - so there is no concurrent-caller case to coalesce here.
+    // The server may answer with a *different* relativePath than the one requested: the first creator
+    // of a path keeps it, and a second device creating its own new note at the same path (every new
+    // Obsidian note starts with the same default name) is assigned a disambiguated one instead. The
+    // `crdt_created` handler resolves this promise with whatever path was actually assigned.
     const requestId = this.createRequestId();
-    return new Promise<number>((resolve, reject) => {
+    return new Promise<{ epoch: number; relativePath: string }>((resolve, reject) => {
       this.pendingCreate.set(requestId, { key, resolve, reject });
       this.deps.send({ type: "crdt_create", requestId, roomId, relativePath });
     });
