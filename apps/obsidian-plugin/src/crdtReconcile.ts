@@ -31,7 +31,7 @@ function lcsDiff(a: string, b: string): DiffOp[] {
   if (n === 0) return m ? [{ op: "insert", text: b }] : [];
   if (m === 0) return n ? [{ op: "delete", text: a }] : [];
 
-  const dp: Uint32Array[] = new Array(n + 1);
+  const dp: Uint32Array[] = new Array<Uint32Array>(n + 1);
   for (let i = 0; i <= n; i++) {
     dp[i] = new Uint32Array(m + 1);
   }
