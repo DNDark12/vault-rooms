@@ -1635,6 +1635,16 @@ export default class VaultRoomsPlugin extends Plugin {
         if (visible) {
           visible.crdtEnabled = crdtEnabled;
         }
+        if (!crdtEnabled) {
+          // Leaving the CRDT lane retires every document in the room, so live editor bindings (and the
+          // presence facades they own) have to come down with it - otherwise a pane keeps a compartment
+          // pointed at a session the engine no longer maintains.
+          this.crdtEditorController.unbindRoom(roomId);
+          void this.crdtSessionManager?.disposeRoom(roomId);
+        }
+        // Harmless when enabling, and necessary so open panes rebind once the fresh snapshot this same
+        // message triggers has established their epochs.
+        this.handleActiveEditorChanged();
       }
     });
     socket.connect();

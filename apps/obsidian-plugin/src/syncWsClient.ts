@@ -199,7 +199,9 @@ export class RoomSyncSocket {
         // Contract 1.2: this build always speaks the CRDT lane. A room that hasn't opted into
         // crdtEnabled simply never receives any crdt_*/remote_crdt_update message regardless of
         // what a connection advertises here - advertising true is safe and unconditional.
-        capabilities: { crdt: true }
+        // Presence rides the same unconditional advertisement as the CRDT lane: this build always
+      // speaks both, and the relay clamps presence to false if crdt is ever absent.
+      capabilities: { crdt: true, presence: true }
       });
       this.clearHelloAckTimer();
       this.helloAckTimer = window.setTimeout(() => {
@@ -455,7 +457,12 @@ export class RoomSyncSocket {
       case "crdt_sync_step2":
       case "remote_crdt_update":
       case "crdt_renamed":
-      case "remote_crdt_rename": {
+      case "remote_crdt_rename":
+      // Presence shares the CRDT lane's mounted-room gate and ordering queue: a cursor for a room
+      // whose local ownership has already ended must not reach the session manager either.
+      case "presence_snapshot":
+      case "remote_presence":
+      case "presence_rejected": {
         // An unmount marks MountedRoomState.unmounted before it unsubscribes/disposes. A CRDT
         // message already queued on the socket can therefore arrive after local ownership ended;
         // never let it recreate a session or mutate a retired document for that room.
