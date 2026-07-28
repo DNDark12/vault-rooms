@@ -3,6 +3,7 @@ import { isCrdtEligiblePath, type SyncClientMessage, type SyncServerMessage } fr
 import { CRDT_TEXT_KEY } from "vault-rooms-relay/embedded-core";
 import type { CrdtDocStore } from "./crdtDocStore.js";
 import { reconcileYTextWithDiskText } from "./crdtReconcile.js";
+import { CrdtPresenceSession } from "./crdtPresence.js";
 
 /** Origin tag applied when hydrating a Y.Doc from persisted state (contract 1.12) - never sent
  *  back to the server, same reasoning as REMOTE_ORIGIN below (it's not a new edit, just replaying
@@ -78,6 +79,10 @@ export type CrdtSession = {
    *  Y.Doc during remount. */
   initialSync: Promise<void>;
   resolveInitialSync: () => void;
+  /** Live cursors. Bound to this session's immutable Y.Doc: when an epoch bump or recovery replaces
+   *  the doc, the whole presence session is destroyed and rebuilt alongside it rather than being
+   *  re-pointed, because yCollab freezes (ytext, awareness) together into one CodeMirror facet. */
+  presence: CrdtPresenceSession;
 };
 
 export type CrdtSessionManagerDeps = {
@@ -228,6 +233,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * one for every open session on reconnect.
    */
   onDisconnected(): void {
+    // Presence is not re-announced from onConnected: it waits for each session's own handshake to
+    // complete (see the crdt_sync_step2 handler). Local selections are retained across the gap so the
+    // re-announce lands where the user actually is.
+    for (const session of this.sessions.values()) {
+      session.presence.setTransportReady(false);
+    }
     const reason = new Error("The connection to the server was lost before this request was answered.");
     for (const [requestId, pending] of [...this.pendingRename.entries()]) {
       this.pendingRename.delete(requestId);
@@ -454,6 +465,10 @@ export class CrdtSessionManager implements CrdtWsBridge {
       this.sessions.delete(oldKey);
       session.relativePath = newRelativePath;
       this.sessions.set(newKey, session);
+      // Follows the document onto its new path without touching the Y.Doc (a rename deliberately
+      // keeps doc, listener, and epoch). The relay clears the old path's entry as part of the rename,
+      // so this side just stops advertising until the re-offered handshake below completes.
+      session.presence.rekey(newRelativePath, epoch);
 
       const persistTimer = this.persistTimers.get(oldKey);
       if (persistTimer !== undefined) {
@@ -575,7 +590,16 @@ export class CrdtSessionManager implements CrdtWsBridge {
       revision: 0,
       updateHandler: () => undefined,
       initialSync,
-      resolveInitialSync
+      resolveInitialSync,
+      presence: new CrdtPresenceSession({
+        doc,
+        roomId,
+        relativePath,
+        epoch,
+        send: this.deps.send,
+        schedule: (callback, delayMs) => this.schedule(callback, delayMs),
+        cancel: (handle) => this.cancel(handle)
+      })
     };
     this.sessions.set(key, session);
 
@@ -800,6 +824,20 @@ export class CrdtSessionManager implements CrdtWsBridge {
         await this.applyRemoteRename(message.roomId, message.oldRelativePath, message.relativePath, message.epoch);
         return;
       }
+      // Presence routes only to an *already open* session for the exact room/path - never through
+      // ensureSession, so a cursor message can never create a document or resurrect a retired one.
+      case "presence_snapshot": {
+        this.sessions.get(sessionKey(message.roomId, message.relativePath))?.presence.applySnapshot(message);
+        return;
+      }
+      case "remote_presence": {
+        this.sessions.get(sessionKey(message.roomId, message.relativePath))?.presence.applyRemote(message);
+        return;
+      }
+      case "presence_rejected": {
+        this.sessions.get(sessionKey(message.roomId, message.relativePath))?.presence.reject(message);
+        return;
+      }
       case "crdt_sync_step2": {
         const key = this.pendingHandshake.get(message.requestId);
         if (!key) return; // Not an answer to a request we're tracking (late/duplicate) - ignore.
@@ -816,6 +854,9 @@ export class CrdtSessionManager implements CrdtWsBridge {
           await this.reconcileAgainstDisk(session, session.roomId, session.relativePath, LOCAL_ORIGIN);
         }
         session.resolveInitialSync();
+        // Only now is it safe to advertise a caret: gating on hello_ok alone would announce against a
+        // document the server may be about to replace at a new epoch, and the relay would reject it.
+        session.presence.setTransportReady(true);
         return;
       }
       case "crdt_sync_step1": {
@@ -1035,6 +1076,11 @@ export class CrdtSessionManager implements CrdtWsBridge {
         this.pendingHandshake.delete(requestId);
       }
     }
+    // Before doc.destroy(): the presence session emits its final retraction using this doc's
+    // clientID, and it must still be readable. This is also the path that covers resyncAtEpoch and
+    // recoverMissingDocument - the two places that swap the Y.Doc without an unmount, and therefore
+    // the likeliest source of a ghost cursor if the removal is skipped.
+    session.presence.destroy();
     session.doc.off("update", session.updateHandler);
     session.resolveInitialSync();
     session.doc.destroy();
