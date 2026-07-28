@@ -41,6 +41,51 @@ export type RemotePresenceState = {
   cursor: PresenceCursor | null;
 };
 
+/**
+ * A client announcing (or retracting) its cursor on one document. Deliberately has no requestId:
+ * presence is fire-and-forget ephemeral state, not a request awaiting an ack.
+ */
+export type PresenceSet = {
+  type: "presence_set";
+  roomId: string;
+  relativePath: string;
+  epoch: number;
+  clientId: number;
+  /** `null` retracts this connection's presence for the document. Idempotent, and deliberately exempt
+   *  from the update rate limit - cleanup is not cursor noise, and a throttled client must still be
+   *  able to remove its caret or it would strand a ghost on every peer. */
+  cursor: PresenceCursor | null;
+};
+
+/** The other live states for a document, sent once to a connection on its first non-null
+ *  `presence_set`. Everything after that arrives as individual `remote_presence` fanouts. */
+export type PresenceSnapshot = {
+  type: "presence_snapshot";
+  roomId: string;
+  relativePath: string;
+  epoch: number;
+  states: RemotePresenceState[];
+};
+
+export type RemotePresence = {
+  type: "remote_presence";
+  roomId: string;
+  relativePath: string;
+  epoch: number;
+  state: RemotePresenceState;
+};
+
+/** Correlated by (roomId, relativePath) rather than a requestId - presence is fire-and-forget, and a
+ *  rejection is a diagnostic event that must never tear down the CRDT document session. */
+export type PresenceRejected = {
+  type: "presence_rejected";
+  roomId: string;
+  relativePath: string;
+  code: ErrorCode;
+  message: string;
+  currentEpoch?: number;
+};
+
 export type SyncClientMessage =
   | { type: "hello"; requestId: string; token: string; client: { kind: "obsidian-plugin"; version: string; deviceName: string }; capabilities?: SyncClientCapabilities }
   | { type: "subscribe_room"; requestId: string; roomId: string }
@@ -74,20 +119,7 @@ export type SyncClientMessage =
   // pure path change needs no doc/epoch churn at all - see relayRepository.ts's renameFile). ---
   | { type: "crdt_rename"; requestId: string; roomId: string; oldRelativePath: string; relativePath: string }
   // --- Live cursors / note presence (docs/superpowers/specs/2026-07-28-live-cursors-design.md) ---
-  // Deliberately has no requestId: presence is fire-and-forget ephemeral state, not a request
-  // awaiting an ack. A rejection is correlated by (roomId, relativePath) instead, and never tears
-  // down the CRDT document session.
-  | {
-      type: "presence_set";
-      roomId: string;
-      relativePath: string;
-      epoch: number;
-      clientId: number;
-      /** `null` retracts this connection's presence for the document. Idempotent, and deliberately
-       *  exempt from the update rate limit - cleanup is not cursor noise, and a throttled client
-       *  must still be able to remove its caret or it would strand a ghost on every peer. */
-      cursor: PresenceCursor | null;
-    };
+  | PresenceSet;
 
 export type SyncServerMessage =
   | { type: "hello_ok"; requestId: string; userId: string; deviceId: string }
@@ -161,21 +193,6 @@ export type SyncServerMessage =
   // Sent only to connections that advertised `crdt: true` *and* `presence: true` and that still hold
   // per-path `file:read`, so a member whose ACL doesn't cover a path never learns another peer is
   // editing it.
-  | {
-      /** The other live states for this document, sent once to a connection on its first non-null
-       *  `presence_set`. Everything after that arrives as individual `remote_presence` fanouts. */
-      type: "presence_snapshot";
-      roomId: string;
-      relativePath: string;
-      epoch: number;
-      states: RemotePresenceState[];
-    }
-  | { type: "remote_presence"; roomId: string; relativePath: string; epoch: number; state: RemotePresenceState }
-  | {
-      type: "presence_rejected";
-      roomId: string;
-      relativePath: string;
-      code: ErrorCode;
-      message: string;
-      currentEpoch?: number;
-    };
+  | PresenceSnapshot
+  | RemotePresence
+  | PresenceRejected;

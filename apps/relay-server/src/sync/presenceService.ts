@@ -3,6 +3,7 @@ import {
   isCrdtEligiblePath,
   normalizeRelativePath,
   type PresenceCursor,
+  type PresenceSet,
   type RemotePresenceState
 } from "@vault-rooms/protocol";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
@@ -41,15 +42,6 @@ const MAX_PRESENCE_BYTES = 8 * 1024;
 const MAX_CURSOR_DEPTH = 8;
 const MAX_CURSOR_NODES = 128;
 
-export type PresenceSetMessage = {
-  type: "presence_set";
-  roomId: string;
-  relativePath: string;
-  epoch: number;
-  clientId: number;
-  cursor: PresenceCursor | null;
-};
-
 export class PresenceService {
   constructor(
     private readonly repo: RelayRepository,
@@ -58,7 +50,7 @@ export class PresenceService {
     private readonly limiter: FixedWindowRateLimiter
   ) {}
 
-  handleSet(connection: SyncConnection, message: PresenceSetMessage, rawBytes: number): void {
+  handleSet(connection: SyncConnection, message: PresenceSet, rawBytes: number): void {
     try {
       if (rawBytes > MAX_PRESENCE_BYTES) {
         throw new AppError("VALIDATION_ERROR", "This presence update is too large.", 413);
@@ -312,7 +304,7 @@ export class PresenceService {
     );
   }
 
-  private reject(connection: SyncConnection, message: PresenceSetMessage, error: unknown): void {
+  private reject(connection: SyncConnection, message: PresenceSet, error: unknown): void {
     if (connection.socket.readyState !== connection.socket.OPEN) return;
     const appError = error instanceof AppError ? error : null;
     if (!appError) {
