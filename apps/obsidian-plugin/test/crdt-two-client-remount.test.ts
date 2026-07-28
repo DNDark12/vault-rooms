@@ -42,6 +42,15 @@ import { RoomSyncSocket } from "../src/syncWsClient.js";
 // connection opens. Swap in the real `ws` client - the same library the embedded relay already uses - so
 // the transport under test is a genuine WebSocket rather than an environment artefact.
 (globalThis as unknown as { WebSocket: unknown }).WebSocket = WsWebSocket;
+// y-codemirror.next only publishes a local cursor for a *focused* view: its update() gates on
+// `view.hasFocus`, which is `dom.ownerDocument.hasFocus() && root.activeElement === contentDOM`. jsdom
+// reports `document.hasFocus() === false` unconditionally, so without this shim no cursor is ever
+// advertised and every presence assertion below fails for an environment reason rather than a real one.
+// The views are also parented into document.body so `activeElement` can actually become the contentDOM.
+// Note losing focus does not *clear* a published cursor (that branch also requires hasFocus), so two
+// devices taking focus in turn within one jsdom document both keep their carets - which is what lets a
+// single document stand in for two machines here.
+Object.defineProperty(globalThis.document, "hasFocus", { value: () => true, configurable: true });
 
 const apps: Array<Awaited<ReturnType<typeof createApp>>> = [];
 const sockets: RoomSyncSocket[] = [];
@@ -163,6 +172,18 @@ type Device = {
   editorBound: () => boolean;
   receivedCrdtTypes: () => string[];
   sessionState: () => { text: string; bound: boolean; epoch: number } | undefined;
+  /** Live cursors. Counted separately from content traffic so an idle window can be asserted without
+   *  WebSocket ping/pong or CRDT updates muddying it. */
+  presenceSentCount: () => number;
+  presenceReceivedCount: () => number;
+  /** Rendered remote carets in this device's real CM6 view - the observable end of the whole path. */
+  remoteCaretCount: () => number;
+  remoteCaretNames: () => string[];
+  /** Moves the local selection the way a click or arrow key does. */
+  select: (from: number, to: number) => void;
+  view: EditorView;
+  openSecondPane: () => Promise<EditorView>;
+  closeSecondPane: () => Promise<void>;
 };
 
 function buildDevice(input: { baseUrl: string; deviceToken: string; name: string; roomId: string }): Device {
@@ -184,6 +205,9 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
   const room: MountedRoomState = { roomId: input.roomId, mountPath: MOUNT, files: {}, crdtEnabled: true, canPushLocalEdits: true };
   const sentCrdtMessages: SyncClientMessage[] = [];
   const receivedCrdtMessages: SyncServerMessage[] = [];
+  const presenceSent: SyncClientMessage[] = [];
+  const presenceReceived: SyncServerMessage[] = [];
+  const PRESENCE_TYPES = new Set(["presence_snapshot", "remote_presence", "presence_rejected"]);
   let editorOpen = false;
   let onSessionOpened = (): void => undefined;
   let onSessionRetiring = (_roomId: string, _relativePath: string): void => undefined;
@@ -193,6 +217,7 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
   const crdt = new CrdtSessionManager({
     send: (message) => {
       sentCrdtMessages.push(message);
+      if (message.type === "presence_set") presenceSent.push(message);
       socket.sendCrdtMessage(message);
     },
     docStore,
@@ -215,6 +240,7 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
     crdt: {
       handleServerMessage: async (message) => {
         receivedCrdtMessages.push(message);
+        if (PRESENCE_TYPES.has(message.type)) presenceReceived.push(message);
         await crdt.handleServerMessage(message);
       },
       handleRoomSnapshot: (roomId, files) => crdt.handleRoomSnapshot(roomId, files),
@@ -234,11 +260,16 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
   });
   sockets.push(socket);
 
-  const view = new EditorView({ state: EditorState.create({ doc: "", extensions: [controller.extension()] }) });
+  const view = new EditorView({
+    state: EditorState.create({ doc: "", extensions: [controller.extension()] }),
+    parent: document.body
+  });
   views.push(view);
+  let secondPane: EditorView | undefined;
   onSessionOpened = () => {
     if (editorOpen) {
-      void controller.syncOpenViews([{ vaultPath, view }]);
+      const open = secondPane ? [{ vaultPath, view }, { vaultPath, view: secondPane }] : [{ vaultPath, view }];
+      void controller.syncOpenViews(open);
     }
   };
   onSessionRetiring = (roomId, relativePath) => {
@@ -288,6 +319,38 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
     sessionOpen: () => crdt.isSessionOpen(room.roomId, NOTE),
     editorBound: () => controller.isBound(view),
     receivedCrdtTypes: () => receivedCrdtMessages.map((message) => message.type),
+    presenceSentCount: () => presenceSent.length,
+    presenceReceivedCount: () => presenceReceived.length,
+    remoteCaretCount: () => view.dom.querySelectorAll(".cm-ySelectionCaret").length,
+    remoteCaretNames: () =>
+      Array.from(view.dom.querySelectorAll(".cm-ySelectionInfo"), (node) => node.textContent ?? ""),
+    select: (from, to) => {
+      // focus() before dispatch: the selection only becomes a published cursor if the view is focused
+      // at the moment y-codemirror's update() runs.
+      view.focus();
+      view.dispatch({ selection: { anchor: from, head: to } });
+    },
+    view,
+    openSecondPane: async () => {
+      // Seeded with the note's current text, because that is what Obsidian hands a newly opened pane -
+      // and yCollab's documented usage is `doc: ytext.toString()`. An empty pane would leave every
+      // remote position pointing past the end of its document, so no caret could render.
+      const extra = new EditorView({
+        state: EditorState.create({ doc: view.state.doc.toString(), extensions: [controller.extension()] }),
+        parent: document.body
+      });
+      views.push(extra);
+      secondPane = extra;
+      await controller.syncOpenViews([
+        { vaultPath, view },
+        { vaultPath, view: extra }
+      ]);
+      return extra;
+    },
+    closeSecondPane: async () => {
+      secondPane = undefined;
+      await controller.syncOpenViews([{ vaultPath, view }]);
+    },
     sessionState: () => {
       const sessions = (crdt as unknown as { sessions: Map<string, { ytext: Y.Text; boundToEditor: boolean; epoch: number }> }).sessions;
       const session = [...sessions.values()].find((candidate) => candidate.epoch >= 0);
@@ -425,5 +488,176 @@ describe("CRDT two-client: unmount/remount then type", () => {
     b.type("+b");
     await waitFor(() => a.editorText() === "base+b", "A to receive B's post-remount edit");
     expect(a.editorText()).toBe(b.editorText());
+  });
+});
+
+// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
+// The same seam argument as the rest of this file: presence spans the relay, two sockets, two session
+// managers, and two real CM6 views, and the interesting failures (ghost carets, duplicated content,
+// idle chatter) only appear when all of those are real at once.
+describe("CRDT two-client: live cursors", () => {
+  /** Brings both devices to a converged open note - the precondition every presence test needs. */
+  async function converged() {
+    const fixture = await setupCrdtRoomWithTwoDevices();
+    const { a, b } = fixture;
+    a.vault.files.set(vaultPath, "");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await a.openEditor();
+    a.type("hello world");
+    await waitFor(() => a.editorText() === "hello world", "A's text to land");
+    await waitFor(async () => (await a.serverText()) === "hello world", "relay to materialize");
+    await b.openEditor();
+    await waitFor(() => b.editorBound(), "B's editor to bind");
+    await waitFor(() => b.editorText() === "hello world", "B to converge");
+    a.saveEditor();
+    b.saveEditor();
+    return fixture;
+  }
+
+  it("exchanges authenticated caret and selection state without changing text", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+
+    a.select(2, 6);
+    await waitFor(() => b.remoteCaretCount() > 0, "B to render A's caret");
+
+    // Identity is server-stamped: A never sent a display name, and B renders the authenticated one.
+    expect(b.remoteCaretNames()).toEqual(["A"]);
+    // Cursor traffic must never touch content, on either side or at the relay.
+    expect(a.editorText()).toBe("hello world");
+    expect(b.editorText()).toBe("hello world");
+    expect(await a.serverText()).toBe("hello world");
+
+    // Symmetric in the other direction.
+    b.select(0, 3);
+    await waitFor(() => a.remoteCaretCount() > 0, "A to render B's caret");
+    expect(a.remoteCaretNames()).toEqual(["B"]);
+    expect(a.editorText()).toBe("hello world");
+  });
+
+  it("coalesces a burst of selection movement into far fewer sends", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+
+    const before = a.presenceSentCount();
+    for (let index = 0; index < 10; index += 1) {
+      a.select(index % 8, (index % 8) + 1);
+    }
+    await waitFor(() => b.remoteCaretCount() > 0, "B to render A's caret");
+
+    // Ten selection changes inside one 50 ms window must not become ten frames.
+    expect(a.presenceSentCount() - before).toBeLessThan(10);
+    expect(a.presenceSentCount()).toBeGreaterThan(before);
+  });
+
+  it("emits no presence traffic while both cursors are steady", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+    a.select(2, 6);
+    b.select(1, 4);
+    await waitFor(() => a.remoteCaretCount() > 0 && b.remoteCaretCount() > 0, "both carets to render");
+
+    const counts = [a.presenceSentCount(), a.presenceReceivedCount(), b.presenceSentCount(), b.presenceReceivedCount()];
+    // Longer than two 800 ms cycles, with margin. Only application-level presence frames are counted -
+    // WebSocket ping/pong is deliberately excluded, since the socket keepalive is unrelated.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+    expect([a.presenceSentCount(), a.presenceReceivedCount(), b.presenceSentCount(), b.presenceReceivedCount()]).toEqual(
+      counts
+    );
+    // And the carets are still on screen - "no traffic" must not mean "expired".
+    expect(a.remoteCaretCount()).toBeGreaterThan(0);
+    expect(b.remoteCaretCount()).toBeGreaterThan(0);
+  });
+
+  it("leaves no ghost caret after an unmount/remount cycle", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+    a.select(2, 6);
+    await waitFor(() => b.remoteCaretCount() === 1, "B to render A's caret");
+
+    // A remount replaces A's Y.Doc and therefore its renderer key. Without the retraction in
+    // teardownSession, B would keep the old caret alongside the new one.
+    await a.remount();
+    await waitFor(() => b.remoteCaretCount() === 0, "B to drop A's retired caret");
+
+    await waitFor(() => a.editorBound(), "A's editor to rebind after remount");
+    a.select(3, 7);
+    await waitFor(() => b.remoteCaretCount() === 1, "B to render A's new caret");
+
+    // Exactly one caret, and content is untouched by any of it.
+    expect(b.remoteCaretCount()).toBe(1);
+    expect(b.remoteCaretNames()).toEqual(["A"]);
+    expect(a.editorText()).toBe("hello world");
+    expect(b.editorText()).toBe("hello world");
+    expect(await a.serverText()).toBe("hello world");
+  });
+
+  it("keeps one caret when a second pane closes and clears it after the last", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+    b.select(1, 4);
+    await waitFor(() => a.remoteCaretCount() === 1, "A to render B's caret");
+
+    const second = await a.openSecondPane();
+    a.select(2, 6);
+    await waitFor(() => b.remoteCaretCount() === 1, "B to render A's caret from the first pane");
+
+    // A freshly bound pane starts empty and only computes remote decorations on a later update pass, so
+    // the caret shows up when the peer next moves - which is also how it behaves in Obsidian.
+    b.select(5, 9);
+    await waitFor(
+      () => second.dom.querySelectorAll(".cm-ySelectionCaret").length === 1,
+      "second pane to render B's caret"
+    );
+    // Both panes render it: they share one presence store behind two facades.
+    expect(a.remoteCaretCount()).toBe(1);
+
+    await a.closeSecondPane();
+    // One pane is still open on the note, so A's presence survives.
+    expect(b.remoteCaretCount()).toBe(1);
+
+    await a.controller.syncOpenViews([]);
+    await waitFor(() => b.remoteCaretCount() === 0, "B to drop A's caret after the last pane closes");
+  });
+
+  it("clears a peer's caret when its socket drops", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+    a.select(2, 6);
+    await waitFor(() => b.remoteCaretCount() === 1, "B to render A's caret");
+
+    a.socket.disconnect();
+
+    // The relay owns disconnect cleanup - B does not wait for an Awareness timeout.
+    await waitFor(() => b.remoteCaretCount() === 0, "B to drop the disconnected peer's caret");
+    expect(b.editorText()).toBe("hello world");
+  });
+
+  it("preserves exactly-once bidirectional typing while cursors are active", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+    a.select(2, 6);
+    b.select(1, 4);
+    await waitFor(() => a.remoteCaretCount() > 0 && b.remoteCaretCount() > 0, "both carets to render");
+
+    a.type("!");
+    await waitFor(() => b.editorText() === "hello world!", "B to receive A's keystroke");
+    b.type("?");
+    await waitFor(() => a.editorText() === "hello world!?", "A to receive B's keystroke");
+
+    // The original no-duplication invariant, still intact with presence in the loop.
+    expect(a.editorText()).toBe("hello world!?");
+    expect(b.editorText()).toBe("hello world!?");
+    await waitFor(async () => (await a.serverText()) === "hello world!?", "relay to materialize both edits");
+  });
+
+  it("moves presence to the new path on rename without leaving a stale caret", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+    b.select(1, 4);
+    await waitFor(() => a.remoteCaretCount() === 1, "A to render B's caret");
+
+    // Obsidian renames the file itself before the watcher fires, so the vault move comes first.
+    await a.vault.rename(vaultPath, `${MOUNT}/renamed.md`);
+    await a.crdt.renameSession(a.room.roomId, NOTE, "renamed.md");
+
+    // The relay clears the old path's entries as part of the rename, so B's caret for the old path
+    // comes down rather than showing at two paths at once.
+    await waitFor(() => a.remoteCaretCount() === 0, "A to drop the old-path caret");
+    expect(a.editorText()).toBe("hello world");
+    expect(await b.serverText().catch(() => "missing")).toBe("missing");
   });
 });
