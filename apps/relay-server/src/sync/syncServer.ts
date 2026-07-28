@@ -52,7 +52,7 @@ export function handleSyncSocket(
     socket,
     principal: null,
     subscriptions: new Set(),
-    capabilities: { crdt: false }
+    capabilities: { crdt: false, presence: false }
   };
   registry.add(connection);
 
@@ -138,7 +138,13 @@ async function handleMessage(
       const principal = authenticateActiveDeviceToken(repo, message.token);
       repo.markDeviceTransport(principal.deviceId, options.transport);
       connection.principal = principal;
-      connection.capabilities = { crdt: Boolean(message.capabilities?.crdt) };
+      // Replaces the whole object, so every capability has to be named here - a field left out
+      // silently reverts to the pre-hello default rather than keeping what the client advertised.
+      // `presence` is gated on `crdt` because presence only exists for live CRDT documents.
+      connection.capabilities = {
+        crdt: Boolean(message.capabilities?.crdt),
+        presence: Boolean(message.capabilities?.crdt && message.capabilities?.presence)
+      };
       options.onAuthenticated();
       repo.audit({
         teamId: null,
