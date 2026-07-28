@@ -15,6 +15,12 @@ export function hasRoomPermission(input: {
   // rules once via repo.listAclRulesForRoom and pass them here, instead of re-querying per
   // recipient.
   aclRules?: AclRule[];
+  // Optional pre-resolved team IDs for this principal's user. The aclRules hoist above dedupes the
+  // *ACL* query across recipients but not the per-principal listUserTeams join, which otherwise runs
+  // once per recipient per message. Presence fanout runs at caret-movement frequency rather than
+  // per-edit, so it memoizes this for the duration of one message/sweep and passes it here; every
+  // other caller keeps the previous behavior by omitting it.
+  teamIds?: string[];
 }): boolean {
   const resource = input.permission.startsWith("room:")
     ? { type: "room" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id }
@@ -24,7 +30,7 @@ export function hasRoomPermission(input: {
       type: "user",
       id: input.principal.userId,
       userId: input.principal.userId,
-      teamIds: input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
+      teamIds: input.teamIds ?? input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
     },
     resource,
     permission: input.permission,

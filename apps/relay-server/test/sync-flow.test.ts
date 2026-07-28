@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { createApp } from "../src/app.js";
 import type { RelayRepository } from "../src/db/repositories/relayRepository.js";
 import { ConnectionRegistry } from "../src/sync/connectionRegistry.js";
+import type { PresenceService } from "../src/sync/presenceService.js";
 import type { CrdtDocManager } from "../src/sync/crdtDocManager.js";
 import { handleSyncSocket, type SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
@@ -734,7 +735,10 @@ describe("WebSocket admission timeout", () => {
       maxConnections: 5,
       transport: "http",
       timerHost: timers,
-      crdtDocManager: {} as unknown as CrdtDocManager
+      crdtDocManager: {} as unknown as CrdtDocManager,
+      // Admission/timeout behavior never reaches presence; a no-op stub keeps this fixture focused
+      // (matching the crdtDocManager cast above) rather than standing up a real registry.
+      presenceService: { removeConnection: () => undefined } as unknown as PresenceService
     });
 
     expect(registry.size()).toBe(1);
@@ -764,7 +768,10 @@ describe("WebSocket admission timeout", () => {
       maxConnections: 5,
       transport: "http",
       timerHost: timers,
-      crdtDocManager: {} as unknown as CrdtDocManager
+      crdtDocManager: {} as unknown as CrdtDocManager,
+      // Admission/timeout behavior never reaches presence; a no-op stub keeps this fixture focused
+      // (matching the crdtDocManager cast above) rather than standing up a real registry.
+      presenceService: { removeConnection: () => undefined } as unknown as PresenceService
     });
     authenticated.emitMessage(JSON.stringify({
       type: "hello",

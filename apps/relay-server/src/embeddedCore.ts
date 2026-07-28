@@ -17,6 +17,12 @@ export * from "./security/rotation.js";
 export { ConnectionRegistry } from "./sync/connectionRegistry.js";
 export { handleSyncSocket } from "./sync/syncServer.js";
 export type { SyncTimerHost } from "./sync/syncServer.js";
+// Live cursors (docs/superpowers/specs/2026-07-28-live-cursors-design.md). Both runtimes share one
+// PresenceService instance out of createRelayCore - never construct a second registry, or the two
+// halves of the relay would each own a partial view of who is editing what.
+export { PresenceRegistry } from "./sync/presenceRegistry.js";
+export type { PresenceEntry, PresenceTarget } from "./sync/presenceRegistry.js";
+export { PresenceService } from "./sync/presenceService.js";
 export { CrdtDocManager, CRDT_TEXT_KEY } from "./sync/crdtDocManager.js";
 export type { CrdtMaterializedEvent, CrdtUpdatedBy } from "./sync/crdtDocManager.js";
 export { createRelayCore, createCrdtMaterializedHandler } from "./relayCore.js";

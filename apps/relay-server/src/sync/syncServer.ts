@@ -8,6 +8,7 @@ import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 import type { CrdtDocManager } from "./crdtDocManager.js";
+import type { PresenceService } from "./presenceService.js";
 
 export type SyncTimerHost = {
   setInterval(callback: () => void, delayMs: number): unknown;
@@ -20,7 +21,13 @@ export function registerSyncRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number; timerHost: SyncTimerHost; crdtDocManager: CrdtDocManager }
+  options: {
+    maxFileBytes: number;
+    maxConnections: number;
+    timerHost: SyncTimerHost;
+    crdtDocManager: CrdtDocManager;
+    presenceService: PresenceService;
+  }
 ): void {
   app.get("/sync", { websocket: true }, (socket, request) => {
     handleSyncSocket(socket, repo, registry, { ...options, transport: requestTransport(request) });
@@ -40,6 +47,7 @@ export function handleSyncSocket(
     transport: RequestTransport;
     timerHost: SyncTimerHost;
     crdtDocManager: CrdtDocManager;
+    presenceService: PresenceService;
   }
 ): void {
   if (registry.size() >= options.maxConnections) {
@@ -94,6 +102,16 @@ export function handleSyncSocket(
   socket.on("close", () => {
     clearHelloTimeout();
     options.timerHost.clearInterval(ping);
+    // The single canonical disconnect hook. The forced-close helpers on ConnectionRegistry
+    // (closeRevokedUser/Device, closeDeviceConnections, closeLegacyPlainTokenConnections) never call
+    // registry.remove themselves - they rely on this event firing - so clearing presence here covers
+    // revocation and TLS enforcement too. Guarded like the audit write below, because the server may
+    // already be tearing down.
+    try {
+      options.presenceService.removeConnection(connection);
+    } catch (error) {
+      console.warn("Vault Rooms relay: could not clear disconnected presence", error);
+    }
     if (connection.principal) {
       try {
         repo.audit({
@@ -122,6 +140,7 @@ async function handleMessage(
     transport: RequestTransport;
     onAuthenticated: () => void;
     crdtDocManager: CrdtDocManager;
+    presenceService: PresenceService;
   },
   raw: string
 ): Promise<void> {
@@ -179,7 +198,20 @@ async function handleMessage(
   if (message.type === "unsubscribe_room") {
     // Idempotent local lifecycle operation: removing a room the connection never subscribed to is
     // harmless, and needs no room lookup/permission check because it can only reduce delivery.
+    // Presence is cleared explicitly and *before* the subscription is dropped: this branch mutates
+    // connection.subscriptions directly and never notifies ConnectionRegistry, so nothing else would
+    // hear about it - and the removal fanout below needs the subscription still in place to reach the
+    // room's other members.
+    options.presenceService.removeConnectionRoom(connection, message.roomId);
     connection.subscriptions.delete(message.roomId);
+    return;
+  }
+
+  if (message.type === "presence_set") {
+    // Ephemeral and fire-and-forget: no ack, and a rejection never tears down the CRDT session.
+    // rawBytes is measured from the original frame rather than re-serialized, so the cap reflects
+    // what actually crossed the wire.
+    options.presenceService.handleSet(connection, message, Buffer.byteLength(raw, "utf8"));
     return;
   }
 
@@ -366,6 +398,9 @@ async function handleMessage(
       });
       if (beforeDelete) {
         options.crdtDocManager.evictDocument(beforeDelete.id, beforeDelete.crdt_epoch);
+        // Same reasoning as the eviction above, for presence: the delete bumped the epoch, so any
+        // live cursor is pinned to an epoch that no longer exists. Uses the *pre-delete* epoch.
+        options.presenceService.removeDocument(room.id, relativePath, beforeDelete.crdt_epoch);
       }
       sendJson(connection.socket, {
         type: "file_delete_ack",
@@ -510,6 +545,11 @@ async function handleMessage(
         // whichever path it actually landed on, rather than rejecting with no way forward.
         actorDisplayName: connection.principal.userDisplayName
       });
+      // A rename is path-only and deliberately leaves crdt_epoch untouched, so presence keyed by
+      // (roomId, relativePath, epoch) does *not* follow the document - it would orphan at the old
+      // path and render a second caret for the same person. Clear the old path before either side
+      // learns about the rename; each client re-announces at the new path after its own handshake.
+      options.presenceService.removeDocument(room.id, result.oldRelativePath, result.epoch);
       sendJson(connection.socket, {
         type: "crdt_renamed",
         requestId: message.requestId,

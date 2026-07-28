@@ -7,6 +7,7 @@ import type { TeamRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import type { PresenceService } from "../sync/presenceService.js";
 import { toInviteResponse, type InviteSecurityContext } from "./inviteResponse.js";
 import { requestTransport } from "./security.routes.js";
 
@@ -16,6 +17,9 @@ export type TeamRoutesOptions = {
   /** Unguessable per-process PIN required by POST /api/bootstrap - see security/bootstrapPin.ts. */
   bootstrapPin: string;
   connectionRegistry?: ConnectionRegistry;
+  /** Live cursors: team membership changes can narrow a path-scoped grant, which the room-level
+   *  revalidation cannot detect - see the sweep call sites below. */
+  presenceService?: PresenceService;
   security?: InviteSecurityContext;
 };
 
@@ -182,6 +186,10 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     const body = request.body as Partial<{ reason: string }> | undefined;
     repo.revokeMember({ teamId, userId, actorUserId: principal.userId, reason: body?.reason });
     revalidateRoomAccess(repo, options.connectionRegistry);
+    // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
+    // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
+    // at all. This path-aware sweep is what actually removes that cursor.
+    options.presenceService?.revalidate();
     return { ok: true };
   });
 
@@ -197,6 +205,10 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     }
     repo.deleteTeam({ teamId, actorUserId: principal.userId });
     revalidateRoomAccess(repo, options.connectionRegistry);
+    // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
+    // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
+    // at all. This path-aware sweep is what actually removes that cursor.
+    options.presenceService?.revalidate();
     return { ok: true };
   });
 }

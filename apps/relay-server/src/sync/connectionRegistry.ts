@@ -70,7 +70,15 @@ export class ConnectionRegistry {
       ) {
         continue;
       }
-      sendJson(connection.socket, message);
+      // One recipient's failing socket must not silently truncate delivery to everyone after it in
+      // this loop. Presence made this materially more likely (fanout runs at caret-movement
+      // frequency), but the hazard predates it and applies to every broadcast. Deliberately does not
+      // close the socket - its own error/close lifecycle stays canonical and owns cleanup.
+      try {
+        sendJson(connection.socket, message);
+      } catch (error) {
+        console.warn("Vault Rooms relay: could not deliver a room broadcast", error);
+      }
     }
   }
 

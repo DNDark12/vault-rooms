@@ -52,6 +52,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     bootstrapPin,
     bootstrapRateLimiter,
     rotationProbeRateLimiter,
+    presenceService,
     maxFileBytes,
     maxConnections
   } = core;
@@ -136,14 +137,16 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
     bootstrapPin,
     connectionRegistry,
+    presenceService,
     security: inviteSecurity
   });
   const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
-  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity, crdtDocManager });
+  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, presenceService, security: inviteSecurity, crdtDocManager });
   registerFriendRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity });
   registerFileRoutes(app, repo, {
     maxFileBytes,
     connectionRegistry,
+    presenceService,
     crdtDocManager
   });
   registerAuditRoutes(app, repo);
@@ -151,7 +154,13 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     registerSecurityRoutes(app, repo, { runtime: security.runtime, connectionRegistry, rotationProbeRateLimiter });
   }
   void app.register(async (syncApp) => {
-    registerSyncRoutes(syncApp, repo, connectionRegistry, { maxFileBytes, maxConnections, timerHost: nodeSyncTimerHost, crdtDocManager });
+    registerSyncRoutes(syncApp, repo, connectionRegistry, {
+      maxFileBytes,
+      maxConnections,
+      timerHost: nodeSyncTimerHost,
+      crdtDocManager,
+      presenceService
+    });
   });
 
   app.addHook("onClose", async () => {

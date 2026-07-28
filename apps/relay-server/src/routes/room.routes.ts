@@ -8,6 +8,7 @@ import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
 import type { CrdtDocManager } from "../sync/crdtDocManager.js";
+import type { PresenceService } from "../sync/presenceService.js";
 import { toInviteResponse, type InviteSecurityContext } from "./inviteResponse.js";
 
 const LISTED_PERMISSIONS: Permission[] = [
@@ -30,6 +31,10 @@ export type RoomRoutesOptions = {
    *  Y.Doc for each one (contract 1.4/1.5's "conversion never discards content") - optional only so
    *  tests/callers that never toggle crdtEnabled can omit it. */
   crdtDocManager?: CrdtDocManager;
+  /** Live cursors: presence has to be cleared when a room is deleted or leaves the CRDT lane, and
+   *  re-checked per path whenever an ACL mutation lands (the existing room-level revalidation cannot
+   *  see a single path losing `file:read`). Optional for callers that never touch presence. */
+  presenceService?: PresenceService;
 };
 
 export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, options: RoomRoutesOptions): void {
@@ -162,6 +167,11 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
           }
           return room;
         });
+        if (!crdtEnabled) {
+          // Leaving the CRDT lane retires every document in the room, so presence has nothing left to
+          // attach to. Enabling needs no equivalent - there is no presence yet to clear.
+          options.presenceService?.removeRoom(roomId);
+        }
         options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_mode_changed", roomId, crdtEnabled });
       }
       const teamIds = repo.listUserTeams(principal.userId).map((team) => team.teamId);
@@ -225,6 +235,10 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       pathPattern: body.pathPattern
     });
     revalidateRoomAccess(repo, options.connectionRegistry);
+    // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
+    // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
+    // at all. This path-aware sweep is what actually removes that cursor.
+    options.presenceService?.revalidate();
     return { aclRule };
   });
 
@@ -237,6 +251,10 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     }
     repo.deleteAclRule({ aclId, roomId, actorUserId: principal.userId });
     revalidateRoomAccess(repo, options.connectionRegistry);
+    // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
+    // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
+    // at all. This path-aware sweep is what actually removes that cursor.
+    options.presenceService?.revalidate();
     return { ok: true };
   });
 
@@ -247,6 +265,10 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     if (!canManageRoom(principal, room)) {
       throw new AppError("PERMISSION_DENIED", "Only the room owner or server owner can delete rooms.", 403);
     }
+    // Before deleteRoom, not after: the removal fanout has to evaluate per-recipient `file:read`, and
+    // once the room (and its cascaded ACL rules) are gone that is no longer possible - the retraction
+    // would be dropped rather than delivered.
+    options.presenceService?.removeRoom(roomId);
     repo.deleteRoom({ roomId, actorUserId: principal.userId });
     options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_deleted", roomId });
     return { ok: true };
