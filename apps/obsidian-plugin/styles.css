@@ -362,3 +362,34 @@
 .vault-rooms-diagnostic-summary.is-fail {
   color: var(--text-error);
 }
+
+/* Live cursors / note presence (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
+ *
+ * The palette is consumed by crdtPresence.ts's presenceColor(), which returns these as CSS
+ * expressions rather than resolved colors - y-codemirror.next injects the caret/selection color as an
+ * inline style attribute, so referencing the variables directly is what makes a remote caret
+ * theme-aware without CSS having to out-specify an inline value. Each entry carries a literal fallback
+ * because the semantic --color-* variables are theme-provided and a minimal theme may omit some.
+ * Keep the count in sync with PALETTE_SIZE in crdtPresence.ts. */
+body {
+  --vault-rooms-presence-0: var(--color-red, #e5484d);
+  --vault-rooms-presence-1: var(--color-orange, #f76b15);
+  --vault-rooms-presence-2: var(--color-yellow, #f5d90a);
+  --vault-rooms-presence-3: var(--color-green, #46a758);
+  --vault-rooms-presence-4: var(--color-cyan, #05a2c2);
+  --vault-rooms-presence-5: var(--color-blue, #3e63dd);
+  --vault-rooms-presence-6: var(--color-purple, #8e4ec6);
+  --vault-rooms-presence-7: var(--color-pink, #d6409f);
+}
+
+/* The only styling CSS owns here. y-codemirror.next's base theme hardcodes `color: white` and
+ * `font-family: serif` on the name label, both of which look wrong in Obsidian; these are ordinary
+ * (non-inline) base-theme rules, so a higher-specificity selector overrides them normally. The caret
+ * and selection colors are deliberately left to the adapter's inline values - no !important needed. */
+.workspace-leaf-content .cm-ySelectionInfo {
+  color: var(--text-on-accent, #fff);
+  font-family: var(--font-interface, sans-serif);
+  font-size: var(--font-ui-smaller, 12px);
+  border-radius: var(--radius-s, 4px);
+  padding: 1px 4px;
+}

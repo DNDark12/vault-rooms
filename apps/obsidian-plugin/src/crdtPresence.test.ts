@@ -562,6 +562,25 @@ describe("presenceColor", () => {
     expect(colorLight).not.toBe(`${color}33`);
   });
 
+  it("only ever names palette slots that styles.css actually defines", async () => {
+    // The palette lives in CSS but is indexed from TS, so drift between PALETTE_SIZE and the number of
+    // --vault-rooms-presence-N declarations would silently yield `var(--undefined-slot)` - a caret with
+    // no color, in a build that typechecks and passes every other test.
+    const fs = await import("node:fs");
+    const css = fs.readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+    const declared = new Set([...css.matchAll(/--vault-rooms-presence-(\d+)\s*:/g)].map((match) => match[1]));
+    expect(declared.size).toBeGreaterThan(0);
+
+    const used = new Set(
+      Array.from({ length: 512 }, (_unused, index) => presenceColor(`usr_${index}`).color).map(
+        (color) => /presence-(\d+)\)/.exec(color)![1]
+      )
+    );
+    for (const slot of used) {
+      expect(declared, `slot ${slot} is used by presenceColor but not declared in styles.css`).toContain(slot);
+    }
+  });
+
   it("spreads users across the palette", () => {
     const slots = new Set(
       ["usr_a", "usr_b", "usr_c", "usr_d", "usr_e", "usr_f", "usr_g", "usr_h", "usr_i", "usr_j"].map(
