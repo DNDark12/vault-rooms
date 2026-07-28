@@ -85,6 +85,12 @@ class FakeCrdtBridge implements CrdtWsBridge {
 
   onConnected(): void {}
 
+  disconnectCount = 0;
+
+  onDisconnected(): void {
+    this.disconnectCount += 1;
+  }
+
   registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void {
     this.registeredEpochs.push({ roomId, relativePath, epoch });
   }
@@ -431,6 +437,50 @@ describe("RoomSyncSocket reconnect ordering", () => {
     socket.disconnect();
   });
 
+  // The pinned-failure branch returns from the close handler before any setState, and its retry/normal
+  // decisions reopen the socket without ever leaving "connected". Notifying the CRDT lane only from setState
+  // therefore missed this path entirely, leaving a crdt_rename/crdt_create waiting on a reply from a socket
+  // that no longer exists - the exact hang the disconnect handling was added to prevent.
+  it("fails in-flight CRDT requests when a pinned transport failure closes the socket", async () => {
+    const sockets = stubControllableWebSockets();
+    let resolveDecision!: (decision: "normal") => void;
+    const onPinnedTransportFailure = vi.fn().mockReturnValue(
+      new Promise<"normal">((resolve) => {
+        resolveDecision = resolve;
+      })
+    );
+    vi.spyOn(window, "setTimeout").mockImplementation(((callback: TimerHandler, delay?: number) => {
+      void callback;
+      void delay;
+      return 1;
+    }) as typeof window.setTimeout);
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const server = createServer();
+    const crdt = new FakeCrdtBridge(false);
+    const socket = new RoomSyncSocket(server, { ...createDeps(), crdt, onPinnedTransportFailure });
+
+    socket.connect();
+    await flushAsyncWork();
+    // Reach a genuinely connected socket first: the pinned branch below never leaves that state, which is
+    // precisely why notifying only from `setState` missed it. Counting from here makes the assertion mean
+    // "the close itself failed the pending requests", not "connect() happened to fire it earlier".
+    sockets[0]?.emit("open");
+    await flushAsyncWork();
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+    expect(socket.getState()).toBe("connected");
+    const disconnectsWhileConnected = crdt.disconnectCount;
+
+    server.securityMode = "pinned-tls";
+    sockets[0]?.emit("error", { error: new Error("certificate changed") });
+    sockets[0]?.emit("close", { code: 1006 });
+    resolveDecision("normal");
+    await flushAsyncWork();
+
+    expect(crdt.disconnectCount).toBeGreaterThan(disconnectsWhileConnected);
+    socket.disconnect();
+  });
+
   it("does not block a new socket hello behind a slow apply from the prior generation", async () => {
     const sockets = stubControllableWebSockets();
     const reconnects: Array<() => void> = [];
@@ -604,6 +654,7 @@ describe("RoomSyncSocket room subscription lifecycle", () => {
       handleServerMessage,
       handleRoomSnapshot: () => undefined,
       onConnected: () => undefined,
+      onDisconnected: () => undefined,
       registerKnownEpoch: () => undefined,
       isSessionOpen: () => false
     };

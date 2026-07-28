@@ -219,6 +219,7 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
       },
       handleRoomSnapshot: (roomId, files) => crdt.handleRoomSnapshot(roomId, files),
       onConnected: () => crdt.onConnected(),
+    onDisconnected: () => crdt.onDisconnected(),
       registerKnownEpoch: (roomId, relativePath, epoch) => crdt.registerKnownEpoch(roomId, relativePath, epoch),
       isSessionOpen: (roomId, relativePath) => crdt.isSessionOpen(roomId, relativePath)
     },

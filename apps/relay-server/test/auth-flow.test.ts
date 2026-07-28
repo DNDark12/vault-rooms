@@ -86,4 +86,54 @@ describe("server bootstrap and invite flow", () => {
       expect.objectContaining({ displayName: "B", role: "member", revokedAt: null })
     ]);
   });
+
+  // Onboarding: the host cannot enumerate its own network interfaces (Obsidian's plugin review treats that as
+  // fingerprinting), so the address teammates actually reach it on is the one legitimate signal available for
+  // spotting a stale Public URL override - the failure mode that otherwise only surfaces as a teammate saying
+  // "I can't connect", long after a DHCP lease changed.
+  it("records the host a remote client connected with, and reports it to the owner only", async () => {
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+
+    const invite = (
+      await app.inject({
+        method: "POST",
+        url: `/api/teams/${owner.team.id}/invites`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+      })
+    ).json();
+    const member = (
+      await app.inject({
+        method: "POST",
+        url: "/api/join",
+        payload: { inviteToken: invite.inviteToken, displayName: "B", deviceName: "B laptop" }
+      })
+    ).json();
+
+    // The teammate reaches the server on its real LAN address.
+    await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { authorization: `Bearer ${member.deviceToken}`, host: "192.168.12.21:8787" }
+    });
+
+    const ownerView = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { authorization: `Bearer ${owner.deviceToken}`, host: "127.0.0.1:8787" }
+    });
+    // The owner's own loopback request must not overwrite the useful observation.
+    expect(ownerView.json().observedClientHost).toMatchObject({ host: "192.168.12.21" });
+
+    const memberView = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { authorization: `Bearer ${member.deviceToken}`, host: "192.168.12.21:8787" }
+    });
+    // Only the owner can act on it, and only they should see where others connect from.
+    expect(memberView.json().observedClientHost).toBeUndefined();
+
+    await app.close();
+  });
 });

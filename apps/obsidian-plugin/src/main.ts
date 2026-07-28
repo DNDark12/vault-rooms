@@ -55,6 +55,9 @@ function crdtRenameMarkerKey(roomId: string, oldRelativePath: string, newRelativ
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
   visibleRooms: RoomSummary[] = [];
+  /** Owner-only signal from the relay: the address a teammate actually connected on. Null until someone has,
+   *  and for non-owners. Refreshed by refreshTeams(); see advertisedAddressDrift for how it's used. */
+  private observedClientHost: string | null = null;
   /** This device's own teams (with ownerUserId) - scoped to the caller's memberships by the server
    *  (server owner sees all). Used for team-management UI (Invite link/Delete team/members), which
    *  needs ownerUserId/role - never use this for the room ACL "Team" picker. */
@@ -349,6 +352,12 @@ export default class VaultRoomsPlugin extends Plugin {
 
   getServerStatus(): EmbeddedServerStatus {
     return this.serverConnectionManager.getServerStatus();
+  }
+
+  /** The address a teammate last reached this server on (owner only, null until someone connects). Compared
+   *  against the advertised LAN URL to warn about a stale Public URL override - see advertisedAddressDrift. */
+  getObservedClientHost(): string | null {
+    return this.observedClientHost;
   }
 
   getLanShareReachability(): LanShareReachability {
@@ -653,6 +662,9 @@ export default class VaultRoomsPlugin extends Plugin {
         throw error;
       }
     }
+    // Owner-only, and absent until a teammate has actually connected - see advertisedAddressDrift for what
+    // it's compared against and why that comparison is the only way to notice a stale Public URL override.
+    this.observedClientHost = me.observedClientHost?.host ?? null;
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
     this.teamDirectory = directoryResult.teams;
@@ -1096,7 +1108,13 @@ export default class VaultRoomsPlugin extends Plugin {
       }
       openViews.push({ vaultPath: view.file.path, view: cmView });
     }
-    void this.crdtEditorController.syncOpenViews(openViews);
+    // A bind that fails is a normal, recoverable outcome (the controller now drops the failed entry so
+    // the next reconcile retries), but `void` on its own attaches no rejection handler - the failure
+    // would surface as an unhandled promise rejection in Obsidian's console on every reconcile pass
+    // instead of one attributable line.
+    void this.crdtEditorController.syncOpenViews(openViews).catch((error: unknown) => {
+      console.error("Vault Rooms: failed to bind a CRDT editor view", error);
+    });
   }
 
   /**
@@ -1224,6 +1242,9 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   private resetSessionState(): void {
+    // Scoped to the active server: leaving it stale would compare another server's observation against this
+    // device's own hosted LAN URL and warn about drift that doesn't exist.
+    this.observedClientHost = null;
     this.visibleRooms = [];
     this.teams = [];
     this.teamDirectory = [];

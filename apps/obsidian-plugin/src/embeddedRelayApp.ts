@@ -147,7 +147,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
         }
       : undefined;
   };
-  registerAuthRoutes(routeApp, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity });
+  registerAuthRoutes(routeApp, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity, publicUrl: options.publicUrl });
   registerTeamRoutes(routeApp, repo, {
     get publicUrl() {
       return app.getPublicUrl();

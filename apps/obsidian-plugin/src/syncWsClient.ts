@@ -85,6 +85,14 @@ export class RoomSyncSocket {
       return;
     }
     this.state = state;
+    // Every path that loses the connection funnels through here, which makes this the one place that
+    // can reliably tell the CRDT lane its in-flight requests will never be answered. Without it a
+    // `crdt_rename` (or `crdt_create`) interrupted by a dropped socket left its promise pending
+    // forever, so main.ts's fallback never ran and the session stayed orphaned under the old path
+    // while the file on disk had already moved.
+    if (state !== "connected") {
+      this.deps.crdt?.onDisconnected();
+    }
     this.deps.onStateChange?.(state);
   }
 
@@ -218,6 +226,12 @@ export class RoomSyncSocket {
       this.socket = null;
       this.helloAcked = false;
       this.upgradeProbeRequested = false;
+      // Announced here, not only from `setState`, because several paths below leave the state alone: the
+      // pinned-transport branch returns early to let its classifier decide, and its `retry`/`normal`
+      // decisions reopen the socket without ever leaving `"connected"`. The socket is gone either way, so
+      // anything waiting on a reply from it must be failed now - otherwise a `crdt_rename`/`crdt_create`
+      // in flight across a pinned failure hangs forever, which is exactly what this was meant to prevent.
+      this.deps.crdt?.onDisconnected();
       const code = (event as CloseEvent | undefined)?.code;
       if (code === 4001 || code === 4002) {
         // The server deliberately invalidated this credential. The workflow that caused the
@@ -289,10 +303,12 @@ export class RoomSyncSocket {
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
   }
 
-  private send(message: SyncClientMessage): void {
+  private send(message: SyncClientMessage): boolean {
     if (this.socket && this.socket.readyState === NodeWebSocket.OPEN) {
       this.socket.send(JSON.stringify(message));
+      return true;
     }
+    return false;
   }
 
   private isCurrentGeneration(generation: number): boolean {
@@ -457,8 +473,12 @@ export class RoomSyncSocket {
   /** Passthrough for the CRDT session bridge to send client->server CRDT-lane messages through
    *  this socket's normal send() (which already guards on OPEN readyState) - kept as its own method
    *  rather than exposing send() itself, since send() is otherwise private implementation detail. */
-  sendCrdtMessage(message: SyncClientMessage): void {
-    this.send(message);
+  /** Returns false when the socket wasn't open, so the CRDT lane can fail the request instead of waiting for
+   *  a reply that was never asked for. A silently dropped `crdt_rename` used to park its promise forever:
+   *  `renameChains` then held a never-settling link and every later `ensureSession` for that path hung too,
+   *  which only unblocked on the *next* disconnect. */
+  sendCrdtMessage(message: SyncClientMessage): boolean {
+    return this.send(message);
   }
 
   private enqueueRemoteApply(operation: () => Promise<void>): Promise<void> {

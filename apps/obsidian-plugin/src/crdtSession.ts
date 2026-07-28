@@ -81,7 +81,9 @@ export type CrdtSession = {
 };
 
 export type CrdtSessionManagerDeps = {
-  send: (message: SyncClientMessage) => void;
+  /** Returns false when the socket wasn't open and the message was dropped. Anything that waits for a reply
+   *  must treat that as an immediate failure - see `performRename`/`ensureEpoch`. */
+  send: (message: SyncClientMessage) => boolean | void;
   docStore: CrdtDocStore;
   isRoomCrdtEnabled: (roomId: string) => boolean;
   /** Reads the current on-disk text for reconciliation. Returns null if the file doesn't exist
@@ -124,6 +126,9 @@ export interface CrdtWsBridge {
    *  edit made while offline, since the server's reply to this step1 request is what will surface
    *  it wants the client's missing update). */
   onConnected(): void;
+  /** Called when the connection is lost, so requests waiting on a server reply can be failed instead of
+   *  hanging forever - see the implementation for the orphaned-rename bug that caused. */
+  onDisconnected(): void;
   /** Records a document's epoch learned from a `remote_file_change` announce/materialize, so the disk
    *  write it triggers can't make this device try to create a document the server already has - see
    *  the implementation's doc comment for the feedback loop this prevents. */
@@ -210,6 +215,29 @@ export class CrdtSessionManager implements CrdtWsBridge {
     for (const session of this.sessions.values()) {
       this.startHandshake(session);
     }
+  }
+
+  /**
+   * Fails every request that was waiting on a server reply, because that reply is never coming once the
+   * connection is gone. Only the two request kinds whose callers have real recovery logic are settled:
+   * `renameSession`'s promise (main.ts decides between creating at the new path and leaving both paths
+   * alone) and `ensureEpoch`'s create (its caller reports the failure and the next vault event retries).
+   * Leaving them pending was a live bug: a `crdt_rename` interrupted by a dropped socket never resolved
+   * *or* rejected, so main.ts's fallback never ran and the session stayed keyed to the old path while the
+   * file on disk had already moved. Pending handshakes need no such treatment - `onConnected` restarts
+   * one for every open session on reconnect.
+   */
+  onDisconnected(): void {
+    const reason = new Error("The connection to the server was lost before this request was answered.");
+    for (const [requestId, pending] of [...this.pendingRename.entries()]) {
+      this.pendingRename.delete(requestId);
+      pending.reject(reason);
+    }
+    for (const [requestId, pending] of [...this.pendingCreate.entries()]) {
+      this.pendingCreate.delete(requestId);
+      pending.reject(reason);
+    }
+    this.pendingHandshake.clear();
   }
 
   isSessionOpen(roomId: string, relativePath: string): boolean {
@@ -377,7 +405,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
     const requestId = this.createRequestId();
     const acked = await new Promise<{ epoch: number; relativePath: string }>((resolve, reject) => {
       this.pendingRename.set(requestId, { resolve, reject });
-      this.deps.send({ type: "crdt_rename", requestId, roomId, oldRelativePath, relativePath: newRelativePath });
+      // A dropped send never produces a reply, so waiting on one would hang this promise - and with it the
+      // room's rename chain and every later ensureSession for the destination path.
+      if (this.deps.send({ type: "crdt_rename", requestId, roomId, oldRelativePath, relativePath: newRelativePath }) === false) {
+        this.pendingRename.delete(requestId);
+        reject(new Error("Not connected to the server, so the rename was not sent."));
+      }
     });
     await this.rekeyLocalState(roomId, oldRelativePath, acked.relativePath, acked.epoch);
     if (acked.relativePath !== newRelativePath) {
@@ -446,6 +479,18 @@ export class CrdtSessionManager implements CrdtWsBridge {
     this.knownEpoch.delete(oldKey);
     this.knownEpoch.set(newKey, epoch);
     await this.deps.docStore.rename(roomId, oldRelativePath, newRelativePath, epoch);
+
+    // Re-offer whatever the document holds now, under the path it actually lives at. An edit typed while
+    // the rename was awaiting its ack was forwarded under the *old* path and rejected by the server
+    // (NOT_FOUND, since the rename had already committed there). The edit survives in the Y.Doc, but
+    // without this it would sit unsent until some later reconnect happened to run a handshake. The
+    // handshake is a state-vector exchange, so it costs nothing when there is nothing outstanding.
+    // Re-read from the map rather than trusting the pre-await reference: the room can be unmounted during the
+    // docStore write above, in which case teardownSession has already destroyed this doc and swept its pending
+    // handshakes - starting another would leak an entry and emit traffic for a room this device no longer has.
+    if (session && this.sessions.get(newKey) === session) {
+      this.startHandshake(session);
+    }
   }
 
   private async openSession(roomId: string, requestedPath: string, requestedKey: string, brandNewNote: boolean): Promise<CrdtSession> {
@@ -631,6 +676,15 @@ export class CrdtSessionManager implements CrdtWsBridge {
       return;
     }
     const key = sessionKey(roomId, relativePath);
+    // Only re-establish a path this device still holds a session for. A rejection can also arrive for a path
+    // we have already *moved away from*: an edit typed in the rename-ack window is forwarded under the old
+    // path and the server answers NOT_FOUND once the rename has committed there. Recovering that would
+    // `crdt_create` the old path again and recreate the very duplicate the rename protocol exists to avoid.
+    // Nothing is lost by skipping it - the document itself lives on under the new key, and `rekeyLocalState`
+    // starts a handshake there that re-offers whatever that edit added.
+    if (!this.sessions.has(key)) {
+      return;
+    }
     if (this.recoveringPaths.has(key)) {
       return;
     }
@@ -846,7 +900,10 @@ export class CrdtSessionManager implements CrdtWsBridge {
       // `adoptIfExists` unless this is a note the user *just created*. Reopening something we already
       // have (remount, editor bind, remote update, recovery) must attach to the existing document; only
       // a genuinely new note may be treated as a second, different note and disambiguated.
-      this.deps.send({ type: "crdt_create", requestId, roomId, relativePath, adoptIfExists: !brandNewNote });
+      if (this.deps.send({ type: "crdt_create", requestId, roomId, relativePath, adoptIfExists: !brandNewNote }) === false) {
+        this.pendingCreate.delete(requestId);
+        reject(new Error("Not connected to the server, so the document could not be created."));
+      }
     });
   }
 

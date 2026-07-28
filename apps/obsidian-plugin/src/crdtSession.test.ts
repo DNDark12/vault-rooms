@@ -71,7 +71,12 @@ function createHarness(overrides: Partial<CrdtSessionManagerDeps> = {}, docStore
   const renames: Array<{ roomId: string; oldRelativePath: string; newRelativePath: string }> = [];
   let counter = 0;
   const manager = new CrdtSessionManager({
-    send: (message) => sent.push(message),
+    // Returns true: the harness's socket is always "open". A test that needs the dropped-send path
+    // overrides `send` explicitly.
+    send: (message) => {
+      sent.push(message);
+      return true;
+    },
     docStore,
     isRoomCrdtEnabled: () => true,
     readDiskText: async (roomId, relativePath) => disk.get(`${roomId}/${relativePath}`) ?? null,
@@ -851,6 +856,104 @@ describe("CrdtSessionManager - rename ordering (sixth hardware-testing round, 20
     expect(harness.renames).toContainEqual({ roomId: "room_1", oldRelativePath: "b.md", newRelativePath: "b (Teammate).md" });
     expect(harness.disk.get("room_1/b (Teammate).md")).toBe("the note the user just renamed");
     expect(reassignments).toEqual([{ requested: "b.md", assigned: "b (Teammate).md" }]);
+  });
+
+  // Eighteenth round follow-up: a crdt_rename in flight when the socket dropped left its promise pending
+  // forever, so main.ts's fallback never ran and the session stayed keyed to the old path while the file
+  // on disk had already moved. Losing the connection must fail the request, not strand it.
+  it("rejects an in-flight rename when the connection drops, so the caller's fallback can run", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "a.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "a.md");
+
+    const renamePromise = harness.manager.renameSession("room_1", "a.md", "b.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+
+    harness.manager.onDisconnected();
+
+    await expect(renamePromise).rejects.toThrow(/connection to the server was lost/i);
+    // The old session is left intact - nothing was renamed, so nothing should have been rekeyed.
+    expect(harness.manager.isSessionOpen("room_1", "a.md")).toBe(true);
+  });
+
+  // A rejection can arrive for a path this device has already renamed away from: an edit typed in the
+  // rename-ack window goes out under the old path, and the server answers NOT_FOUND once the rename has
+  // committed. Recovering that would crdt_create the old path again - recreating exactly the duplicate the
+  // rename protocol exists to prevent.
+  it("does not re-create a document for a path it has already renamed away from", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "a.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "a.md");
+
+    const renamePromise = harness.manager.renameSession("room_1", "a.md", "b.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "a.md",
+      relativePath: "b.md",
+      epoch: 0
+    });
+    await renamePromise;
+    harness.sent.length = 0;
+
+    // The late rejection of an update that was sent under the old path, after the rename committed.
+    await ack(harness, {
+      type: "crdt_rejected",
+      roomId: "room_1",
+      relativePath: "a.md",
+      code: "NOT_FOUND",
+      message: "No CRDT document exists at this path yet - send crdt_create first."
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(false);
+    expect(harness.manager.isSessionOpen("room_1", "a.md")).toBe(false);
+    expect(harness.manager.isSessionOpen("room_1", "b.md")).toBe(true);
+  });
+
+  it("rejects an in-flight first-create when the connection drops", async () => {
+    const harness = createHarness();
+    const opening = harness.manager.ensureSession("room_1", "fresh.md", { brandNewNote: true });
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+
+    harness.manager.onDisconnected();
+
+    await expect(opening).rejects.toThrow(/connection to the server was lost/i);
+  });
+
+  // Same round: an edit typed while a rename awaited its ack was forwarded under the old path and
+  // rejected there, then sat unsent until some later reconnect happened to run a handshake. Rekeying now
+  // starts one immediately, which re-offers whatever the document holds under the path it really lives at.
+  it("starts a handshake after a rename so an edit made in the ack window is re-offered", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "a.md", crdtEpoch: 0 }]);
+    const session = await harness.manager.ensureSession("room_1", "a.md");
+
+    const renamePromise = harness.manager.renameSession("room_1", "a.md", "b.md");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+
+    // Typed in the window between sending crdt_rename and receiving its ack.
+    session.doc.transact(() => session.ytext.insert(0, "typed mid-rename"), null);
+    harness.sent.length = 0;
+
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "a.md",
+      relativePath: "b.md",
+      epoch: 0
+    });
+    await renamePromise;
+
+    // A handshake goes out for the *new* path, which is what carries the mid-rename edit to the server.
+    const step1 = harness.sent.find((message) => message.type === "crdt_sync_step1") as Extract<SyncClientMessage, { type: "crdt_sync_step1" }>;
+    expect(step1).toMatchObject({ roomId: "room_1", relativePath: "b.md", epoch: 0 });
+    expect(session.ytext.toString()).toBe("typed mid-rename");
   });
 
   it("rejects a failed rename with the server's error code so the caller can tell FILE_EXISTS from NOT_FOUND", async () => {

@@ -172,7 +172,17 @@ export class CrdtEditorController {
     // yields control) so a concurrent syncOpenViews call sees this view as already
     // bound/binding-to-this-target and doesn't start a second, redundant bind for it.
     this.bound.set(view, { target, ready });
-    await ready;
+    try {
+      await ready;
+    } catch (error) {
+      // A rejected attempt must not remain the authoritative entry forever: otherwise every later
+      // reconcile for this same view+target only awaits the already-rejected promise and can never
+      // retry. Guard by the exact promise so an older failure cannot delete a newer replacement bind.
+      if (this.bound.get(view)?.ready === ready) {
+        this.bound.delete(view);
+      }
+      throw error;
+    }
   }
 
   private async openSessionAndBind(view: EditorView, target: CrdtEditorTarget, sessionManager: CrdtSessionManager): Promise<void> {
@@ -198,15 +208,46 @@ export class CrdtEditorController {
     }
     sessionManager.bindToEditor(target.roomId, target.relativePath);
     const undoManager = new Y.UndoManager(session.ytext);
-    view.dispatch({ effects: this.compartment.reconfigure(buildCrdtEditorExtension(session.ytext, undoManager)) });
+    try {
+      view.dispatch({ effects: this.compartment.reconfigure(buildCrdtEditorExtension(session.ytext, undoManager)) });
+    } catch (error) {
+      // `boundToEditor` is what tells the rest of the engine "an editor owns this document, never
+      // reconcile the (older) disk copy into it". A dispatch that throws - e.g. onto a view Obsidian
+      // destroyed while the session was opening - would otherwise leave that flag set for a view that
+      // never received the extension, and no later unbindView can clear it because a destroyed view
+      // never appears in another reconcile pass. Disk reconciliation for that path would then be
+      // suppressed for the rest of the session.
+      this.releaseEditorBinding(view, target, sessionManager);
+      throw error;
+    }
   }
 
   private unbindView(view: EditorView): void {
     const existing = this.bound.get(view);
     this.bound.delete(view);
     if (existing) {
-      this.deps.getSessionManager()?.unbindFromEditor(existing.target.roomId, existing.target.relativePath);
+      this.releaseEditorBinding(view, existing.target);
     }
     view.dispatch({ effects: this.compartment.reconfigure([]) });
+  }
+
+  /**
+   * Clears a session's `boundToEditor` flag - but only once no *other* tracked view is still bound to
+   * the same (room, path). The flag is one boolean per session while Obsidian happily shows the same
+   * note in two panes, so clearing it unconditionally when one of them goes away would tell the engine
+   * the surviving pane's editor is no longer authoritative and let a stale on-disk copy reconcile over
+   * its unsaved text - which is exactly the delete-propagating failure invariant #1 exists to prevent.
+   */
+  private releaseEditorBinding(
+    view: EditorView,
+    target: CrdtEditorTarget,
+    sessionManager = this.deps.getSessionManager()
+  ): void {
+    for (const [other, binding] of this.bound) {
+      if (other !== view && sameTarget(binding.target, target)) {
+        return;
+      }
+    }
+    sessionManager?.unbindFromEditor(target.roomId, target.relativePath);
   }
 }

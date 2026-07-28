@@ -168,9 +168,11 @@ Start with the **Test** button (Settings → Vault Rooms → Servers, or beside 
 checks the address, whether anything answers, whether it's a Vault Rooms server with the expected identity, and
 whether this device's login still works - then names the step that failed.
 
-- **A teammate can't reach the server:** on the host, confirm the LAN share badge is green and that the advertised
-  address is the current LAN address, not `127.0.0.1`. A browser can't validate a pinned server, so it isn't a
-  useful check.
+- **A teammate can't reach the server:** on the host, confirm the LAN share badge is green. If it says **not a
+  LAN address**, the address can't work for anyone else no matter what your own machine says - a loopback
+  address like `127.0.0.1` always means "the computer that's asking", so it sends every teammate back to their
+  own machine. Use this device's LAN address instead. A browser can't validate a pinned server, so it isn't a
+  useful check either.
 - **The invite link does nothing:** the plugin must already be installed and enabled on that device - the link
   can't install it.
 - **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live

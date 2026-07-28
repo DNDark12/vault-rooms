@@ -529,4 +529,86 @@ describe("CrdtEditorController.syncOpenViews", () => {
     expect(controller.isBound(view)).toBe(true);
     view.destroy();
   });
+
+  it("retries the same target after an earlier binding attempt rejects", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const ensureSessionIfKnown = manager.ensureSessionIfKnown.bind(manager);
+    vi.spyOn(manager, "ensureSessionIfKnown")
+      .mockRejectedValueOnce(new Error("transient session-open failure"))
+      .mockImplementation(ensureSessionIfKnown);
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const view = editorViewWithCompartment(controller);
+
+    await expect(controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }])).rejects.toThrow(
+      "transient session-open failure"
+    );
+    expect(controller.isBound(view)).toBe(false);
+
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]);
+
+    expect(manager.ensureSessionIfKnown).toHaveBeenCalledTimes(2);
+    expect(controller.isBound(view)).toBe(true);
+    view.destroy();
+  });
+
+  it("does not leave a session marked editor-owned when applying the extension throws", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const view = editorViewWithCompartment(controller);
+    // Obsidian can destroy the view while the session is still opening; dispatching onto it then
+    // throws *after* bindToEditor has already claimed the session.
+    vi.spyOn(view, "dispatch").mockImplementationOnce(() => {
+      throw new Error("Calling update on a destroyed view");
+    });
+
+    await expect(controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }])).rejects.toThrow(
+      "Calling update on a destroyed view"
+    );
+
+    expect(controller.isBound(view)).toBe(false);
+    // Left true, disk reconciliation for this path stays suppressed forever with no editor to justify it.
+    expect(session.boundToEditor).toBe(false);
+    view.destroy();
+  });
+
+  it("keeps a document editor-owned while a second pane showing it is still bound", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const paneA = editorViewWithCompartment(controller);
+    const paneB = editorViewWithCompartment(controller);
+
+    await controller.syncOpenViews([
+      { vaultPath: "Rooms/Demo/Board.md", view: paneA },
+      { vaultPath: "Rooms/Demo/Board.md", view: paneB }
+    ]);
+    expect(session.boundToEditor).toBe(true);
+
+    // Close one split. The other pane still has the note open, so its editor must remain the source
+    // of truth - clearing the flag here would let a stale disk copy reconcile over its unsaved text.
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view: paneA }]);
+
+    expect(controller.isBound(paneA)).toBe(true);
+    expect(controller.isBound(paneB)).toBe(false);
+    expect(session.boundToEditor).toBe(true);
+
+    await controller.syncOpenViews([]);
+    expect(session.boundToEditor).toBe(false);
+
+    paneA.destroy();
+    paneB.destroy();
+  });
 });

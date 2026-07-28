@@ -130,7 +130,7 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
 
   const currentInviteSecurity = () => inviteSecurityContext(repo.getSecurityState(), security?.runtime.getIdentity() ?? null);
   const inviteSecurity = currentInviteSecurity();
-  registerAuthRoutes(app, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity });
+  registerAuthRoutes(app, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity, publicUrl: options.publicUrl });
   registerTeamRoutes(app, repo, {
     publicUrl: options.publicUrl ?? "http://127.0.0.1:8787",
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
