@@ -171,3 +171,118 @@ describe("CRDT protocol messages", () => {
     expect(roundTrip(remoteRename)).toEqual(remoteRename);
   });
 });
+
+// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
+// Presence is additively negotiated: `presence: true` is only meaningful alongside `crdt: true`,
+// and a client that sends neither still parses under these unions. The cursor payload carries
+// *JSON-serialized* Yjs relative positions (Y.relativePositionToJSON) - never live
+// Y.RelativePosition objects - because this is exactly what crosses JSON.stringify on the wire.
+describe("presence protocol messages", () => {
+  const cursor = {
+    yanchor: { type: { client: 11, clock: 3 }, tname: "content", assoc: 0 },
+    yhead: { type: { client: 11, clock: 7 }, tname: "content", assoc: 0 }
+  };
+
+  it("hello can advertise presence alongside crdt, and older shapes still parse", () => {
+    const withPresence: SyncClientMessage = {
+      type: "hello",
+      requestId: "hello_presence",
+      token: "tr_dev_test",
+      client: { kind: "obsidian-plugin", version: "0.2.2", deviceName: "Laptop" },
+      capabilities: { crdt: true, presence: true }
+    };
+    const crdtOnly: SyncClientMessage = {
+      type: "hello",
+      requestId: "hello_crdt",
+      token: "tr_dev_test",
+      client: { kind: "obsidian-plugin", version: "0.2.2", deviceName: "Laptop" },
+      capabilities: { crdt: true }
+    };
+    const legacy: SyncClientMessage = {
+      type: "hello",
+      requestId: "hello_legacy",
+      token: "tr_dev_test",
+      client: { kind: "obsidian-plugin", version: "0.1.6", deviceName: "Laptop" }
+    };
+
+    expect(roundTrip(withPresence).capabilities).toEqual({ crdt: true, presence: true });
+    expect(roundTrip(crdtOnly).capabilities).toEqual({ crdt: true });
+    expect(roundTrip(legacy).capabilities).toBeUndefined();
+  });
+
+  it("round-trips presence_set for both a live cursor and a removal", () => {
+    const set: SyncClientMessage = {
+      type: "presence_set",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      clientId: 42,
+      cursor
+    };
+    const remove: SyncClientMessage = { ...set, cursor: null };
+
+    expect(roundTrip(set)).toEqual(set);
+    expect(roundTrip(remove)).toEqual(remove);
+    expect(roundTrip(remove).cursor).toBeNull();
+  });
+
+  it("round-trips the server's snapshot, fanout, and rejection variants", () => {
+    const state = {
+      clientId: 42,
+      user: { userId: "usr_1", displayName: "Alice" },
+      cursor
+    };
+    const snapshot: SyncServerMessage = {
+      type: "presence_snapshot",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      states: [state]
+    };
+    const remote: SyncServerMessage = {
+      type: "remote_presence",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      state
+    };
+    // A removal fans out as a state whose cursor is null, so receivers need no separate message
+    // type to drop a peer - and an unknown/stale removal stays idempotent.
+    const removalFanout: SyncServerMessage = {
+      type: "remote_presence",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      state: { ...state, cursor: null }
+    };
+    const rejected: SyncServerMessage = {
+      type: "presence_rejected",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      code: "CRDT_STALE_EPOCH",
+      message: "This document has moved to a new epoch.",
+      currentEpoch: 4
+    };
+
+    expect(roundTrip(snapshot)).toEqual(snapshot);
+    expect(roundTrip(remote)).toEqual(remote);
+    expect(roundTrip(removalFanout).state.cursor).toBeNull();
+    expect(roundTrip(rejected)).toEqual(rejected);
+  });
+
+  it("carries relative positions through JSON unchanged (no live Y objects on the wire)", () => {
+    const set: SyncClientMessage = {
+      type: "presence_set",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      clientId: 42,
+      cursor
+    };
+
+    // The shape Y.relativePositionToJSON emits is two numbers per ID plus an optional tname/assoc,
+    // so it survives the transport byte-for-byte. If this ever needs a custom reviver, the adapter
+    // boundary in crdtPresence.ts is wrong.
+    expect(roundTrip(set).cursor).toEqual(cursor);
+  });
+});
