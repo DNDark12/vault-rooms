@@ -69,6 +69,17 @@
 //     scanner's substring match simply can't see the `this.timerHost.` prefix. No new
 //     setTimeout(/setInterval(/clearInterval(/globalThis/fetch(/process.env/console.log(
 //     occurrences, and no new third-party dependency: first-party code only.
+//   - 2026-07-28 live cursors (apps/obsidian-plugin/src/crdtPresence.ts added): setTimeout( 19->20
+//     (+1), clearTimeout( 22->23 (+1), window.setTimeout 12->13 (+1). Read at the source: the two new
+//     occurrences are CrdtPresenceSession's selection-coalescing timer defaulting to
+//     `(callback, delayMs) => window.setTimeout(callback, delayMs)` /
+//     `(handle) => window.clearTimeout(handle)` when no `schedule`/`cancel` is injected - one call
+//     site each, the identical pattern the Phase 5 crdtSession.ts entry above already covers, and the
+//     one CLAUDE.md rule 2 prescribes for a plugin-only file. In production the CrdtSessionManager
+//     always injects its own schedule/cancel, so these defaults exist for direct construction and
+//     tests. No new setInterval(/clearInterval(/globalThis/fetch(/process.env/console.log(
+//     occurrences, and no new third-party dependency: presence deliberately avoids `y-protocols` (a
+//     duck-typed Awareness adapter instead), so nothing was added to the bundle graph.
 //
 // The scanning logic is exported so apps/obsidian-plugin/test/crdtBundleGuard.test.ts can run the
 // exact same checks under `pnpm test` without duplicating the tier tables (duplication would let
@@ -83,13 +94,13 @@ import { fileURLToPath } from "node:url";
 export const TIER2_STRICT_ZERO = ["fastify", "Fastify", "ajv", "new Function", "eval(", "process.env", "node:fs", "node:os", "console.log(", "console.info(", "console.trace("];
 
 export const TIER3_APPROVED_BASELINE = {
-  "setTimeout(": 19,
+  "setTimeout(": 20,
   "setInterval(": 3,
-  "clearTimeout(": 22,
+  "clearTimeout(": 23,
   "clearInterval(": 3,
   "globalThis": 10,
   "fetch(": 2,
-  "window.setTimeout": 12
+  "window.setTimeout": 13
 };
 
 export const REQUIRED_PRESENT = ["noServer", "maxPayload"];
