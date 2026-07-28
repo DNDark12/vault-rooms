@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type WebSocket from "ws";
 import { createApp } from "../src/app.js";
+import type { FileRoutesOptions } from "../src/routes/file.routes.js";
+import type { RoomRoutesOptions } from "../src/routes/room.routes.js";
+import type { TeamRoutesOptions } from "../src/routes/team.routes.js";
 import { ConnectionRegistry } from "../src/sync/connectionRegistry.js";
 import { handleSyncSocket, type SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
@@ -11,6 +14,20 @@ import { injectBootstrap } from "./bootstrapHelper.js";
 // serializes. Pure ownership/replacement semantics live in presenceRegistry.test.ts.
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
+
+function assertPresenceServiceIsRequiredByEveryLifecycleRoute(): void {
+  // @ts-expect-error Presence cleanup must not be silently omitted from REST file deletion.
+  const fileOptions: FileRoutesOptions = { maxFileBytes: 1 };
+  // @ts-expect-error Presence cleanup must not be silently omitted from room lifecycle/ACL routes.
+  const roomOptions: RoomRoutesOptions = { publicUrl: "http://127.0.0.1" };
+  // @ts-expect-error Presence revalidation must not be silently omitted from team membership routes.
+  const teamOptions: TeamRoutesOptions = {
+    publicUrl: "http://127.0.0.1",
+    allowRemoteBootstrap: false,
+    bootstrapPin: "test"
+  };
+  void [fileOptions, roomOptions, teamOptions];
+}
 
 const apps: Array<Awaited<ReturnType<typeof createApp>>> = [];
 const sockets: WebSocket[] = [];

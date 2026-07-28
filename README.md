@@ -129,6 +129,10 @@ instead of one edit becoming a conflict copy.
   so you can choose another.
 - **Per-keystroke merging needs the note open in your editor.** A device with the room merely mounted still
   receives every change, just on the ordinary latency budget above.
+- **Open notes show live cursors.** When authorized teammates have the same CRDT Markdown note open, each sees
+  the other's caret and selection with their authenticated display name and a stable, theme-aware color.
+  Presence disappears when the editor or session closes; it is note-scoped, not a room-wide online status.
+  V1 deliberately has no participant bar.
 - **Older plugin versions can read but not write** a note in this mode; they get a clear rejection rather than a
   silent conflict.
 - **No new network surface** - it rides the same authenticated connection.
@@ -149,8 +153,9 @@ Vault Rooms never grants permission to run someone else's plugin code.
   Other binaries (audio, video, Office documents) are not synced. Images and PDFs count against the size limit at
   roughly 1.33x their real size.
 - Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
-- Character-level co-editing only exists via a room's CRDT opt-in, and only for Markdown. Live cursors and
-  presence don't exist yet.
+- Character-level co-editing and cursor presence only exist via a room's CRDT opt-in, and only for Markdown.
+  Cursor presence is ephemeral: it appears only for authorized teammates who currently have the same note open,
+  is not persisted, and does not provide a room-wide participant or online list.
 - CRDT caveats: per-keystroke merging applies only to a note open in your editor; renaming a note that's open on
   another device makes that device lose editor focus, which Obsidian controls; and disabling CRDT for a room stops
   using its history without deleting it.
@@ -178,6 +183,9 @@ whether this device's login still works - then names the step that failed.
 - **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live
   editing (CRDT) for the active note"**. It names the missing link. Most often live editing is simply off - it's
   per room and default-off, so a room created after you last enabled it starts without it.
+- **A teammate's cursor isn't visible:** both devices need Vault Rooms 0.2.3 or newer, the same CRDT Markdown note
+  open, the room mounted with live editing enabled, a live connection, and `file:read` access to that exact path.
+  Cursor presence is intentionally absent when a note is only synced in the background.
 - **A teammate's edits aren't showing up:** confirm both devices show the room as **mounted**, not just visible.
   Only mounted rooms hold a live subscription.
 - **Server identity mismatch:** the peer presented a different identity, so Vault Rooms stopped before sending

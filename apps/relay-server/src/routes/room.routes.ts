@@ -33,8 +33,8 @@ export type RoomRoutesOptions = {
   crdtDocManager?: CrdtDocManager;
   /** Live cursors: presence has to be cleared when a room is deleted or leaves the CRDT lane, and
    *  re-checked per path whenever an ACL mutation lands (the existing room-level revalidation cannot
-   *  see a single path losing `file:read`). Optional for callers that never touch presence. */
-  presenceService?: PresenceService;
+   *  see a single path losing `file:read`). */
+  presenceService: PresenceService;
 };
 
 export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, options: RoomRoutesOptions): void {
@@ -170,7 +170,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         if (!crdtEnabled) {
           // Leaving the CRDT lane retires every document in the room, so presence has nothing left to
           // attach to. Enabling needs no equivalent - there is no presence yet to clear.
-          options.presenceService?.removeRoom(roomId);
+          options.presenceService.removeRoom(roomId);
         }
         options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_mode_changed", roomId, crdtEnabled });
       }
@@ -238,7 +238,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
     // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
     // at all. This path-aware sweep is what actually removes that cursor.
-    options.presenceService?.revalidate();
+    options.presenceService.revalidate();
     return { aclRule };
   });
 
@@ -254,7 +254,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
     // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
     // at all. This path-aware sweep is what actually removes that cursor.
-    options.presenceService?.revalidate();
+    options.presenceService.revalidate();
     return { ok: true };
   });
 
@@ -268,7 +268,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     // Before deleteRoom, not after: the removal fanout has to evaluate per-recipient `file:read`, and
     // once the room (and its cascaded ACL rules) are gone that is no longer possible - the retraction
     // would be dropped rather than delivered.
-    options.presenceService?.removeRoom(roomId);
+    options.presenceService.removeRoom(roomId);
     repo.deleteRoom({ roomId, actorUserId: principal.userId });
     options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_deleted", roomId });
     return { ok: true };

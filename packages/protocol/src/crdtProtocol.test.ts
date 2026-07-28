@@ -188,14 +188,14 @@ describe("presence protocol messages", () => {
       type: "hello",
       requestId: "hello_presence",
       token: "tr_dev_test",
-      client: { kind: "obsidian-plugin", version: "0.2.2", deviceName: "Laptop" },
+      client: { kind: "obsidian-plugin", version: "0.2.3", deviceName: "Laptop" },
       capabilities: { crdt: true, presence: true }
     };
     const crdtOnly: SyncClientMessage = {
       type: "hello",
       requestId: "hello_crdt",
       token: "tr_dev_test",
-      client: { kind: "obsidian-plugin", version: "0.2.2", deviceName: "Laptop" },
+      client: { kind: "obsidian-plugin", version: "0.2.3", deviceName: "Laptop" },
       capabilities: { crdt: true }
     };
     const legacy: SyncClientMessage = {

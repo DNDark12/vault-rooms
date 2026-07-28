@@ -17,8 +17,8 @@ export type FileRoutesOptions = {
   crdtDocManager?: CrdtDocManager;
   /** Live cursors: this REST delete route is the second delete transport, so it needs the same
    *  presence teardown the WS `file_delete` branch does - covering only one of them leaks a cursor
-   *  pinned to an epoch the delete just retired. Optional for tests that don't exercise presence. */
-  presenceService?: PresenceService;
+   *  pinned to an epoch the delete just retired. */
+  presenceService: PresenceService;
 };
 
 export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, options: FileRoutesOptions): void {
@@ -155,7 +155,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       options.crdtDocManager?.evictDocument(beforeDelete.id, beforeDelete.crdt_epoch);
       // Live cursors: mirrors the WS file_delete branch. The delete bumped the epoch, so any live
       // cursor is pinned to an epoch that no longer exists - clear it with the pre-delete epoch.
-      options.presenceService?.removeDocument(room.id, relativePath, beforeDelete.crdt_epoch);
+      options.presenceService.removeDocument(room.id, relativePath, beforeDelete.crdt_epoch);
     }
     const fileDeleteAclRules = repo.listAclRulesForRoom(room.id);
     options.connectionRegistry?.broadcastToRoom(

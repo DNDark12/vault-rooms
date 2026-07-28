@@ -396,6 +396,37 @@ describe("CrdtSessionManager - bidirectional handshake and outbound recovery", (
 });
 
 describe("CrdtSessionManager - stale epoch resync", () => {
+  it("reopens an editor-owned session after the retiring callback unbinds the old document", async () => {
+    let manager!: CrdtSessionManager;
+    const harness = createHarness({
+      onSessionRetiring: (roomId, relativePath) => manager.unbindFromEditor(roomId, relativePath)
+    });
+    manager = harness.manager;
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    await manager.ensureSession("room_1", "Board.md");
+    manager.bindToEditor("room_1", "Board.md");
+
+    await ack(harness, {
+      type: "crdt_rejected",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      code: "CRDT_STALE_EPOCH",
+      message: "stale",
+      currentEpoch: 1
+    });
+
+    expect(manager.isSessionOpen("room_1", "Board.md")).toBe(true);
+    expect(
+      harness.sent.some(
+        (message) =>
+          message.type === "crdt_sync_step1" &&
+          message.roomId === "room_1" &&
+          message.relativePath === "Board.md" &&
+          message.epoch === 1
+      )
+    ).toBe(true);
+  });
+
   it("drops the local session and deletes its persisted state when the server reports a superseded epoch", async () => {
     const adapter = new FakeDataAdapter();
     const docStore = makeDocStore(adapter);

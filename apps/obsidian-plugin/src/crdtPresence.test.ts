@@ -547,6 +547,66 @@ describe("CrdtPresenceSession adapter contract", () => {
   });
 });
 
+describe("presence diagnostics", () => {
+  it("reports every link of the cursor path", () => {
+    const { ytext, clock, session } = setup();
+    const adapter = session.attachView(view("a"));
+
+    // Before the handshake: bound but not advertising - the state a "why can't I see cursors" report
+    // needs to be able to distinguish from "nobody else is here".
+    expect(session.describe()).toMatchObject({
+      transportReady: false,
+      published: false,
+      remotePeers: 0,
+      boundPanes: 1,
+      panesWithSelection: 0,
+      destroyed: false
+    });
+
+    session.setTransportReady(true);
+    adapter.setLocalStateField("cursor", selection(ytext, 1, 3));
+    clock.flush();
+    session.applyRemote({
+      type: "remote_presence",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      state: remoteState(99, ytext, 5, 6)
+    });
+
+    expect(session.describe()).toMatchObject({
+      transportReady: true,
+      published: true,
+      remotePeers: 1,
+      remoteNames: ["Alice"],
+      panesWithSelection: 1
+    });
+
+    session.destroy();
+    expect(session.describe()).toMatchObject({ destroyed: true, remotePeers: 0, boundPanes: 0 });
+  });
+
+  it("distinguishes a rejected session from a merely quiet one", () => {
+    const { ytext, clock, session } = setup();
+    const adapter = session.attachView(view("a"));
+    session.setTransportReady(true);
+    adapter.setLocalStateField("cursor", selection(ytext, 1, 3));
+    clock.flush();
+
+    session.reject({
+      type: "presence_rejected",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      code: "PERMISSION_DENIED",
+      message: "no"
+    });
+
+    // transportReady false while a session is open is the signal that separates "cursors are off" from
+    // "cursors are on and you are alone".
+    expect(session.describe()).toMatchObject({ transportReady: false, remotePeers: 0 });
+  });
+});
+
 describe("presenceColor", () => {
   it("derives a stable, palette-bound color from the authoritative userId", () => {
     expect(presenceColor("usr_alice")).toEqual(presenceColor("usr_alice"));

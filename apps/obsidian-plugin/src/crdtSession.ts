@@ -255,6 +255,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
     return this.sessions.has(sessionKey(roomId, relativePath));
   }
 
+  /** Presence half of main.ts's "Diagnose live editing" command - undefined when no session is open
+   *  for this target, so the caller can distinguish "no session" from "session but no cursors". */
+  describePresence(roomId: string, relativePath: string): ReturnType<CrdtPresenceSession["describe"]> | undefined {
+    return this.sessions.get(sessionKey(roomId, relativePath))?.presence.describe();
+  }
+
   /**
    * Records the epoch of a document this device learned about from the server *without* opening a
    * session for it - specifically a `remote_file_change` carrying `crdtEpoch` (a creation announce or
@@ -974,6 +980,9 @@ export class CrdtSessionManager implements CrdtWsBridge {
     const key = sessionKey(roomId, relativePath);
     const existing = this.sessions.get(key);
     const oldEpoch = existing?.epoch;
+    // Snapshot before teardown: onSessionRetiring unbinds the old editor extension, which clears
+    // existing.boundToEditor while the retiring session is still in this.sessions.
+    const wasBoundToEditor = existing?.boundToEditor ?? false;
     if (existing) {
       this.teardownSession(existing);
       this.sessions.delete(key);
@@ -982,7 +991,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
       await this.deps.docStore.deleteEpoch(roomId, relativePath, oldEpoch).catch(() => undefined);
     }
     this.knownEpoch.set(key, newEpoch);
-    if (existing?.boundToEditor) {
+    if (wasBoundToEditor) {
       // Re-open eagerly so a currently-bound editor doesn't keep showing content from a document
       // identity the server has already moved past.
       await this.ensureSession(roomId, relativePath);

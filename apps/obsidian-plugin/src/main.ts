@@ -1140,6 +1140,10 @@ export default class VaultRoomsPlugin extends Plugin {
     const cmView = getCmEditorView(view.editor);
     const sessionOpen = target ? (this.crdtSessionManager?.isSessionOpen(target.roomId, target.relativePath) ?? false) : false;
     const bound = cmView ? this.crdtEditorController.isBound(cmView) : false;
+    // Live cursors share this command for the same reason live editing does: every link looks fine on
+    // its own and the feature is simply absent, so "I can't see their caret" needs one reading rather
+    // than another round of inference.
+    const presence = target ? this.crdtSessionManager?.describePresence(target.roomId, target.relativePath) : undefined;
     // Which mounted room *contains* this path is resolved independently of whether that room has CRDT
     // enabled. Reporting them together (as a first version of this command did) can't distinguish "this
     // note isn't in any mounted room" from "it is, but that room has live editing switched off" - both
@@ -1170,6 +1174,14 @@ export default class VaultRoomsPlugin extends Plugin {
       crdtSessionOpen: sessionOpen,
       editorBoundToSession: bound,
       liveEditingActive: Boolean(target) && sessionOpen && bound,
+      // presenceTransportReady is false until this session's own CRDT handshake completes (or after a
+      // rejection); presencePublished means this device has actually advertised a caret.
+      presenceTransportReady: presence?.transportReady ?? null,
+      presencePublished: presence?.published ?? null,
+      presenceRemotePeers: presence?.remotePeers ?? null,
+      presenceRemoteNames: presence?.remoteNames ?? null,
+      presenceBoundPanes: presence?.boundPanes ?? null,
+      presencePanesWithSelection: presence?.panesWithSelection ?? null,
       mountedRooms: Object.entries(this.settings.mountedRooms).map(([roomId, state]) => ({
         roomId,
         name: this.visibleRooms.find((candidate) => candidate.id === roomId)?.name ?? null,
@@ -1182,6 +1194,18 @@ export default class VaultRoomsPlugin extends Plugin {
       }))
     };
     console.warn("Vault Rooms: live-editing diagnostics", report);
+    // Reported alongside the verdict rather than folded into it: live editing and live cursors fail
+    // independently, so collapsing them would reproduce exactly the ambiguity the room/CRDT split above
+    // was introduced to remove.
+    const cursorNote = !report.liveEditingActive
+      ? ""
+      : presence === undefined
+        ? ""
+        : !presence.transportReady
+          ? " Cursors are not active yet: this note's CRDT handshake has not completed (or a presence update was rejected)."
+          : presence.remotePeers > 0
+            ? ` Cursors: ${presence.remotePeers} other editor(s) visible (${presence.remoteNames.join(", ")}).`
+            : " Cursors are active, but nobody else has this note open right now.";
     const verdict = report.liveEditingActive
       ? "Live editing IS active for this note."
       : !report.containingRoomId
@@ -1197,7 +1221,7 @@ export default class VaultRoomsPlugin extends Plugin {
             : !report.crdtSessionOpen
               ? "No CRDT session is open for this note yet."
               : "A session is open but this editor isn't bound to it.";
-    new Notice(`Vault Rooms: ${verdict} Full details are in the developer console.`, 10000);
+    new Notice(`Vault Rooms: ${verdict}${cursorNote} Full details are in the developer console.`, 10000);
   }
 
   /** Reads current on-disk text for CRDT reconciliation - null if the file doesn't exist locally

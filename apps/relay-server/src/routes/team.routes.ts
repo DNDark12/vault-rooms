@@ -19,7 +19,7 @@ export type TeamRoutesOptions = {
   connectionRegistry?: ConnectionRegistry;
   /** Live cursors: team membership changes can narrow a path-scoped grant, which the room-level
    *  revalidation cannot detect - see the sweep call sites below. */
-  presenceService?: PresenceService;
+  presenceService: PresenceService;
   security?: InviteSecurityContext;
 };
 
@@ -189,7 +189,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
     // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
     // at all. This path-aware sweep is what actually removes that cursor.
-    options.presenceService?.revalidate();
+    options.presenceService.revalidate();
     return { ok: true };
   });
 
@@ -208,7 +208,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     // Live cursors: the room-level revalidation above only re-checks `sync:subscribe`, so a narrowing
     // ACL that revokes `file:read` on one path leaves the room subscription intact and fires no event
     // at all. This path-aware sweep is what actually removes that cursor.
-    options.presenceService?.revalidate();
+    options.presenceService.revalidate();
     return { ok: true };
   });
 }

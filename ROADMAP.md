@@ -3,6 +3,13 @@
 What's next, by priority. Nothing here is a product claim until it ships. See [README](README.md) for what the
 plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
 
+## Shipped in 0.2.3
+
+- **Live cursors / note presence v1.** Authorized teammates who open the same CRDT Markdown note now see each
+  other's caret, selection, authenticated display name, and stable theme-aware color. Presence is ephemeral and
+  note-scoped: it disappears on editor/session cleanup, is never persisted, and deliberately has no participant
+  bar. It remains separate from chat's future server-wide online/offline presence.
+
 ## Next up
 
 - **Onboarding.** In progress. An address that cannot work for a teammate (loopback, `0.0.0.0`) is now
@@ -19,10 +26,6 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   needing a decision: a peer on a build older than the rename protocol applies a rename only after reconnecting.
   Closing it means also broadcasting the rename as a delete+create to non-CRDT peers, which is more traffic and
   more edge cases for a case that already self-heals.
-- **Live cursors / note presence, before chat.** Much cheaper now that CRDT ships - the same connection already
-  carries per-note document state, so this needs an ephemeral awareness protocol and editor UI, not new
-  transport. Ship this as its own small phase: note-scoped cursor state must disappear promptly on disconnect,
-  and is deliberately separate from chat's server-wide online/offline presence.
 - **Chat v1, after live cursors.** The existing design remains viable: direct, team, and room threads; immutable
   Markdown messages; unread state; realtime delivery over the authenticated `/sync` socket; history isolated in
   a separately-pruned `chat.db`; and a docked desktop UI. Refresh the protocol and threat-model sections before

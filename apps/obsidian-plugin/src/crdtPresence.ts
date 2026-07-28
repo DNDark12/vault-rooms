@@ -310,6 +310,34 @@ export class CrdtPresenceSession {
     this.listeners.clear();
   }
 
+  /**
+   * Read-only snapshot for the "Diagnose live editing" command. Cursors have exactly the same
+   * failure mode the content path does - every link looks fine individually and the feature is just
+   * silently absent - so the same one-reading diagnosis has to cover them, or the next "I can't see
+   * their caret" report costs another round of guessing.
+   */
+  describe(): {
+    transportReady: boolean;
+    published: boolean;
+    remotePeers: number;
+    remoteNames: string[];
+    boundPanes: number;
+    panesWithSelection: number;
+    pendingSend: boolean;
+    destroyed: boolean;
+  } {
+    return {
+      transportReady: this.transportReady,
+      published: this.publishedClientId !== null,
+      remotePeers: this.remote.size,
+      remoteNames: [...this.remote.values()].map((state) => state.user.displayName),
+      boundPanes: this.views.size,
+      panesWithSelection: [...this.views.values()].filter((entry) => entry.cursor !== null).length,
+      pendingSend: this.pendingTimer !== null,
+      destroyed: this.destroyed
+    };
+  }
+
   private matches(relativePath: string, epoch: number): boolean {
     return !this.destroyed && relativePath === this.relativePath && epoch === this.epoch;
   }

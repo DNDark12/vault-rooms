@@ -61,6 +61,11 @@ sync)", default off). It adds no new listener or transport: the messages ride th
 connection every room already uses, under whatever transport mode the server is in, and are gated by the same
 per-path ACL checks.
 
+- **Live cursor presence is authenticated, ephemeral state.** The client sends only document-relative caret and
+  selection data; the relay supplies the display identity from the authenticated principal and requires
+  `file:read` for the exact path. Presence stays in memory only, is not written to SQLite, and is removed through
+  editor, document, room, permission, and connection lifecycle cleanup. It inherits the active transport mode
+  and, like document content, is not end-to-end encrypted.
 - **Bounded update loss on a crash, never corruption.** An accepted edit is applied in memory and appended to a
   durable log on the ordinary write path - the same accepted trade-off the normal sync lane already makes for its
   debounced push. A crash in the narrow window before that entry reaches disk can lose that one edit; it cannot

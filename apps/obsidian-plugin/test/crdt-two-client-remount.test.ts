@@ -181,6 +181,8 @@ type Device = {
   remoteCaretNames: () => string[];
   /** Moves the local selection the way a click or arrow key does. */
   select: (from: number, to: number) => void;
+  /** Wraps the current selection in `**`, the way Obsidian's bold command does. */
+  boldSelection: () => void;
   view: EditorView;
   openSecondPane: () => Promise<EditorView>;
   closeSecondPane: () => Promise<void>;
@@ -329,6 +331,11 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
       // at the moment y-codemirror's update() runs.
       view.focus();
       view.dispatch({ selection: { anchor: from, head: to } });
+    },
+    boldSelection: () => {
+      const range = view.state.selection.main;
+      const text = view.state.doc.sliceString(range.from, range.to);
+      view.dispatch({ changes: { from: range.from, to: range.to, insert: `**${text}**` } });
     },
     view,
     openSecondPane: async () => {
@@ -659,5 +666,29 @@ describe("CRDT two-client: live cursors", () => {
     await waitFor(() => a.remoteCaretCount() === 0, "A to drop the old-path caret");
     expect(a.editorText()).toBe("hello world");
     expect(await b.serverText().catch(() => "missing")).toBe("missing");
+  });
+
+  it("applies a selection-based format once while both cursors are live", { timeout: 30_000 }, async () => {
+    const { a, b } = await converged();
+
+    // Both peers have a live caret, and B's selection overlaps the range A is about to rewrite - the
+    // case where a naive cursor implementation would either double-apply the edit or leave B's caret
+    // pointing into text that no longer exists.
+    b.select(0, 5);
+    a.select(6, 11);
+    await waitFor(() => a.remoteCaretCount() > 0 && b.remoteCaretCount() > 0, "both carets to render");
+
+    a.boldSelection();
+
+    // Applied exactly once, on both sides and at the relay - "bold" is a replace, so a duplicated
+    // transaction would show as `**world****world**` rather than a longer note.
+    await waitFor(() => b.editorText() === "hello **world**", "B to receive the formatted text");
+    expect(a.editorText()).toBe("hello **world**");
+    await waitFor(async () => (await a.serverText()) === "hello **world**", "relay to materialize the format");
+
+    // B's caret survives the rewrite (relative positions adjust) and typing still lands once.
+    b.type("!");
+    await waitFor(() => a.editorText() === "hello **world**!", "A to receive B's keystroke after the format");
+    expect(b.editorText()).toBe("hello **world**!");
   });
 });
