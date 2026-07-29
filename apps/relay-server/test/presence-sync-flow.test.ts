@@ -305,6 +305,101 @@ describe("presence over the sync socket", () => {
     expect(presenceService).toMatch(/removeUnsubscribedRoomHues\(\)/);
   });
 
+  // Hue leases are keyed by (roomId, userId) and assume a connection's identity never changes. A second
+  // `hello` used to replace `connection.principal` in place while leaving this connection's
+  // subscriptions, presence states, and hue membership bound to the previous user - so one socket
+  // alternating identities re-leased a colour on every publish (0 -> 137.508 -> 0). Rejecting the
+  // identity *change* is what makes the allocator's assumption true rather than merely hoped for.
+  //
+  // Re-hello as the same device stays allowed on purpose: device-revoke-flow.test.ts uses it as a
+  // liveness probe, and it needs no rekeying because nothing about the identity moved.
+  it("rejects a hello that would change a live connection's identity, but allows a same-device re-hello", async () => {
+    const { app, owner, room } = await setupRoom();
+    const alice = await addMember(app, owner, room, "editor", "**/*", "Alice");
+
+    const a = await connect(app);
+    await helloAndSubscribe(a, owner.deviceToken, room.id);
+    const epoch = await createDocument(a, room.id, "Board.md");
+
+    const observer = await connect(app);
+    await helloAndSubscribe(observer, owner.deviceToken, room.id);
+
+    const base = { type: "presence_set", roomId: room.id, relativePath: "Board.md", epoch };
+    a.sendJson({ ...base, clientId: 11, cursor: cursor(1) });
+    const before = await nextMessage(observer, "remote_presence");
+    const hello = { client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "device" }, capabilities: { crdt: true, presence: true } };
+
+    // Same device: a harmless re-ack, and the published hue must not move.
+    a.sendJson({ type: "hello", requestId: "same", token: owner.deviceToken, ...hello });
+    expect(await nextMessage(a, "hello_ok")).toMatchObject({ requestId: "same" });
+    a.sendJson({ ...base, clientId: 11, cursor: cursor(2) });
+    expect((await nextMessage(observer, "remote_presence")).state.user.hue).toBe(before.state.user.hue);
+
+    // Different identity on the same socket: refused and closed, so the allocator never sees a
+    // connection whose user changed underneath it.
+    a.sendJson({ type: "hello", requestId: "swap", token: alice.member.deviceToken, ...hello });
+    const rejected = await nextMessage(a, "hello_error");
+    expect(rejected).toMatchObject({ requestId: "swap", code: "UNAUTHORIZED" });
+    expect(rejected.message).toContain("already signed in as someone else");
+
+    // The same-identity ack must not become an auth bypass: the token is authenticated *before* the
+    // ack short-circuits, so a garbage token on an established connection is still refused rather than
+    // acked on the strength of the connection already holding a principal.
+    const b = await connect(app);
+    await helloAndSubscribe(b, owner.deviceToken, room.id);
+    b.sendJson({ type: "hello", requestId: "junk", token: "tr_not_a_real_token", ...hello });
+    const junk = await nextMessage(b, "hello_error");
+    expect(junk).toMatchObject({ requestId: "junk", code: "UNAUTHORIZED" });
+    expect(junk.message).not.toContain("already signed in");
+
+    await settle();
+    for (const fanout of seen(observer, "remote_presence")) {
+      expect((fanout as { state: { user: { hue?: number } } }).state.user.hue).toBe(before.state.user.hue);
+    }
+  });
+
+  // A same-device re-hello is allowed, so it must not be able to *degrade* the connection either. It
+  // used to reassign `connection.capabilities` from the new frame, so a re-hello that simply omitted
+  // `capabilities` silently set crdt/presence to false while this connection's subscriptions and
+  // already-published presence stayed in place: peers kept a ghost cursor, and the connection stopped
+  // being able to use the CRDT or presence lanes at all despite a live socket. Nothing legitimately
+  // re-negotiates capabilities mid-socket, so the re-hello is a pure ack.
+  it("does not let a capability-less re-hello degrade a live CRDT/presence connection", async () => {
+    const { app, owner, room } = await setupRoom();
+    const a = await connect(app);
+    await helloAndSubscribe(a, owner.deviceToken, room.id);
+    const epoch = await createDocument(a, room.id, "Board.md");
+
+    const observer = await connect(app);
+    await helloAndSubscribe(observer, owner.deviceToken, room.id);
+
+    const base = { type: "presence_set", roomId: room.id, relativePath: "Board.md", epoch };
+    a.sendJson({ ...base, clientId: 11, cursor: cursor(1) });
+    const before = await nextMessage(observer, "remote_presence");
+    drain(observer, "remote_presence");
+
+    // Deliberately no `capabilities` key at all - the shape a pre-CRDT client would send.
+    a.sendJson({
+      type: "hello",
+      requestId: "bare",
+      token: owner.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "device" }
+    });
+    expect(await nextMessage(a, "hello_ok")).toMatchObject({ requestId: "bare" });
+
+    // Presence lane still live: a further cursor reaches the peer, and the sender is not told it lacks
+    // presence support.
+    a.sendJson({ ...base, clientId: 11, cursor: cursor(5) });
+    expect((await nextMessage(observer, "remote_presence")).state.user.hue).toBe(before.state.user.hue);
+    await settle();
+    expect(seen(a, "presence_rejected")).toHaveLength(0);
+
+    // CRDT lane still live: a create is answered, not rejected as CRDT_CAPABILITY_REQUIRED.
+    a.sendJson({ type: "crdt_create", requestId: "after", roomId: room.id, relativePath: "Second.md" });
+    expect(await nextMessage(a, "crdt_created")).toMatchObject({ requestId: "after" });
+    expect(seen(a, "crdt_rejected")).toHaveLength(0);
+  });
+
   it("never sends presence to a legacy or crdt-only connection", async () => {
     const { app, owner, room } = await setupRoom();
     const a = await connect(app);

@@ -50,6 +50,20 @@ describe("userFacingError", () => {
     expect(result).not.toContain("[object Object]");
   });
 
+  it("never resolves an inherited Object property as a message", () => {
+    // The code is untrusted wire input. A prototype-chain lookup (`in`) resolves these to functions,
+    // so a hostile or buggy relay could make this helper return a *function* where every caller - every
+    // Notice, every panel field - has been told it gets a string.
+    for (const code of ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__", "prototype"]) {
+      const result = userFacingError({ code }, "Action failed.");
+      expect(typeof result, `${code} did not resolve to a string`).toBe("string");
+      expect(result, `${code} leaked an inherited property`).toBe("Action failed.");
+    }
+    // Same guard on the code-as-message path.
+    expect(userFacingError("constructor", "Action failed.")).toBe("constructor");
+    expect(typeof userFacingError({ code: "constructor", message: "constructor" }, "Action failed.")).toBe("string");
+  });
+
   it("falls back for null, undefined, and blank messages", () => {
     expect(userFacingError(undefined, "Action failed.")).toBe("Action failed.");
     expect(userFacingError(null, "Action failed.")).toBe("Action failed.");

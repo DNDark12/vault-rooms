@@ -63,5 +63,9 @@ export function userFacingError(error: unknown, fallback: string): string {
 
   const explicitCode = typeof candidate.code === "string" ? candidate.code : undefined;
   const lookupCode = explicitCode ?? (LOOKS_LIKE_A_CODE.test(message) ? message : undefined);
-  return lookupCode && lookupCode in BY_CODE ? BY_CODE[lookupCode as ErrorCode] : fallback;
+  // `Object.hasOwn`, never `in`: the code is untrusted wire input, and `in` walks the prototype chain,
+  // so `{ code: "constructor" }` would resolve to `Object` - returning a *function* from a function
+  // typed as returning a string, at every Notice and UI sink downstream. Note the regex above cannot
+  // catch this: an explicit `code` is used verbatim, and these names are lowercase anyway.
+  return lookupCode && Object.hasOwn(BY_CODE, lookupCode) ? BY_CODE[lookupCode as ErrorCode] : fallback;
 }

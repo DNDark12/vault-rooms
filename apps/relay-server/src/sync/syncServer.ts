@@ -156,6 +156,43 @@ async function handleMessage(
   if (message.type === "hello") {
     try {
       const principal = authenticateActiveDeviceToken(repo, message.token);
+      // A socket may re-`hello` as the *same* device (it is a harmless liveness re-ack, and
+      // device-revoke-flow.test.ts uses exactly that to prove an unrelated device's session survived a
+      // revocation), but it may never become a different identity. Everything this connection owns -
+      // subscriptions, presence states, and its room-session hue membership - is filed under the
+      // current principal, and PresenceRegistry keys hue leases by (roomId, userId) on the assumption
+      // that a connection's user never changes. Swapping the principal in place left all of it attached
+      // to the previous identity, so one socket alternating between two users re-leased a colour on
+      // every publish (observed hue sequence 0 -> 137.508 -> 0). Rejecting the identity *change* is what
+      // makes that assumption true; rekeying every piece of per-connection state instead would be a far
+      // larger surface for a sequence no real client produces.
+      const current = connection.principal;
+      if (current && (current.userId !== principal.userId || current.deviceId !== principal.deviceId)) {
+        sendJson(connection.socket, {
+          type: "hello_error",
+          requestId: message.requestId,
+          code: "UNAUTHORIZED",
+          message: "This connection is already signed in as someone else - open a new connection instead."
+        });
+        connection.socket.close();
+        return;
+      }
+      // Same device: acknowledge and change nothing. Re-running the setup below would let a re-hello
+      // *degrade* a live connection, because `capabilities` is assigned from the incoming frame - a
+      // re-hello that merely omitted `capabilities` set crdt/presence back to false while this
+      // connection's subscriptions and already-published cursors stayed in place, stranding a ghost
+      // cursor on every peer and cutting this connection off from both lanes over a still-open socket.
+      // Nothing legitimately re-negotiates capabilities, re-marks a transport that cannot change on an
+      // established socket, or wants a second `sync.connected` audit row for one connection.
+      if (current) {
+        sendJson(connection.socket, {
+          type: "hello_ok",
+          requestId: message.requestId,
+          userId: current.userId,
+          deviceId: current.deviceId
+        });
+        return;
+      }
       repo.markDeviceTransport(principal.deviceId, options.transport);
       connection.principal = principal;
       // Replaces the whole object, so every capability has to be named here - a field left out
@@ -705,7 +742,9 @@ async function handleMessage(
 function requireCrdtTarget(room: RoomRow, relativePath: string): string {
   const normalized = normalizeRelativePath(relativePath);
   if (!room.crdt_enabled) {
-    throw new AppError("CRDT_DISABLED", "This room has not enabled CRDT sync.", 409);
+    // Same wording as the presence path's CRDT_DISABLED - one code must not read two different ways
+    // depending on which lane produced it.
+    throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
   }
   if (!isCrdtEligiblePath(normalized)) {
     throw new AppError("INVALID_PATH", "Live editing is available only in Markdown notes.", 422);
