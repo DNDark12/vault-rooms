@@ -136,4 +136,36 @@ describe("server bootstrap and invite flow", () => {
 
     await app.close();
   });
+
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // This is the very first request a new device makes, so "something was missing" would leave someone
+  // staring at a join form with no idea which box is empty - the per-field detail has to survive the
+  // rewrite, just phrased as the thing the user fills in rather than the wire field name.
+  it("names the missing join inputs without exposing wire field names", async () => {
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    await injectBootstrap(app, { displayName: "Owner", deviceName: "Owner laptop", teamName: "Demo" });
+
+    const cases: Array<{ payload: Record<string, string>; expected: string }> = [
+      { payload: {}, expected: "This join request needs a complete invite link, your display name and a name for this device." },
+      {
+        payload: { inviteToken: "tr_whatever" },
+        expected: "This join request needs your display name and a name for this device."
+      },
+      {
+        payload: { inviteToken: "tr_whatever", displayName: "Alice" },
+        expected: "This join request needs a name for this device."
+      }
+    ];
+
+    for (const { payload, expected } of cases) {
+      const response = await app.inject({ method: "POST", url: "/api/join", payload });
+      expect(response.statusCode).toBe(422);
+      expect(response.json().error.code).toBe("VALIDATION_ERROR");
+      expect(response.json().error.message).toBe(expected);
+      // The three wire field names must not reappear.
+      expect(response.json().error.message).not.toMatch(/inviteToken|displayName|deviceName/);
+    }
+
+    await app.close();
+  });
 });

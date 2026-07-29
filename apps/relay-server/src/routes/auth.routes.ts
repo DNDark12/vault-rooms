@@ -26,12 +26,16 @@ export function registerAuthRoutes(
   app.post("/api/join", async (request) => {
     const body = request.body as Partial<{ inviteToken: string; displayName: string; deviceName: string }>;
     if (!body.inviteToken || !body.displayName || !body.deviceName) {
+      // Names the *thing the user fills in*, not the wire field. Keeping the per-field detail matters
+      // here: this is the first request a new device ever makes, so "something was missing" leaves
+      // someone stuck on a join form with no idea which box is empty. The old message listed
+      // `inviteToken`/`displayName`/`deviceName` verbatim, which was accurate and useless.
       const missing = [
-        !body.inviteToken && "inviteToken",
-        !body.displayName && "displayName",
-        !body.deviceName && "deviceName"
+        !body.inviteToken && "a complete invite link",
+        !body.displayName && "your display name",
+        !body.deviceName && "a name for this device"
       ].filter((field): field is string => Boolean(field));
-      throw new AppError("VALIDATION_ERROR", "This setup request is missing required information.", 422);
+      throw new AppError("VALIDATION_ERROR", `This join request needs ${joinWithAnd(missing)}.`, 422);
     }
     let invalidCredentials = false;
     try {
@@ -171,4 +175,10 @@ function hostnameFromHeader(header: unknown): string | null {
  *  value this is for: the address a *teammate* used. */
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "::1" || hostname.startsWith("127.");
+}
+
+/** Reads as a sentence rather than a field dump: "a, b and c". Callers only ever pass a non-empty list. */
+function joinWithAnd(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]!}`;
 }
