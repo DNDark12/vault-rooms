@@ -100,6 +100,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     bootstrapPin,
     bootstrapRateLimiter,
     rotationProbeRateLimiter,
+    presenceService,
     maxFileBytes,
     maxConnections
   } = core;
@@ -115,7 +116,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
       maxConnections,
       transport,
       timerHost: windowSyncTimerHost,
-      crdtDocManager
+      crdtDocManager,
+      presenceService
     });
   }, crdtDocManager, options.publicUrl ?? "http://127.0.0.1:8787");
 
@@ -147,7 +149,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
         }
       : undefined;
   };
-  registerAuthRoutes(routeApp, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity });
+  registerAuthRoutes(routeApp, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity, publicUrl: options.publicUrl });
   registerTeamRoutes(routeApp, repo, {
     get publicUrl() {
       return app.getPublicUrl();
@@ -157,7 +159,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     },
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
     bootstrapPin,
-    connectionRegistry
+    connectionRegistry,
+    presenceService
   });
   registerRoomRoutes(routeApp, repo, {
     get publicUrl() {
@@ -167,6 +170,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
       return currentInviteSecurity();
     },
     connectionRegistry,
+    presenceService,
     crdtDocManager
   });
   registerFriendRoutes(routeApp, repo, {
@@ -181,6 +185,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
   registerFileRoutes(routeApp, repo, {
     maxFileBytes,
     connectionRegistry,
+    presenceService,
     crdtDocManager
   });
   registerAuditRoutes(routeApp, repo);

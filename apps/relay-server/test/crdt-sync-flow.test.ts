@@ -424,7 +424,13 @@ describe("CRDT sync flow (Phase 4)", () => {
     await helloAndSubscribe(socket, owner.deviceToken, room.id);
 
     socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
-    expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({ requestId: "c1", code: "CRDT_DISABLED" });
+    const rejected = await nextMessage(socket, "crdt_rejected");
+    expect(rejected).toMatchObject({ requestId: "c1", code: "CRDT_DISABLED" });
+    // One code, one sentence: the CRDT handshake lane and the presence lane both raise CRDT_DISABLED,
+    // and they must not word it differently - a user hitting the same wall twice would otherwise be
+    // told two different things.
+    expect(rejected.message).toBe("Live editing is turned off for this room.");
+    expect(rejected.message).not.toContain("CRDT sync");
   });
 
   it("rejects crdt_create for a non-.md path even in a CRDT-enabled room", async () => {

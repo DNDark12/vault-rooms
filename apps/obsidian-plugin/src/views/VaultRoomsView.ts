@@ -1,10 +1,12 @@
 import { ItemView, Notice, Setting, WorkspaceLeaf } from "obsidian";
 import type { AuditEventSummary, TeamSummary } from "../apiClient.js";
 import { pinnedInfoForServer } from "../controllers/ServerConnectionManager.js";
+import { advertisedAddressDrift } from "../lanAddress.js";
 import { lanSharePresentation } from "../lanShareReachability.js";
 import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
 import { ConnectionDiagnosticsModal } from "../modals/ConnectionDiagnosticsModal.js";
+import { userFacingError } from "../errorMessages.js";
 
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
 
@@ -47,7 +49,7 @@ export class VaultRoomsView extends ItemView {
   async onOpen(): Promise<void> {
     if (this.plugin.getActiveServer() && !this.plugin.activeServerIsOwnStoppedServer()) {
       await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
-        new Notice(error instanceof Error ? error.message : "Failed to load rooms");
+        new Notice(userFacingError(error, "Failed to load rooms"));
       });
     }
     this.render();
@@ -156,6 +158,22 @@ export class VaultRoomsView extends ItemView {
             cls: "vault-rooms-error",
             text: `This device cannot reach the configured LAN share URL (${reachability.error}). Update Public URL override, then restart the server to check the LAN URL again.`
           });
+        }
+        if (reachability.status === "reachable" && reachability.warning) {
+          // Reachable, but not an address to rely on - shown as its own line so "allowed but flagged" is
+          // actually visible rather than collapsing into an ordinary green badge.
+          card.createDiv({ cls: "vault-rooms-room-meta", text: reachability.warning });
+        }
+        if (reachability.status === "not-a-lan-address") {
+          // Distinct from "unreachable" on purpose: this address answers fine from here, which is exactly why
+          // it used to pass the check and then fail on every teammate's machine instead.
+          card.createDiv({ cls: "vault-rooms-error", text: reachability.error });
+        }
+        const drift = advertisedAddressDrift(status.lanUrl, this.plugin.getObservedClientHost());
+        if (drift) {
+          // Only the owner ever gets a non-null value here (the relay withholds it from everyone else), and
+          // it only appears once a teammate has actually connected - so this can't fire during first setup.
+          card.createDiv({ cls: "vault-rooms-error", text: drift });
         }
         card.createDiv({
           cls: "vault-rooms-room-meta",
@@ -558,7 +576,7 @@ export class VaultRoomsView extends ItemView {
             this.auditEvents = null;
             void this.loadAuditPage(0)
               .then(() => this.render())
-              .catch((error) => new Notice(error instanceof Error ? error.message : "Failed to load audit log"));
+              .catch((error) => new Notice(userFacingError(error, "Failed to load audit log")));
           };
         }
       }
@@ -631,7 +649,7 @@ export class VaultRoomsView extends ItemView {
       try {
         await action();
       } catch (error) {
-        new Notice(error instanceof Error ? error.message : "Vault Rooms action failed");
+        new Notice(userFacingError(error, "Vault Rooms action failed"));
       } finally {
         button.disabled = false;
       }

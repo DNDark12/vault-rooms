@@ -3,6 +3,7 @@ import { evaluatePolicy } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import type { RoomRow } from "../db/schema.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import { describePermission } from "./userFacingMessages.js";
 
 export function hasRoomPermission(input: {
   repo: RelayRepository;
@@ -15,6 +16,12 @@ export function hasRoomPermission(input: {
   // rules once via repo.listAclRulesForRoom and pass them here, instead of re-querying per
   // recipient.
   aclRules?: AclRule[];
+  // Optional pre-resolved team IDs for this principal's user. The aclRules hoist above dedupes the
+  // *ACL* query across recipients but not the per-principal listUserTeams join, which otherwise runs
+  // once per recipient per message. Presence fanout runs at caret-movement frequency rather than
+  // per-edit, so it memoizes this for the duration of one message/sweep and passes it here; every
+  // other caller keeps the previous behavior by omitting it.
+  teamIds?: string[];
 }): boolean {
   const resource = input.permission.startsWith("room:")
     ? { type: "room" as const, roomId: input.room.id, roomOwnerUserId: input.room.owner_user_id }
@@ -24,7 +31,7 @@ export function hasRoomPermission(input: {
       type: "user",
       id: input.principal.userId,
       userId: input.principal.userId,
-      teamIds: input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
+      teamIds: input.teamIds ?? input.repo.listUserTeams(input.principal.userId).map((team) => team.teamId)
     },
     resource,
     permission: input.permission,
@@ -67,7 +74,9 @@ export function assertRoomPermission(input: {
       resourceId: input.room.id,
       metadata: { permission: input.permission, relativePath: input.relativePath, reason: decision.reason }
     });
-    throw new AppError("PERMISSION_DENIED", `You do not have ${input.permission} permission for this path.`, 403);
+    // The audit row above keeps the raw permission code for operators; the message a user reads names
+    // the action instead.
+    throw new AppError("PERMISSION_DENIED", `You don't have permission to ${describePermission(input.permission)}.`, 403);
   }
 }
 

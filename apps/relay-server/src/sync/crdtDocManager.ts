@@ -163,12 +163,12 @@ export class CrdtDocManager {
     try {
       remoteStateVector = fromBase64(remoteStateVectorBase64);
     } catch {
-      throw new AppError("CRDT_INVALID_UPDATE", "The state vector could not be decoded.", 422);
+      throw new AppError("CRDT_INVALID_UPDATE", "Live-editing data from this device couldn't be read - reload the note.", 422);
     }
     try {
       return toBase64(Y.encodeStateAsUpdate(cached.doc, remoteStateVector));
     } catch {
-      throw new AppError("CRDT_INVALID_UPDATE", "The state vector could not be applied.", 422);
+      throw new AppError("CRDT_INVALID_UPDATE", "Live-editing data from this device couldn't be read - reload the note.", 422);
     }
   }
 
@@ -185,10 +185,10 @@ export class CrdtDocManager {
     try {
       updateBytes = fromBase64(updateBase64);
     } catch {
-      throw new AppError("CRDT_INVALID_UPDATE", "The update could not be decoded.", 422);
+      throw new AppError("CRDT_INVALID_UPDATE", "A live-editing update couldn't be read - reload the note.", 422);
     }
     if (updateBytes.byteLength > MAX_CRDT_UPDATE_BYTES) {
-      throw new AppError("FILE_TOO_LARGE", "The CRDT update exceeds the per-update size limit.", 413);
+      throw new AppError("FILE_TOO_LARGE", "This live-editing change is larger than the server accepts.", 413);
     }
 
     const key = this.key(fileId, epoch);
@@ -199,7 +199,7 @@ export class CrdtDocManager {
       // A malformed-but-decodable update (bad varint structure, etc.) - Yjs's decoder throws
       // before mutating the doc's shared state in this case, so there is nothing to roll back or
       // evict; the doc is simply untouched.
-      throw new AppError("CRDT_INVALID_UPDATE", "The update could not be applied.", 422);
+      throw new AppError("CRDT_INVALID_UPDATE", "A live-editing update couldn't be read - reload the note.", 422);
     }
 
     let seq: number;

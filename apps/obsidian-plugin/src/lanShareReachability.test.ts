@@ -80,6 +80,7 @@ describe("LanShareReachabilityMonitor", () => {
   });
 
   it("turns a failed required probe into an actionable unreachable state", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const monitor = new LanShareReachabilityMonitor(
       vi.fn().mockRejectedValue(new Error("net::ERR_ADDRESS_UNREACHABLE")),
       vi.fn()
@@ -88,10 +89,38 @@ describe("LanShareReachabilityMonitor", () => {
     await expect(monitor.require({ baseUrl: "http://192.168.1.49:8787" })).rejects.toThrow(
       "LAN share URL is unreachable"
     );
+
+    // Both of these are read by a human: `state.error` is rendered in the panel and the thrown message
+    // reaches a Notice. Neither may carry the Electron network token - a user shown
+    // "net::ERR_ADDRESS_UNREACHABLE" learns nothing actionable from it.
+    const state = monitor.getState();
+    expect(state).toMatchObject({ status: "unreachable" });
+    expect("error" in state && state.error).not.toContain("net::");
+    expect("error" in state && state.error).toMatch(/same network|can't be reached/i);
+
+    // The raw token is not discarded, just moved off-screen: it is what identifies which layer refused.
+    expect(warn).toHaveBeenCalledWith(
+      "Vault Rooms: LAN share reachability probe failed",
+      "http://192.168.1.49:8787",
+      expect.objectContaining({ message: "net::ERR_ADDRESS_UNREACHABLE" })
+    );
+    warn.mockRestore();
+  });
+
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // The stored `error` is displayed in the panel, so a non-Error throw must not surface as
+  // "[object Object]". The actionable prefix on the *thrown* error is unrelated and stays intact.
+  it("keeps the displayed unreachable reason readable for a non-Error throw", async () => {
+    const monitor = new LanShareReachabilityMonitor(vi.fn().mockRejectedValue({ unexpected: true }), vi.fn());
+
+    await expect(monitor.require({ baseUrl: "http://192.168.1.49:8787" })).rejects.toThrow(
+      "LAN share URL is unreachable"
+    );
     expect(monitor.getState()).toMatchObject({
       status: "unreachable",
-      error: expect.stringContaining("net::ERR_ADDRESS_UNREACHABLE")
+      error: "LAN reachability check failed."
     });
+    expect(JSON.stringify(monitor.getState())).not.toContain("[object Object]");
   });
 
   it("deduplicates a checked target by URL and full pin unless forced", async () => {
@@ -136,6 +165,68 @@ describe("lanSharePresentation", () => {
       label: "LAN share: unreachable",
       className: "is-stopped"
     });
+  });
+
+  it("distinguishes an address that can't work from one that's merely unreachable", () => {
+    // Worded differently on purpose: this address IS reachable from the host, which is why it used to show
+    // green. "Unreachable" would be actively wrong here and send the host looking at their firewall.
+    expect(
+      lanSharePresentation({ key: "k", baseUrl: "http://127.0.0.1:8787", status: "not-a-lan-address", error: "loopback" })
+    ).toMatchObject({
+      label: "LAN share: not a LAN address",
+      className: "is-stopped"
+    });
+  });
+});
+
+describe("LanShareReachabilityMonitor address validation", () => {
+  // The onboarding bug this closes: a loopback override is trivially reachable from the host, so the probe
+  // reported success, the badge went green, and the invite was issued - and the failure surfaced on the
+  // teammate's machine as "can't connect", the one place they can't diagnose it.
+  it("never probes a loopback address, and reports why it can't be used", async () => {
+    const probe = vi.fn().mockResolvedValue(undefined);
+    const monitor = new LanShareReachabilityMonitor(probe);
+
+    monitor.check({ baseUrl: "http://127.0.0.1:8787" });
+
+    expect(probe).not.toHaveBeenCalled();
+    const state = monitor.getState();
+    expect(state.status).toBe("not-a-lan-address");
+    expect("error" in state && state.error).toMatch(/computer that's asking/);
+  });
+
+  it("blocks invite creation on a loopback address with an actionable message", async () => {
+    const probe = vi.fn().mockResolvedValue(undefined);
+    const monitor = new LanShareReachabilityMonitor(probe);
+
+    await expect(monitor.require({ baseUrl: "http://localhost:8787" })).rejects.toThrow(/can't be used by a teammate/i);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  // "Allowed but flagged" has to actually reach the UI. The classifier produced a warning for a
+  // self-assigned address, but the monitor dropped it and reported a plain "reachable" - so a link-local
+  // setup rendered as an ordinary green badge with nothing said about it.
+  it("carries a usable-but-noteworthy address's warning through to the rendered state", async () => {
+    const probe = vi.fn().mockResolvedValue(undefined);
+    const monitor = new LanShareReachabilityMonitor(probe);
+
+    await monitor.require({ baseUrl: "http://169.254.10.20:8787" });
+
+    const state = monitor.getState();
+    expect(state.status).toBe("reachable");
+    expect("warning" in state && state.warning).toMatch(/self-assigned/);
+    expect(lanSharePresentation(state)).toMatchObject({ label: "LAN share: reachable, with a caveat" });
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("still probes an ordinary private LAN address", async () => {
+    const probe = vi.fn().mockResolvedValue(undefined);
+    const monitor = new LanShareReachabilityMonitor(probe);
+
+    await monitor.require({ baseUrl: "http://192.168.1.50:8787" });
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(monitor.getState().status).toBe("reachable");
   });
 });
 

@@ -13,6 +13,7 @@ import {
 import { CrdtEditorController } from "./crdtEditorBinding.js";
 import { CrdtDocStore } from "./crdtDocStore.js";
 import { CrdtRejectedError, CrdtSessionManager } from "./crdtSession.js";
+import { userFacingError } from "./errorMessages.js";
 import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
@@ -55,6 +56,9 @@ function crdtRenameMarkerKey(roomId: string, oldRelativePath: string, newRelativ
 export default class VaultRoomsPlugin extends Plugin {
   settings: VaultRoomsSettings = DEFAULT_SETTINGS;
   visibleRooms: RoomSummary[] = [];
+  /** Owner-only signal from the relay: the address a teammate actually connected on. Null until someone has,
+   *  and for non-owners. Refreshed by refreshTeams(); see advertisedAddressDrift for how it's used. */
+  private observedClientHost: string | null = null;
   /** This device's own teams (with ownerUserId) - scoped to the caller's memberships by the server
    *  (server owner sees all). Used for team-management UI (Invite link/Delete team/members), which
    *  needs ownerUserId/role - never use this for the room ACL "Team" picker. */
@@ -182,7 +186,7 @@ export default class VaultRoomsPlugin extends Plugin {
 
     if (this.settings.server.autoStart) {
       this.startEmbeddedServer().catch((error) => {
-        new Notice(error instanceof Error ? `Vault Rooms server failed to start: ${error.message}` : "Vault Rooms server failed to start.");
+        new Notice(`Vault Rooms server failed to start: ${userFacingError(error, "the server did not report a reason.")}`);
       });
     }
 
@@ -270,7 +274,7 @@ export default class VaultRoomsPlugin extends Plugin {
       try {
         pin = pinnedInviteInfoFromParams(params);
       } catch (error) {
-        new Notice(error instanceof Error ? error.message : "Invite contains invalid server identity material.");
+        new Notice(userFacingError(error, "Invite contains invalid server identity material."));
         return;
       }
       // If this device already has an active identity on the exact server, accept the Team/Room/
@@ -284,7 +288,7 @@ export default class VaultRoomsPlugin extends Plugin {
           new JoinTeamModal(this, "join", inviteServer, inviteToken, pin).open();
         })
         .catch((error) => {
-          new Notice(error instanceof Error ? error.message : "Failed to accept invite");
+          new Notice(userFacingError(error, "Failed to accept invite"));
         });
     };
     // Accept both obsidian://vault-rooms?mode=join&... and obsidian://vault-rooms/join?... link shapes.
@@ -349,6 +353,12 @@ export default class VaultRoomsPlugin extends Plugin {
 
   getServerStatus(): EmbeddedServerStatus {
     return this.serverConnectionManager.getServerStatus();
+  }
+
+  /** The address a teammate last reached this server on (owner only, null until someone connects). Compared
+   *  against the advertised LAN URL to warn about a stale Public URL override - see advertisedAddressDrift. */
+  getObservedClientHost(): string | null {
+    return this.observedClientHost;
   }
 
   getLanShareReachability(): LanShareReachability {
@@ -653,6 +663,9 @@ export default class VaultRoomsPlugin extends Plugin {
         throw error;
       }
     }
+    // Owner-only, and absent until a teammate has actually connected - see advertisedAddressDrift for what
+    // it's compared against and why that comparison is the only way to notice a stale Public URL override.
+    this.observedClientHost = me.observedClientHost?.host ?? null;
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
     this.teamDirectory = directoryResult.teams;
@@ -894,7 +907,7 @@ export default class VaultRoomsPlugin extends Plugin {
     await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
-      new Notice(error instanceof Error ? error.message : "Failed to load server");
+      new Notice(userFacingError(error, "Failed to load server"));
     });
     this.renderOpenRoomsViews();
     new Notice(`Using ${server.baseUrl}`);
@@ -1096,7 +1109,13 @@ export default class VaultRoomsPlugin extends Plugin {
       }
       openViews.push({ vaultPath: view.file.path, view: cmView });
     }
-    void this.crdtEditorController.syncOpenViews(openViews);
+    // A bind that fails is a normal, recoverable outcome (the controller now drops the failed entry so
+    // the next reconcile retries), but `void` on its own attaches no rejection handler - the failure
+    // would surface as an unhandled promise rejection in Obsidian's console on every reconcile pass
+    // instead of one attributable line.
+    void this.crdtEditorController.syncOpenViews(openViews).catch((error: unknown) => {
+      console.error("Vault Rooms: failed to bind a CRDT editor view", error);
+    });
   }
 
   /**
@@ -1122,6 +1141,10 @@ export default class VaultRoomsPlugin extends Plugin {
     const cmView = getCmEditorView(view.editor);
     const sessionOpen = target ? (this.crdtSessionManager?.isSessionOpen(target.roomId, target.relativePath) ?? false) : false;
     const bound = cmView ? this.crdtEditorController.isBound(cmView) : false;
+    // Live cursors share this command for the same reason live editing does: every link looks fine on
+    // its own and the feature is simply absent, so "I can't see their caret" needs one reading rather
+    // than another round of inference.
+    const presence = target ? this.crdtSessionManager?.describePresence(target.roomId, target.relativePath) : undefined;
     // Which mounted room *contains* this path is resolved independently of whether that room has CRDT
     // enabled. Reporting them together (as a first version of this command did) can't distinguish "this
     // note isn't in any mounted room" from "it is, but that room has live editing switched off" - both
@@ -1152,6 +1175,14 @@ export default class VaultRoomsPlugin extends Plugin {
       crdtSessionOpen: sessionOpen,
       editorBoundToSession: bound,
       liveEditingActive: Boolean(target) && sessionOpen && bound,
+      // presenceTransportReady is false until this session's own CRDT handshake completes (or after a
+      // rejection); presencePublished means this device has actually advertised a caret.
+      presenceTransportReady: presence?.transportReady ?? null,
+      presencePublished: presence?.published ?? null,
+      presenceRemotePeers: presence?.remotePeers ?? null,
+      presenceRemoteNames: presence?.remoteNames ?? null,
+      presenceBoundPanes: presence?.boundPanes ?? null,
+      presencePanesWithSelection: presence?.panesWithSelection ?? null,
       mountedRooms: Object.entries(this.settings.mountedRooms).map(([roomId, state]) => ({
         roomId,
         name: this.visibleRooms.find((candidate) => candidate.id === roomId)?.name ?? null,
@@ -1164,6 +1195,18 @@ export default class VaultRoomsPlugin extends Plugin {
       }))
     };
     console.warn("Vault Rooms: live-editing diagnostics", report);
+    // Reported alongside the verdict rather than folded into it: live editing and live cursors fail
+    // independently, so collapsing them would reproduce exactly the ambiguity the room/CRDT split above
+    // was introduced to remove.
+    const cursorNote = !report.liveEditingActive
+      ? ""
+      : presence === undefined
+        ? ""
+        : !presence.transportReady
+          ? " Cursors are not active yet: this note's CRDT handshake has not completed (or a presence update was rejected)."
+          : presence.remotePeers > 0
+            ? ` Cursors: ${presence.remotePeers} other editor(s) visible (${presence.remoteNames.join(", ")}).`
+            : " Cursors are active, but nobody else has this note open right now.";
     const verdict = report.liveEditingActive
       ? "Live editing IS active for this note."
       : !report.containingRoomId
@@ -1179,7 +1222,7 @@ export default class VaultRoomsPlugin extends Plugin {
             : !report.crdtSessionOpen
               ? "No CRDT session is open for this note yet."
               : "A session is open but this editor isn't bound to it.";
-    new Notice(`Vault Rooms: ${verdict} Full details are in the developer console.`, 10000);
+    new Notice(`Vault Rooms: ${verdict}${cursorNote} Full details are in the developer console.`, 10000);
   }
 
   /** Reads current on-disk text for CRDT reconciliation - null if the file doesn't exist locally
@@ -1224,6 +1267,9 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   private resetSessionState(): void {
+    // Scoped to the active server: leaving it stale would compare another server's observation against this
+    // device's own hosted LAN URL and warn about drift that doesn't exist.
+    this.observedClientHost = null;
     this.visibleRooms = [];
     this.teams = [];
     this.teamDirectory = [];
@@ -1271,7 +1317,7 @@ export default class VaultRoomsPlugin extends Plugin {
         // etc.) vanished silently - the file just never showed up for teammates with no
         // indication anything went wrong.
         console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
-        new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
+        new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "the server rejected the change.")}`);
       },
       debounceMs: this.settings.debounceMs,
       isStillMounted: () => this.settings.mountedRooms[roomId] === roomState && !roomState.unmounted
@@ -1377,7 +1423,7 @@ export default class VaultRoomsPlugin extends Plugin {
               // forking a duplicate. The next reconnect's room snapshot reconciles this device.
               console.error(`Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}"`, error);
               new Notice(
-                `Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}" - ${error instanceof Error ? error.message : String(error)}`
+                `Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}" - ${userFacingError(error, "the server rejected the rename.")}`
               );
             });
           }
@@ -1576,8 +1622,10 @@ export default class VaultRoomsPlugin extends Plugin {
         void this.saveSettings();
         this.renderOpenRoomsViews();
       },
-      onRevoked: () => {
-        new Notice(`Your access to ${server.baseUrl} was revoked.`);
+      onRevoked: (reason) => {
+        // The relay now says *why* on `hello_error`, so prefer its wording; the per-server fallback
+        // stays for `revoked` and for older relays that send a bare code.
+        new Notice(userFacingError(reason, `Your access to ${server.baseUrl} was revoked.`));
         if (this.settings.activeServerId === server.id) {
           this.settings.activeServerId = undefined;
         }
@@ -1614,6 +1662,16 @@ export default class VaultRoomsPlugin extends Plugin {
         if (visible) {
           visible.crdtEnabled = crdtEnabled;
         }
+        if (!crdtEnabled) {
+          // Leaving the CRDT lane retires every document in the room, so live editor bindings (and the
+          // presence facades they own) have to come down with it - otherwise a pane keeps a compartment
+          // pointed at a session the engine no longer maintains.
+          this.crdtEditorController.unbindRoom(roomId);
+          void this.crdtSessionManager?.disposeRoom(roomId);
+        }
+        // Harmless when enabling, and necessary so open panes rebind once the fresh snapshot this same
+        // message triggers has established their epochs.
+        this.handleActiveEditorChanged();
       }
     });
     socket.connect();
@@ -1648,7 +1706,7 @@ export default class VaultRoomsPlugin extends Plugin {
         new Notice("This server requires a fresh pinned invite link from its owner to complete strict TLS migration.");
         return;
       }
-      new Notice(error instanceof Error ? error.message : "TLS migration failed");
+      new Notice(userFacingError(error, "TLS migration failed"));
     } finally {
       this.securityMigrationsInFlight.delete(server.id);
     }
@@ -1673,7 +1731,7 @@ export default class VaultRoomsPlugin extends Plugin {
       if (error === originalError) {
         return "normal";
       }
-      new Notice(error instanceof Error ? error.message : "Could not verify the server identity rotation.");
+      new Notice(userFacingError(error, "Could not verify the server identity rotation."));
       return "stop";
     }
   }

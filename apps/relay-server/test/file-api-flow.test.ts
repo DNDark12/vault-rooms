@@ -84,6 +84,13 @@ describe("file REST API", () => {
     expect(remove.statusCode).toBe(403);
     expect(remove.json().error.code).toBe("PERMISSION_DENIED");
 
+    // The code stays the machine-readable signal; the message names the action, not the permission
+    // identifier the policy engine evaluated.
+    for (const denial of [update, remove]) {
+      expect(denial.json().error.message).not.toMatch(/file:|room:|sync:/);
+      expect(denial.json().error.message).toMatch(/don't have permission to \w/);
+    }
+
     const readBack = await app.inject({
       method: "GET",
       url: `/api/rooms/${room.id}/files/content?path=Board.md`,
@@ -191,6 +198,10 @@ describe("file REST API", () => {
     });
     expect(oversized.statusCode).toBe(413);
     expect(oversized.json().error.code).toBe("FILE_TOO_LARGE");
+    // The message crosses the wire into an Obsidian Notice, so it states the actual limit rather than
+    // naming the env var that configures it.
+    expect(oversized.json().error.message).toContain("limit 32 bytes");
+    expect(oversized.json().error.message).not.toContain("MAX_FILE_BYTES");
   });
 
   it("lets the owner's writes win on conflict when the room's conflictPolicy is owner_wins", async () => {

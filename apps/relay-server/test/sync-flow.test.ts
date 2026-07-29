@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { createApp } from "../src/app.js";
 import type { RelayRepository } from "../src/db/repositories/relayRepository.js";
 import { ConnectionRegistry } from "../src/sync/connectionRegistry.js";
+import type { PresenceService } from "../src/sync/presenceService.js";
 import type { CrdtDocManager } from "../src/sync/crdtDocManager.js";
 import { handleSyncSocket, type SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
@@ -91,10 +92,11 @@ describe("WebSocket sync", () => {
       baseVersion: 0,
       content: "x".repeat(33)
     });
-    expect(await nextMessage(socket, "file_change_rejected")).toMatchObject({
-      requestId: "oversized-file",
-      code: "FILE_TOO_LARGE"
-    });
+    const rejection = await nextMessage(socket, "file_change_rejected");
+    expect(rejection).toMatchObject({ requestId: "oversized-file", code: "FILE_TOO_LARGE" });
+    // Same wording contract as the REST lane - both go through the same AppError.
+    expect(rejection.message).toContain("limit 32 bytes");
+    expect(rejection.message).not.toContain("MAX_FILE_BYTES");
   });
 
   it("authenticates, broadcasts changes/deletes, rejects conflicts, snapshots on reconnect, and closes revoked sockets", async () => {
@@ -734,7 +736,10 @@ describe("WebSocket admission timeout", () => {
       maxConnections: 5,
       transport: "http",
       timerHost: timers,
-      crdtDocManager: {} as unknown as CrdtDocManager
+      crdtDocManager: {} as unknown as CrdtDocManager,
+      // Admission/timeout behavior never reaches presence; a no-op stub keeps this fixture focused
+      // (matching the crdtDocManager cast above) rather than standing up a real registry.
+      presenceService: { removeConnection: () => undefined } as unknown as PresenceService
     });
 
     expect(registry.size()).toBe(1);
@@ -764,7 +769,10 @@ describe("WebSocket admission timeout", () => {
       maxConnections: 5,
       transport: "http",
       timerHost: timers,
-      crdtDocManager: {} as unknown as CrdtDocManager
+      crdtDocManager: {} as unknown as CrdtDocManager,
+      // Admission/timeout behavior never reaches presence; a no-op stub keeps this fixture focused
+      // (matching the crdtDocManager cast above) rather than standing up a real registry.
+      presenceService: { removeConnection: () => undefined } as unknown as PresenceService
     });
     authenticated.emitMessage(JSON.stringify({
       type: "hello",

@@ -297,14 +297,14 @@ describe("shared REST and WebSocket transport enforcement", () => {
         tokenSecurity: "plain"
       },
       subscriptions: new Set(),
-      capabilities: { crdt: false }
+      capabilities: { crdt: false, presence: false }
     });
     registry.add({
       id: "unauthenticated",
       socket: socket(unauthenticatedMessages),
       principal: null,
       subscriptions: new Set(),
-      capabilities: { crdt: false }
+      capabilities: { crdt: false, presence: false }
     });
 
     registry.broadcastAuthenticated({

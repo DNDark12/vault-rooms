@@ -85,6 +85,12 @@ class FakeCrdtBridge implements CrdtWsBridge {
 
   onConnected(): void {}
 
+  disconnectCount = 0;
+
+  onDisconnected(): void {
+    this.disconnectCount += 1;
+  }
+
   registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void {
     this.registeredEpochs.push({ roomId, relativePath, epoch });
   }
@@ -294,6 +300,41 @@ describe("RoomSyncSocket security messages", () => {
     socket.disconnect();
   });
 
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // The relay's `hello_error` prose has to reach the notice, which means onRevoked needs a structured
+  // reason rather than no arguments at all - otherwise the wording is parsed and then dropped.
+  it("hands the relay's revocation reason to onRevoked, and stays callable for a code-only frame", async () => {
+    const onRevoked = vi.fn();
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), onRevoked });
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+
+    await handleMessage(
+      JSON.stringify({
+        type: "hello_error",
+        requestId: "hello_1",
+        code: "UNAUTHORIZED",
+        message: "This device is no longer signed in to this server."
+      })
+    );
+    expect(onRevoked).toHaveBeenCalledWith({
+      code: "UNAUTHORIZED",
+      message: "This device is no longer signed in to this server."
+    });
+
+    // An older relay sends no prose; the callback still fires with just the code so the UI can look up
+    // its own wording rather than showing nothing.
+    onRevoked.mockClear();
+    await handleMessage(JSON.stringify({ type: "hello_error", code: "UNAUTHORIZED" }));
+    expect(onRevoked).toHaveBeenCalledWith({ code: "UNAUTHORIZED" });
+
+    // `revoked` carries neither field and must not synthesize empty ones.
+    onRevoked.mockClear();
+    await handleMessage(JSON.stringify({ type: "revoked" }));
+    expect(onRevoked).toHaveBeenCalledWith({});
+
+    socket.disconnect();
+  });
+
   it.each([
     [4001, "credentials_rotated"],
     [4002, "tls_enforced"]
@@ -428,6 +469,50 @@ describe("RoomSyncSocket reconnect ordering", () => {
 
     expect(onPinnedTransportFailure).toHaveBeenCalledOnce();
     expect(reconnects).toHaveLength(1);
+    socket.disconnect();
+  });
+
+  // The pinned-failure branch returns from the close handler before any setState, and its retry/normal
+  // decisions reopen the socket without ever leaving "connected". Notifying the CRDT lane only from setState
+  // therefore missed this path entirely, leaving a crdt_rename/crdt_create waiting on a reply from a socket
+  // that no longer exists - the exact hang the disconnect handling was added to prevent.
+  it("fails in-flight CRDT requests when a pinned transport failure closes the socket", async () => {
+    const sockets = stubControllableWebSockets();
+    let resolveDecision!: (decision: "normal") => void;
+    const onPinnedTransportFailure = vi.fn().mockReturnValue(
+      new Promise<"normal">((resolve) => {
+        resolveDecision = resolve;
+      })
+    );
+    vi.spyOn(window, "setTimeout").mockImplementation(((callback: TimerHandler, delay?: number) => {
+      void callback;
+      void delay;
+      return 1;
+    }) as typeof window.setTimeout);
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const server = createServer();
+    const crdt = new FakeCrdtBridge(false);
+    const socket = new RoomSyncSocket(server, { ...createDeps(), crdt, onPinnedTransportFailure });
+
+    socket.connect();
+    await flushAsyncWork();
+    // Reach a genuinely connected socket first: the pinned branch below never leaves that state, which is
+    // precisely why notifying only from `setState` missed it. Counting from here makes the assertion mean
+    // "the close itself failed the pending requests", not "connect() happened to fire it earlier".
+    sockets[0]?.emit("open");
+    await flushAsyncWork();
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+    expect(socket.getState()).toBe("connected");
+    const disconnectsWhileConnected = crdt.disconnectCount;
+
+    server.securityMode = "pinned-tls";
+    sockets[0]?.emit("error", { error: new Error("certificate changed") });
+    sockets[0]?.emit("close", { code: 1006 });
+    resolveDecision("normal");
+    await flushAsyncWork();
+
+    expect(crdt.disconnectCount).toBeGreaterThan(disconnectsWhileConnected);
     socket.disconnect();
   });
 
@@ -604,6 +689,7 @@ describe("RoomSyncSocket room subscription lifecycle", () => {
       handleServerMessage,
       handleRoomSnapshot: () => undefined,
       onConnected: () => undefined,
+      onDisconnected: () => undefined,
       registerKnownEpoch: () => undefined,
       isSessionOpen: () => false
     };
@@ -828,5 +914,144 @@ describe("RoomSyncSocket.reconcileSnapshot", () => {
     expect(vault.files.get("Vault Rooms/demo/Projects Demo/Kept.md")).toBe("kept");
     expect(onApplied).toHaveBeenCalledOnce();
     expect(consoleError).toHaveBeenCalledOnce();
+  });
+});
+
+// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
+// The socket's job for presence is narrow: advertise the capability, and route the three server
+// variants through the same mounted-room gate and ordering queue the CRDT lane already uses.
+describe("RoomSyncSocket presence negotiation", () => {
+  it("advertises crdt and presence together on hello", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const socket = new RoomSyncSocket(createServer(), createDeps());
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+
+    const hello = sockets[0]?.sent.map((raw) => JSON.parse(raw)).find((message) => message.type === "hello");
+    expect(hello?.capabilities).toEqual({ crdt: true, presence: true });
+    socket.disconnect();
+  });
+
+  it("routes every presence variant to the CRDT bridge for a mounted room", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const seen: string[] = [];
+    const deps = createDeps();
+    const socket = new RoomSyncSocket(createServer(), {
+      ...deps,
+      getMountedRoom: () => ({ unmounted: false }) as unknown as MountedRoomState,
+      crdt: {
+        handleServerMessage: async (message) => {
+          seen.push(message.type);
+        },
+        handleRoomSnapshot: () => undefined,
+        onConnected: () => undefined,
+        onDisconnected: () => undefined,
+        registerKnownEpoch: () => undefined,
+        isSessionOpen: () => true
+      } as CrdtWsBridge
+    });
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+
+    for (const message of [
+      { type: "presence_snapshot", roomId: "room_1", relativePath: "Board.md", epoch: 0, states: [] },
+      {
+        type: "remote_presence",
+        roomId: "room_1",
+        relativePath: "Board.md",
+        epoch: 0,
+        state: { clientId: 1, user: { userId: "usr_a", displayName: "A" }, cursor: null }
+      },
+      { type: "presence_rejected", roomId: "room_1", relativePath: "Board.md", code: "PERMISSION_DENIED", message: "no" }
+    ]) {
+      sockets[0]?.emit("message", { data: JSON.stringify(message) });
+    }
+    await flushAsyncWork();
+
+    expect(seen).toEqual(["presence_snapshot", "remote_presence", "presence_rejected"]);
+    socket.disconnect();
+  });
+
+  it("ignores presence for a room this device no longer owns", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const seen: string[] = [];
+    const deps = createDeps();
+    const socket = new RoomSyncSocket(createServer(), {
+      ...deps,
+      // An unmount marks the room before it unsubscribes, so a queued cursor can still arrive.
+      getMountedRoom: () => undefined,
+      crdt: {
+        handleServerMessage: async (message) => {
+          seen.push(message.type);
+        },
+        handleRoomSnapshot: () => undefined,
+        onConnected: () => undefined,
+        onDisconnected: () => undefined,
+        registerKnownEpoch: () => undefined,
+        isSessionOpen: () => true
+      } as CrdtWsBridge
+    });
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+    sockets[0]?.emit("message", {
+      data: JSON.stringify({
+        type: "remote_presence",
+        roomId: "room_1",
+        relativePath: "Board.md",
+        epoch: 0,
+        state: { clientId: 1, user: { userId: "usr_a", displayName: "A" }, cursor: null }
+      })
+    });
+    await flushAsyncWork();
+
+    expect(seen).toEqual([]);
+    socket.disconnect();
+  });
+
+  it("notifies the bridge on socket loss so presence stops advertising", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.spyOn(window, "setTimeout").mockImplementation((() => 1) as unknown as typeof window.setTimeout);
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    let disconnects = 0;
+    const deps = createDeps();
+    const socket = new RoomSyncSocket(createServer(), {
+      ...deps,
+      crdt: {
+        handleServerMessage: async () => undefined,
+        handleRoomSnapshot: () => undefined,
+        onConnected: () => undefined,
+        // The single client-side socket-loss hook; CrdtSessionManager fans it out to every session's
+        // presence so nothing is announced into a dead socket.
+        onDisconnected: () => {
+          disconnects += 1;
+        },
+        registerKnownEpoch: () => undefined,
+        isSessionOpen: () => true
+      } as CrdtWsBridge
+    });
+
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok", requestId: "hello_1" }) });
+    await flushAsyncWork();
+    sockets[0]?.emit("close", { code: 1006 });
+    await flushAsyncWork();
+
+    expect(disconnects).toBeGreaterThanOrEqual(1);
+    socket.disconnect();
   });
 });

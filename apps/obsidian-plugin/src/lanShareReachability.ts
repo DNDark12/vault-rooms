@@ -1,4 +1,6 @@
 import { RelayApiClient } from "./apiClient.js";
+import { userFacingError } from "./errorMessages.js";
+import { classifyLanAddress } from "./lanAddress.js";
 import type { PinnedServerInfo } from "./pinnedTransport.js";
 
 export type LanShareProbeTarget = {
@@ -9,8 +11,13 @@ export type LanShareProbeTarget = {
 export type LanShareReachability =
   | { status: "unavailable" }
   | { key: string; baseUrl: string; status: "checking" }
-  | { key: string; baseUrl: string; status: "reachable" }
-  | { key: string; baseUrl: string; status: "unreachable"; error: string };
+  /** `warning` carries an address that works but is worth flagging (e.g. a self-assigned 169.254.x, which
+   *  only reaches teammates on the same direct link and changes whenever the network does). */
+  | { key: string; baseUrl: string; status: "reachable"; warning?: string }
+  | { key: string; baseUrl: string; status: "unreachable"; error: string }
+  /** The address can't work for a teammate no matter what the probe says - see `classifyLanAddress`.
+   *  Kept separate from "unreachable" because probing it would *succeed* and report the opposite. */
+  | { key: string; baseUrl: string; status: "not-a-lan-address"; error: string };
 
 export type LanSharePresentation = {
   label: string;
@@ -22,9 +29,15 @@ export function lanSharePresentation(state: LanShareReachability): LanSharePrese
     case "checking":
       return { label: "LAN share: checking…", className: "is-connecting" };
     case "reachable":
-      return { label: "LAN share: reachable from this device", className: "is-running" };
+      return state.warning
+        ? { label: "LAN share: reachable, with a caveat", className: "is-connecting" }
+        : { label: "LAN share: reachable from this device", className: "is-running" };
     case "unreachable":
       return { label: "LAN share: unreachable", className: "is-stopped" };
+    case "not-a-lan-address":
+      // Deliberately different wording from "unreachable": this address *is* reachable from here, which is
+      // exactly why it used to show green and mislead the host into sending a useless invite.
+      return { label: "LAN share: not a LAN address", className: "is-stopped" };
     case "unavailable":
       return null;
   }
@@ -81,6 +94,19 @@ export class LanShareReachabilityMonitor {
 
   private async run(target: LanShareProbeTarget, key: string, required: boolean): Promise<void> {
     const generation = ++this.generation;
+    // Judge the address before probing it. A loopback address passes a probe from this machine and fails
+    // for every teammate, so probing first would report success and actively mislead - the failure then
+    // showed up on the teammate's device as "can't connect", where they could neither see nor fix it.
+    const verdict = classifyLanAddress(target.baseUrl);
+    if (!verdict.usableForTeammates) {
+      const error = verdict.problem ?? "That address can't be used by a teammate.";
+      this.state = { key, baseUrl: target.baseUrl, status: "not-a-lan-address", error };
+      this.onChange();
+      if (required) {
+        throw new Error(`LAN share URL can't be used by a teammate. ${error}`);
+      }
+      return;
+    }
     this.state = { key, baseUrl: target.baseUrl, status: "checking" };
     this.onChange();
     try {
@@ -91,7 +117,9 @@ export class LanShareReachabilityMonitor {
         }
         return;
       }
-      this.state = { key, baseUrl: target.baseUrl, status: "reachable" };
+      // Carry the classifier's warning through: an address can be reachable *and* still worth flagging, and
+      // dropping it here is why "allowed but flagged" previously rendered as an ordinary green badge.
+      this.state = { key, baseUrl: target.baseUrl, status: "reachable", ...(verdict.warning ? { warning: verdict.warning } : {}) };
       this.onChange();
     } catch (error) {
       if (generation !== this.generation) {
@@ -100,7 +128,12 @@ export class LanShareReachabilityMonitor {
         }
         return;
       }
-      const message = error instanceof Error ? error.message : String(error);
+      // Both paths out of here are user-visible: `state.error` is rendered in the panel, and the thrown
+      // error's message ends up in a Notice. So both get the sanitized text, and the raw failure - the
+      // `net::ERR_*` / `ECONNREFUSED` token that actually says which layer refused - is logged instead
+      // of being dropped. That keeps the probe diagnosable without putting a machine code on screen.
+      console.warn("Vault Rooms: LAN share reachability probe failed", target.baseUrl, error);
+      const message = userFacingError(error, "LAN reachability check failed.");
       this.state = { key, baseUrl: target.baseUrl, status: "unreachable", error: message };
       this.onChange();
       if (required) {

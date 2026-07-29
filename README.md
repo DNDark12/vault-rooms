@@ -129,6 +129,11 @@ instead of one edit becoming a conflict copy.
   so you can choose another.
 - **Per-keystroke merging needs the note open in your editor.** A device with the room merely mounted still
   receives every change, just on the ordinary latency budget above.
+- **Open notes show live cursors.** When authorized teammates have the same CRDT Markdown note open, each sees
+  the other's caret and selection with their authenticated display name and a relay-assigned color, unique
+  among live users in that room session and tuned to your theme.
+  Presence disappears when the editor or session closes; it is note-scoped, not a room-wide online status.
+  V1 deliberately has no participant bar.
 - **Older plugin versions can read but not write** a note in this mode; they get a clear rejection rather than a
   silent conflict.
 - **No new network surface** - it rides the same authenticated connection.
@@ -149,8 +154,9 @@ Vault Rooms never grants permission to run someone else's plugin code.
   Other binaries (audio, video, Office documents) are not synced. Images and PDFs count against the size limit at
   roughly 1.33x their real size.
 - Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
-- Character-level co-editing only exists via a room's CRDT opt-in, and only for Markdown. Live cursors and
-  presence don't exist yet.
+- Character-level co-editing and cursor presence only exist via a room's CRDT opt-in, and only for Markdown.
+  Cursor presence is ephemeral: it appears only for authorized teammates who currently have the same note open,
+  is not persisted, and does not provide a room-wide participant or online list.
 - CRDT caveats: per-keystroke merging applies only to a note open in your editor; renaming a note that's open on
   another device makes that device lose editor focus, which Obsidian controls; and disabling CRDT for a room stops
   using its history without deleting it.
@@ -168,14 +174,21 @@ Start with the **Test** button (Settings → Vault Rooms → Servers, or beside 
 checks the address, whether anything answers, whether it's a Vault Rooms server with the expected identity, and
 whether this device's login still works - then names the step that failed.
 
-- **A teammate can't reach the server:** on the host, confirm the LAN share badge is green and that the advertised
-  address is the current LAN address, not `127.0.0.1`. A browser can't validate a pinned server, so it isn't a
-  useful check.
+- **A teammate can't reach the server:** on the host, confirm the LAN share badge is green. If it says **not a
+  LAN address**, the address can't work for anyone else no matter what your own machine says - a loopback
+  address like `127.0.0.1` always means "the computer that's asking", so it sends every teammate back to their
+  own machine. Use this device's LAN address instead. A browser can't validate a pinned server, so it isn't a
+  useful check either.
 - **The invite link does nothing:** the plugin must already be installed and enabled on that device - the link
   can't install it.
 - **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live
-  editing (CRDT) for the active note"**. It names the missing link. Most often live editing is simply off - it's
-  per room and default-off, so a room created after you last enabled it starts without it.
+  editing (CRDT) for the active note"**. It names the missing content-sync link and also reports whether cursor
+  transport is ready, whether this device published its cursor, and which remote names are visible. Most often
+  live editing is simply off - it's per room and default-off, so a room created after you last enabled it starts
+  without it.
+- **A teammate's cursor isn't visible:** both devices need Vault Rooms 0.2.4 or newer, the same CRDT Markdown note
+  open, the room mounted with live editing enabled, a live connection, and `file:read` access to that exact path.
+  Cursor presence is intentionally absent when a note is only synced in the background.
 - **A teammate's edits aren't showing up:** confirm both devices show the room as **mounted**, not just visible.
   Only mounted rooms hold a live subscription.
 - **Server identity mismatch:** the peer presented a different identity, so Vault Rooms stopped before sending

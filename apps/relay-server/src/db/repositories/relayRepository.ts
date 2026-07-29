@@ -35,6 +35,10 @@ import { RelayCrdtRepository, type CrdtSnapshot } from "./crdtRepository.js";
 export type { FileDeleteResult, FileWriteResult } from "./fileRepository.js";
 export type { CrdtSnapshot } from "./crdtRepository.js";
 
+/** How stale an unchanged `observed_client_host` record may get before it's rewritten. Long, because the
+ *  only consumer is a UI hint and each write re-exports the whole database image. */
+const OBSERVED_HOST_REFRESH_MS = 60 * 60 * 1000;
+
 export type DevicePrincipal = {
   deviceId: string;
   deviceDisplayName: string;
@@ -116,6 +120,77 @@ export class RelayRepository {
 
   setServerIdIfMissing(serverId: string): void {
     this.db.prepare("insert or ignore into server_meta(key, value) values ('server_id', ?)").run(serverId);
+  }
+
+  /**
+   * Records the `Host` a *remote* client actually used to reach this server, so the owner can be told when
+   * their advertised address has drifted (DHCP hands out a new IP, someone moves network) instead of that
+   * only surfacing as a teammate saying "I can't connect". Ignores loopback, because the owner's own client
+   * always connects that way and would otherwise overwrite the useful value with a useless one.
+   *
+   * Stored as a single `server_meta` row rather than a new table: it is a hint for a UI warning, not durable
+   * state anything depends on, and going through `server_meta` means it needs no new plumbing through the two
+   * runtimes. Never written inside `durable()` for the same reason - losing the last observation on a crash
+   * costs nothing, and the next client request re-records it.
+   */
+  recordObservedClientHost(host: string): void {
+    const normalized = host.trim().toLowerCase();
+    // Whitelisted charset: the value comes from a client-supplied `Host` header, and while any member could
+    // forge one, there's no reason to store something that isn't shaped like a hostname or IP.
+    if (normalized.length === 0 || normalized.length > 255 || !/^[a-z0-9.:_-]+$/.test(normalized)) {
+      return;
+    }
+    // Skip the write when nothing changed and the record is recent. Every write re-exports the whole SQLite
+    // image (which holds file contents), so rewriting this row on each request would be real disk churn for
+    // no new information.
+    const existing = this.getObservedClientHost();
+    if (existing?.host === normalized && Date.now() - Date.parse(existing.at) < OBSERVED_HOST_REFRESH_MS) {
+      return;
+    }
+    const value = JSON.stringify({ host: normalized, at: new Date().toISOString() });
+    this.db.prepare("insert or replace into server_meta(key, value) values ('observed_client_host', ?)").run(value);
+  }
+
+  /**
+   * Records the address this server currently advertises, and forgets any observation captured under a
+   * *different* one. Without this the drift warning misfires exactly when it matters most: the owner's IP
+   * changes, they correctly update the override and restart, no teammate has reconnected yet - and the panel
+   * compares the new advertised address against an observation from before the fix, telling them to change it
+   * back to the broken one.
+   */
+  noteAdvertisedHost(host: string): void {
+    const normalized = host.trim().toLowerCase();
+    if (normalized.length === 0) {
+      return;
+    }
+    const row = this.db.prepare("select value from server_meta where key = 'advertised_host'").get() as { value: string } | undefined;
+    if (row?.value === normalized) {
+      return;
+    }
+    this.db.prepare("insert or replace into server_meta(key, value) values ('advertised_host', ?)").run(normalized);
+    this.clearObservedClientHost();
+  }
+
+  /** Forgets where teammates were last seen connecting. Called when the advertised address changes, because
+   *  an observation from before that change describes the *old* setup - comparing against it would tell an
+   *  owner who has just fixed their address that they should change it back. */
+  clearObservedClientHost(): void {
+    this.db.prepare("delete from server_meta where key = 'observed_client_host'").run();
+  }
+
+  getObservedClientHost(): { host: string; at: string } | null {
+    const row = this.db.prepare("select value from server_meta where key = 'observed_client_host'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(row.value) as { host?: unknown; at?: unknown };
+      return typeof parsed.host === "string" && typeof parsed.at === "string" ? { host: parsed.host, at: parsed.at } : null;
+    } catch {
+      return null;
+    }
   }
 
   wasMigratedFromLegacyV01(): boolean {

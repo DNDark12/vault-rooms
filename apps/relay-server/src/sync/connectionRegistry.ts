@@ -15,10 +15,14 @@ export type SyncConnection = {
   principal: DevicePrincipal | null;
   subscriptions: Set<string>;
   // Capability negotiation (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.2). Defaults
-  // to { crdt: false } until a "hello" with capabilities.crdt=true is processed - absent/older
-  // clients never advertise CRDT support, so fanout branching in later phases can trust this
+  // to { crdt: false, presence: false } until a "hello" advertising them is processed - absent/older
+  // clients never advertise support, so fanout branching in later phases can trust this
   // rather than re-deriving it from message.client.version.
-  capabilities: { crdt: boolean };
+  //
+  // `presence` (live cursors, docs/superpowers/specs/2026-07-28-live-cursors-design.md) is clamped
+  // to false unless `crdt` is also true: presence is scoped to live CRDT documents, so there is
+  // nothing for a whole-file-lane connection to attach a caret to.
+  capabilities: { crdt: boolean; presence: boolean };
 };
 
 export class ConnectionRegistry {
@@ -66,7 +70,15 @@ export class ConnectionRegistry {
       ) {
         continue;
       }
-      sendJson(connection.socket, message);
+      // One recipient's failing socket must not silently truncate delivery to everyone after it in
+      // this loop. Presence made this materially more likely (fanout runs at caret-movement
+      // frequency), but the hazard predates it and applies to every broadcast. Deliberately does not
+      // close the socket - its own error/close lifecycle stays canonical and owns cleanup.
+      try {
+        sendJson(connection.socket, message);
+      } catch (error) {
+        console.warn("Vault Rooms relay: could not deliver a room broadcast", error);
+      }
     }
   }
 

@@ -86,7 +86,7 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       renderOpenRoomsViews: () => void;
     };
     internals.app = { workspace: { getLeavesOfType: () => [] } };
-    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews: vi.fn() };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => Promise<void> } }).crdtEditorController = { syncOpenViews: vi.fn(async () => undefined) };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = saveSettings;
@@ -132,7 +132,7 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       renderOpenRoomsViews: () => void;
     };
     internals.app = { workspace: { getLeavesOfType: () => [] } };
-    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews: vi.fn() };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => Promise<void> } }).crdtEditorController = { syncOpenViews: vi.fn(async () => undefined) };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = saveSettings;
@@ -181,7 +181,7 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       renderOpenRoomsViews: () => void;
     };
     internals.app = { workspace: { getLeavesOfType: () => [] } };
-    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews: vi.fn() };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => Promise<void> } }).crdtEditorController = { syncOpenViews: vi.fn(async () => undefined) };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = saveSettings;
@@ -213,7 +213,7 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
     const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
     plugin.settings = settings;
     plugin.visibleRooms = [];
-    const syncOpenViews = vi.fn();
+    const syncOpenViews = vi.fn(async () => undefined);
     const internals = plugin as unknown as {
       app: unknown;
       requireActiveServer: () => ServerConnection;
@@ -222,7 +222,7 @@ describe("VaultRoomsPlugin.refreshRooms", () => {
       renderOpenRoomsViews: () => void;
     };
     internals.app = { workspace: { getLeavesOfType: () => [] } };
-    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => void } }).crdtEditorController = { syncOpenViews };
+    (plugin as unknown as { crdtEditorController: { syncOpenViews: () => Promise<void> } }).crdtEditorController = { syncOpenViews };
     internals.requireActiveServer = () => server;
     internals.apiFor = () => api as unknown as RelayApiClient;
     internals.saveSettings = vi.fn().mockResolvedValue(undefined);

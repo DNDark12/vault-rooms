@@ -16,20 +16,23 @@ const ELIGIBLE_BINARY_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".w
 const MAX_PATH_LENGTH = 1024;
 const MAX_SEGMENT_LENGTH = 255;
 
+// These messages reach a user through the REST/WS error envelope and an Obsidian Notice, so they say
+// what to pick instead rather than restating the normalization rule that rejected the input. The
+// INVALID_PATH code carries the machine-readable meaning and is unchanged.
 export function normalizeRelativePath(input: string): string {
   if (!input || input.includes("\0") || input.startsWith("/") || input.startsWith("\\") || DRIVE_LETTER.test(input)) {
-    throw new AppError("INVALID_PATH", "Path must be a safe relative path.", 422);
+    throw new AppError("INVALID_PATH", "Choose a file or folder inside the shared room.", 422);
   }
   if (input.length > MAX_PATH_LENGTH) {
-    throw new AppError("INVALID_PATH", `Path must be ${MAX_PATH_LENGTH} characters or fewer.`, 422);
+    throw new AppError("INVALID_PATH", "That path is too long to sync.", 422);
   }
   const normalized = input.replaceAll("\\", "/").replace(/\/+/g, "/");
   const segments = normalized.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith("."))) {
-    throw new AppError("INVALID_PATH", "Path must not contain empty, hidden, current, or parent segments.", 422);
+    throw new AppError("INVALID_PATH", "That path contains a hidden or unsupported folder.", 422);
   }
   if (segments.some((segment) => segment.length > MAX_SEGMENT_LENGTH)) {
-    throw new AppError("INVALID_PATH", `Each path segment must be ${MAX_SEGMENT_LENGTH} characters or fewer.`, 422);
+    throw new AppError("INVALID_PATH", "One folder or file name in this path is too long.", 422);
   }
   return segments.join("/");
 }

@@ -1,6 +1,7 @@
 import { Modal } from "obsidian";
 import type { ConnectionDiagnosticsReport, DiagnosticStep } from "../connectionDiagnostics.js";
 import type VaultRoomsPlugin from "../main.js";
+import { userFacingError } from "../errorMessages.js";
 
 /** Renders a connection-diagnostics run (see connectionDiagnostics.ts) as a step-by-step
  *  checklist, so "why can't I connect" reads as "this exact step failed, check this" instead of
@@ -23,7 +24,7 @@ export class ConnectionDiagnosticsModal extends Modal {
     void this.run().then(
       (report) => this.renderReport(report),
       (error: unknown) => {
-        status.setText(error instanceof Error ? error.message : "Diagnostics failed unexpectedly.");
+        status.setText(userFacingError(error, "Diagnostics failed unexpectedly."));
       }
     );
   }

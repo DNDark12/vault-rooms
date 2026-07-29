@@ -5,6 +5,8 @@ import { hasRoomPermission } from "./services/policyService.js";
 import { generateBootstrapPin } from "./security/bootstrapPin.js";
 import { FixedWindowRateLimiter } from "./security/rateLimiter.js";
 import { ConnectionRegistry } from "./sync/connectionRegistry.js";
+import { PresenceRegistry } from "./sync/presenceRegistry.js";
+import { PresenceService } from "./sync/presenceService.js";
 import type { CrdtMaterializedEvent } from "./sync/crdtDocManager.js";
 import type { SecurityRuntime } from "./routes/security.routes.js";
 
@@ -16,6 +18,13 @@ export type RelayCoreOptions = {
     bootstrapWindowMs?: number;
     rotationProbeMax?: number;
     rotationProbeWindowMs?: number;
+    /** Presence cursor updates per window, per connection. Only non-null updates consume budget -
+     *  a retraction is cleanup, not noise, and always goes through. */
+    presenceMax?: number;
+    presenceWindowMs?: number;
+    /** Test seam for the fixed-window clock. `SyncTimerHost` deliberately stays a scheduler contract
+     *  with no clock, so the limiter's own injectable `now` is threaded here instead. */
+    presenceNow?: () => number;
   };
   security?: {
     runtime: SecurityRuntime;
@@ -36,6 +45,17 @@ export function createRelayCore(db: RelayDb, options: RelayCoreOptions = {}) {
     options.rateLimit?.rotationProbeMax ?? 30,
     options.rateLimit?.rotationProbeWindowMs ?? 60_000
   );
+  // Presence is the first *time-driven* traffic source here - its volume tracks how fast someone
+  // moves a caret rather than how much content exists - so unlike file/sync traffic it does need a
+  // volume bound. See appCore.ts's note on why there is deliberately no general request limiter.
+  const presenceRegistry = new PresenceRegistry();
+  const presenceRateLimiter = new FixedWindowRateLimiter(
+    options.rateLimit?.presenceMax ?? 30,
+    options.rateLimit?.presenceWindowMs ?? 1_000,
+    10_000,
+    options.rateLimit?.presenceNow ?? Date.now
+  );
+  const presenceService = new PresenceService(repo, connectionRegistry, presenceRegistry, presenceRateLimiter);
 
   return {
     repo,
@@ -43,6 +63,9 @@ export function createRelayCore(db: RelayDb, options: RelayCoreOptions = {}) {
     bootstrapPin,
     bootstrapRateLimiter,
     rotationProbeRateLimiter,
+    presenceRegistry,
+    presenceRateLimiter,
+    presenceService,
     maxFileBytes,
     maxConnections,
     security: options.security

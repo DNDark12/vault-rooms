@@ -362,3 +362,39 @@
 .vault-rooms-diagnostic-summary.is-fail {
   color: var(--text-error);
 }
+
+/* Live cursors / note presence (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
+ *
+ * The *hue* of a remote caret is assigned by the relay and unique among live users in a room session;
+ * only saturation and lightness live here. crdtPresence.ts's presenceColor() composes
+ * `hsl(<relay hue> var(--...-saturation) var(--...-lightness))` and y-codemirror.next injects that as
+ * an inline style attribute, so keeping these two channels as variables is what lets a theme tune
+ * legibility without CSS having to out-specify an inline value.
+ *
+ * The eight-slot `--vault-rooms-presence-N` palette this replaces capped a room at eight distinct
+ * colors and let two userIds hash into one slot - and because each client hashed independently, a
+ * collision could show as one caret on one screen and two on another.
+ *
+ * Dark themes get a lighter caret so it reads against a dark editor background. Note the label text is
+ * `--text-on-accent` (white in most themes), which is low-contrast over yellow-band hues; that was
+ * equally true of the retired palette's yellow slot and is accepted rather than fixed here. */
+body {
+  --vault-rooms-presence-saturation: 72%;
+  --vault-rooms-presence-lightness: 45%;
+}
+
+body.theme-dark {
+  --vault-rooms-presence-lightness: 58%;
+}
+
+/* The only styling CSS owns here. y-codemirror.next's base theme hardcodes `color: white` and
+ * `font-family: serif` on the name label, both of which look wrong in Obsidian; these are ordinary
+ * (non-inline) base-theme rules, so a higher-specificity selector overrides them normally. The caret
+ * and selection colors are deliberately left to the adapter's inline values - no !important needed. */
+.workspace-leaf-content .cm-ySelectionInfo {
+  color: var(--text-on-accent, #fff);
+  font-family: var(--font-interface, sans-serif);
+  font-size: var(--font-ui-smaller, 12px);
+  border-radius: var(--radius-s, 4px);
+  padding: 1px 4px;
+}

@@ -181,6 +181,9 @@ export class RelayApiClient implements RelayFileApi {
     user: { id: string; displayName: string };
     device: { id: string; displayName: string };
     isServerOwner: boolean;
+    /** Owner-only: the address a teammate last reached this server on, used to spot a stale Public URL
+     *  override after the machine's LAN address changed. Absent for non-owners and until someone connects. */
+    observedClientHost?: { host: string; at: string } | null;
     teams: MyTeamSummary[];
   }> {
     return this.request("/api/me");

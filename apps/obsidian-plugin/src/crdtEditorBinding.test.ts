@@ -15,7 +15,18 @@ import * as Y from "yjs";
 import type { SyncClientMessage } from "@vault-rooms/protocol";
 import { CrdtDocStore } from "./crdtDocStore.js";
 import { CrdtEditorController, buildCrdtEditorExtension } from "./crdtEditorBinding.js";
+import type { CrdtPresenceAdapter } from "./crdtPresence.js";
 import { CrdtSessionManager } from "./crdtSession.js";
+
+/**
+ * These tests exercise content sync and undo scoping, not presence, but `buildCrdtEditorExtension` now
+ * requires an Awareness-shaped adapter (passing null would disable remote cursor rendering entirely).
+ * The facade only ever uses its view as a map key, so a throwaway token is sufficient here - the tests
+ * that actually cover presence bind real views through CrdtEditorController.
+ */
+function presenceFor(session: { presence: { attachView: (view: EditorView) => CrdtPresenceAdapter } }): CrdtPresenceAdapter {
+  return session.presence.attachView({} as unknown as EditorView);
+}
 
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
 
@@ -107,10 +118,10 @@ describe("buildCrdtEditorExtension (via a real CrdtSessionManager session)", () 
     });
 
     const viewA = new EditorView({
-      state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionA.ytext, new Y.UndoManager(sessionA.ytext))] })
+      state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionA.ytext, new Y.UndoManager(sessionA.ytext), presenceFor(sessionA))] })
     });
     const viewB = new EditorView({
-      state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionB.ytext, new Y.UndoManager(sessionB.ytext))] })
+      state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionB.ytext, new Y.UndoManager(sessionB.ytext), presenceFor(sessionB))] })
     });
 
     const pos = viewA.state.doc.length;
@@ -139,8 +150,8 @@ describe("buildCrdtEditorExtension (via a real CrdtSessionManager session)", () 
       if (origin !== RELAY_ORIGIN) Y.applyUpdate(sessionA.doc, update, RELAY_ORIGIN);
     });
     const undoManagerA = new Y.UndoManager(sessionA.ytext);
-    const viewA = new EditorView({ state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionA.ytext, undoManagerA)] }) });
-    const viewB = new EditorView({ state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionB.ytext, new Y.UndoManager(sessionB.ytext))] }) });
+    const viewA = new EditorView({ state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionA.ytext, undoManagerA, presenceFor(sessionA))] }) });
+    const viewB = new EditorView({ state: EditorState.create({ doc: "", extensions: [buildCrdtEditorExtension(sessionB.ytext, new Y.UndoManager(sessionB.ytext), presenceFor(sessionB))] }) });
 
     viewA.dispatch({ changes: { from: 0, to: 0, insert: "X" } });
     viewB.dispatch({ changes: { from: viewB.state.doc.length, to: viewB.state.doc.length, insert: "Y" } });
@@ -528,5 +539,312 @@ describe("CrdtEditorController.syncOpenViews", () => {
     expect(secondResolved).toBe(true);
     expect(controller.isBound(view)).toBe(true);
     view.destroy();
+  });
+
+  it("retries the same target after an earlier binding attempt rejects", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const ensureSessionIfKnown = manager.ensureSessionIfKnown.bind(manager);
+    vi.spyOn(manager, "ensureSessionIfKnown")
+      .mockRejectedValueOnce(new Error("transient session-open failure"))
+      .mockImplementation(ensureSessionIfKnown);
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const view = editorViewWithCompartment(controller);
+
+    await expect(controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }])).rejects.toThrow(
+      "transient session-open failure"
+    );
+    expect(controller.isBound(view)).toBe(false);
+
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]);
+
+    expect(manager.ensureSessionIfKnown).toHaveBeenCalledTimes(2);
+    expect(controller.isBound(view)).toBe(true);
+    view.destroy();
+  });
+
+  it("does not leave a session marked editor-owned when applying the extension throws", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const view = editorViewWithCompartment(controller);
+    // Obsidian can destroy the view while the session is still opening; dispatching onto it then
+    // throws *after* bindToEditor has already claimed the session.
+    vi.spyOn(view, "dispatch").mockImplementationOnce(() => {
+      throw new Error("Calling update on a destroyed view");
+    });
+
+    await expect(controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }])).rejects.toThrow(
+      "Calling update on a destroyed view"
+    );
+
+    expect(controller.isBound(view)).toBe(false);
+    // Left true, disk reconciliation for this path stays suppressed forever with no editor to justify it.
+    expect(session.boundToEditor).toBe(false);
+    view.destroy();
+  });
+
+  it("keeps a document editor-owned while a second pane showing it is still bound", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const paneA = editorViewWithCompartment(controller);
+    const paneB = editorViewWithCompartment(controller);
+
+    await controller.syncOpenViews([
+      { vaultPath: "Rooms/Demo/Board.md", view: paneA },
+      { vaultPath: "Rooms/Demo/Board.md", view: paneB }
+    ]);
+    expect(session.boundToEditor).toBe(true);
+
+    // Close one split. The other pane still has the note open, so its editor must remain the source
+    // of truth - clearing the flag here would let a stale disk copy reconcile over its unsaved text.
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view: paneA }]);
+
+    expect(controller.isBound(paneA)).toBe(true);
+    expect(controller.isBound(paneB)).toBe(false);
+    expect(session.boundToEditor).toBe(true);
+
+    await controller.syncOpenViews([]);
+    expect(session.boundToEditor).toBe(false);
+
+    paneA.destroy();
+    paneB.destroy();
+  });
+});
+
+// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
+// Covers the wiring between the presence adapter and the two lifecycles that own it: the editor
+// binding (which pane holds which facade) and the session (which Y.Doc the facade belongs to).
+describe("CrdtEditorController presence wiring", () => {
+  it("passes a per-view adapter to yCollab so remote cursors render at all", async () => {
+    const sent: SyncClientMessage[] = [];
+    const manager = makeManager("", sent);
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const pane = editorViewWithCompartment(controller);
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view: pane }]);
+
+    // yCollab only installs the remote-selection theme and ViewPlugin when awareness is truthy, so a
+    // rendered caret element is the observable proof the adapter reached it.
+    session.presence.applyRemote({
+      type: "remote_presence",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 0,
+      state: {
+        clientId: 4242,
+        user: { userId: "usr_peer", displayName: "Alice" },
+        cursor: {
+          yanchor: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(session.ytext, 0)),
+          yhead: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(session.ytext, 0))
+        }
+      }
+    });
+    // Nudge the view so the ViewPlugin recomputes decorations.
+    pane.dispatch({ changes: { from: 0, to: 0, insert: "hi" } });
+
+    expect(pane.dom.querySelector(".cm-ySelectionCaret")).not.toBeNull();
+    expect(pane.dom.querySelector(".cm-ySelectionInfo")?.textContent).toBe("Alice");
+
+    pane.destroy();
+  });
+
+  it("renders two remote peers as two distinct carets in a real editor", async () => {
+    // `usr_0` and `usr_8` are deliberate: FNV-1a % 8 mapped them to the same palette slot, so under
+    // the retired client-side scheme these two peers were the same colour on this screen while a
+    // different client could show them as different colours. Real CodeMirror, real decorations - the
+    // adapter-level unit tests all stubbed out the half where this actually surfaced.
+    const manager = makeManager("");
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const pane = editorViewWithCompartment(controller);
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view: pane }]);
+    pane.dispatch({ changes: { from: 0, to: 0, insert: "hello world" } });
+
+    const at = (index: number) =>
+      Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(session.ytext, index));
+    const remote = (clientId: number, userId: string, displayName: string, hue: number, index: number) => ({
+      type: "remote_presence" as const,
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 0,
+      state: {
+        clientId,
+        user: { userId, displayName, hue },
+        cursor: { yanchor: at(index), yhead: at(index) }
+      }
+    });
+
+    session.presence.applyRemote(remote(100, "usr_0", "Alice", 0, 0));
+    session.presence.applyRemote(remote(101, "usr_8", "Bob", 137.508, 5));
+    pane.dispatch({ changes: { from: 0, to: 0, insert: "hi" } });
+
+    const labels = Array.from(pane.dom.querySelectorAll(".cm-ySelectionInfo"), (node) => node.textContent);
+    expect(labels.sort()).toEqual(["Alice", "Bob"]);
+
+    // Two peers, two colours - taken from the relay's hues rather than derived here.
+    const colors = Array.from(
+      pane.dom.querySelectorAll<HTMLElement>(".cm-ySelectionCaret"),
+      (node) => node.style.borderLeftColor || node.style.borderRightColor || (node.getAttribute("style") ?? "")
+    );
+    expect(new Set(colors).size).toBe(2);
+
+    pane.destroy();
+  });
+
+  it("gives two panes separate facades over one session presence store", async () => {
+    const manager = makeManager();
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const paneA = editorViewWithCompartment(controller);
+    const paneB = editorViewWithCompartment(controller);
+
+    await controller.syncOpenViews([
+      { vaultPath: "Rooms/Demo/Board.md", view: paneA },
+      { vaultPath: "Rooms/Demo/Board.md", view: paneB }
+    ]);
+
+    // Distinct facades, one shared store - the same shape as the per-pane Y.UndoManager.
+    const facadeA = session.presence.attachView(paneA);
+    const facadeB = session.presence.attachView(paneB);
+    expect(facadeA).not.toBe(facadeB);
+    expect(facadeA.doc).toBe(facadeB.doc);
+    expect(facadeA.doc).toBe(session.doc);
+
+    paneA.destroy();
+    paneB.destroy();
+  });
+
+  it("keeps presence while one of two panes closes and retracts once after the last", async () => {
+    const sent: SyncClientMessage[] = [];
+    const manager = makeManager("", sent);
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const paneA = editorViewWithCompartment(controller);
+    const paneB = editorViewWithCompartment(controller);
+    await controller.syncOpenViews([
+      { vaultPath: "Rooms/Demo/Board.md", view: paneA },
+      { vaultPath: "Rooms/Demo/Board.md", view: paneB }
+    ]);
+
+    // Both panes advertise a selection, as two focused panes on one note would.
+    session.presence.attachView(paneA).setLocalStateField("cursor", {
+      anchor: Y.createRelativePositionFromTypeIndex(session.ytext, 0),
+      head: Y.createRelativePositionFromTypeIndex(session.ytext, 0)
+    });
+    session.presence.attachView(paneB).setLocalStateField("cursor", {
+      anchor: Y.createRelativePositionFromTypeIndex(session.ytext, 0),
+      head: Y.createRelativePositionFromTypeIndex(session.ytext, 0)
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+    const removalsBefore = sent.filter((message) => message.type === "presence_set" && message.cursor === null).length;
+
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view: paneA }]);
+    expect(sent.filter((message) => message.type === "presence_set" && message.cursor === null)).toHaveLength(
+      removalsBefore
+    );
+
+    await controller.syncOpenViews([]);
+    expect(sent.filter((message) => message.type === "presence_set" && message.cursor === null)).toHaveLength(
+      removalsBefore + 1
+    );
+
+    paneA.destroy();
+    paneB.destroy();
+  });
+
+  it("retracts presence when the session is torn down, before its Y.Doc is destroyed", async () => {
+    const sent: SyncClientMessage[] = [];
+    const manager = makeManager("", sent);
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+    const clientId = session.doc.clientID;
+    session.presence.attachView({} as unknown as EditorView).setLocalStateField("cursor", {
+      anchor: Y.createRelativePositionFromTypeIndex(session.ytext, 0),
+      head: Y.createRelativePositionFromTypeIndex(session.ytext, 0)
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+
+    // disposeRoom runs the same teardownSession path as an epoch resync and a NOT_FOUND recovery -
+    // the two places that replace the Y.Doc without an unmount, and so the likeliest ghost-cursor
+    // source if the retraction is skipped or ordered after doc.destroy().
+    await manager.disposeRoom("room_1");
+
+    const removals = sent.filter((message) => message.type === "presence_set" && message.cursor === null);
+    expect(removals).toHaveLength(1);
+    expect(removals[0]).toMatchObject({ clientId, relativePath: "Board.md" });
+  });
+
+  it("does not let a presence message create or resurrect a session", async () => {
+    const manager = makeManager();
+
+    // Presence must never call ensureSession - a cursor for a document this device does not have open
+    // would otherwise allocate one, which is how the CRDT lane historically created duplicates.
+    await manager.handleServerMessage({
+      type: "remote_presence",
+      roomId: "room_1",
+      relativePath: "Ghost.md",
+      epoch: 0,
+      state: { clientId: 1, user: { userId: "usr_a", displayName: "A" }, cursor: null }
+    });
+
+    expect(manager.isSessionOpen("room_1", "Ghost.md")).toBe(false);
+  });
+
+  it("keeps CRDT editing alive when a presence update is rejected", async () => {
+    const sent: SyncClientMessage[] = [];
+    const manager = makeManager("", sent);
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+
+    await manager.handleServerMessage({
+      type: "presence_rejected",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      code: "PERMISSION_DENIED",
+      message: "no read access"
+    });
+
+    // The document session survives untouched and still accepts edits.
+    expect(manager.isSessionOpen("room_1", "Board.md")).toBe(true);
+    session.ytext.insert(0, "still editable");
+    expect(session.ytext.toString()).toBe("still editable");
+    expect(sent.some((message) => message.type === "crdt_update")).toBe(true);
   });
 });

@@ -6,8 +6,10 @@ import type { RoomRow } from "../db/schema.js";
 import { requestTransport, type RequestTransport } from "../routes/security.routes.js";
 import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
+import { formatFileLimit } from "../services/userFacingMessages.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 import type { CrdtDocManager } from "./crdtDocManager.js";
+import type { PresenceService } from "./presenceService.js";
 
 export type SyncTimerHost = {
   setInterval(callback: () => void, delayMs: number): unknown;
@@ -20,7 +22,13 @@ export function registerSyncRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
   registry: ConnectionRegistry,
-  options: { maxFileBytes: number; maxConnections: number; timerHost: SyncTimerHost; crdtDocManager: CrdtDocManager }
+  options: {
+    maxFileBytes: number;
+    maxConnections: number;
+    timerHost: SyncTimerHost;
+    crdtDocManager: CrdtDocManager;
+    presenceService: PresenceService;
+  }
 ): void {
   app.get("/sync", { websocket: true }, (socket, request) => {
     handleSyncSocket(socket, repo, registry, { ...options, transport: requestTransport(request) });
@@ -40,6 +48,7 @@ export function handleSyncSocket(
     transport: RequestTransport;
     timerHost: SyncTimerHost;
     crdtDocManager: CrdtDocManager;
+    presenceService: PresenceService;
   }
 ): void {
   if (registry.size() >= options.maxConnections) {
@@ -52,7 +61,7 @@ export function handleSyncSocket(
     socket,
     principal: null,
     subscriptions: new Set(),
-    capabilities: { crdt: false }
+    capabilities: { crdt: false, presence: false }
   };
   registry.add(connection);
 
@@ -94,6 +103,16 @@ export function handleSyncSocket(
   socket.on("close", () => {
     clearHelloTimeout();
     options.timerHost.clearInterval(ping);
+    // The single canonical disconnect hook. The forced-close helpers on ConnectionRegistry
+    // (closeRevokedUser/Device, closeDeviceConnections, closeLegacyPlainTokenConnections) never call
+    // registry.remove themselves - they rely on this event firing - so clearing presence here covers
+    // revocation and TLS enforcement too. Guarded like the audit write below, because the server may
+    // already be tearing down.
+    try {
+      options.presenceService.removeConnection(connection);
+    } catch (error) {
+      console.warn("Vault Rooms relay: could not clear disconnected presence", error);
+    }
     if (connection.principal) {
       try {
         repo.audit({
@@ -122,6 +141,7 @@ async function handleMessage(
     transport: RequestTransport;
     onAuthenticated: () => void;
     crdtDocManager: CrdtDocManager;
+    presenceService: PresenceService;
   },
   raw: string
 ): Promise<void> {
@@ -136,9 +156,52 @@ async function handleMessage(
   if (message.type === "hello") {
     try {
       const principal = authenticateActiveDeviceToken(repo, message.token);
+      // A socket may re-`hello` as the *same* device (it is a harmless liveness re-ack, and
+      // device-revoke-flow.test.ts uses exactly that to prove an unrelated device's session survived a
+      // revocation), but it may never become a different identity. Everything this connection owns -
+      // subscriptions, presence states, and its room-session hue membership - is filed under the
+      // current principal, and PresenceRegistry keys hue leases by (roomId, userId) on the assumption
+      // that a connection's user never changes. Swapping the principal in place left all of it attached
+      // to the previous identity, so one socket alternating between two users re-leased a colour on
+      // every publish (observed hue sequence 0 -> 137.508 -> 0). Rejecting the identity *change* is what
+      // makes that assumption true; rekeying every piece of per-connection state instead would be a far
+      // larger surface for a sequence no real client produces.
+      const current = connection.principal;
+      if (current && (current.userId !== principal.userId || current.deviceId !== principal.deviceId)) {
+        sendJson(connection.socket, {
+          type: "hello_error",
+          requestId: message.requestId,
+          code: "UNAUTHORIZED",
+          message: "This connection is already signed in as someone else - open a new connection instead."
+        });
+        connection.socket.close();
+        return;
+      }
+      // Same device: acknowledge and change nothing. Re-running the setup below would let a re-hello
+      // *degrade* a live connection, because `capabilities` is assigned from the incoming frame - a
+      // re-hello that merely omitted `capabilities` set crdt/presence back to false while this
+      // connection's subscriptions and already-published cursors stayed in place, stranding a ghost
+      // cursor on every peer and cutting this connection off from both lanes over a still-open socket.
+      // Nothing legitimately re-negotiates capabilities, re-marks a transport that cannot change on an
+      // established socket, or wants a second `sync.connected` audit row for one connection.
+      if (current) {
+        sendJson(connection.socket, {
+          type: "hello_ok",
+          requestId: message.requestId,
+          userId: current.userId,
+          deviceId: current.deviceId
+        });
+        return;
+      }
       repo.markDeviceTransport(principal.deviceId, options.transport);
       connection.principal = principal;
-      connection.capabilities = { crdt: Boolean(message.capabilities?.crdt) };
+      // Replaces the whole object, so every capability has to be named here - a field left out
+      // silently reverts to the pre-hello default rather than keeping what the client advertised.
+      // `presence` is gated on `crdt` because presence only exists for live CRDT documents.
+      connection.capabilities = {
+        crdt: Boolean(message.capabilities?.crdt),
+        presence: Boolean(message.capabilities?.crdt && message.capabilities?.presence)
+      };
       options.onAuthenticated();
       repo.audit({
         teamId: null,
@@ -158,14 +221,23 @@ async function handleMessage(
     } catch {
       // A malformed/missing token, or any other unexpected failure - treat it the same as an
       // invalid one rather than letting it become an unhandled rejection.
-      sendJson(connection.socket, { type: "hello_error", requestId: message.requestId, code: "UNAUTHORIZED" });
+      sendJson(connection.socket, {
+        type: "hello_error",
+        requestId: message.requestId,
+        code: "UNAUTHORIZED",
+        message: "This device is no longer signed in to this server."
+      });
       connection.socket.close();
     }
     return;
   }
 
   if (!connection.principal) {
-    sendJson(connection.socket, { type: "hello_error", code: "UNAUTHORIZED" });
+    sendJson(connection.socket, {
+      type: "hello_error",
+      code: "UNAUTHORIZED",
+      message: "This device is no longer signed in to this server."
+    });
     connection.socket.close();
     return;
   }
@@ -173,7 +245,20 @@ async function handleMessage(
   if (message.type === "unsubscribe_room") {
     // Idempotent local lifecycle operation: removing a room the connection never subscribed to is
     // harmless, and needs no room lookup/permission check because it can only reduce delivery.
+    // Presence is cleared explicitly and *before* the subscription is dropped: this branch mutates
+    // connection.subscriptions directly and never notifies ConnectionRegistry, so nothing else would
+    // hear about it - and the removal fanout below needs the subscription still in place to reach the
+    // room's other members.
+    options.presenceService.removeConnectionRoom(connection, message.roomId);
     connection.subscriptions.delete(message.roomId);
+    return;
+  }
+
+  if (message.type === "presence_set") {
+    // Ephemeral and fire-and-forget: no ack, and a rejection never tears down the CRDT session.
+    // rawBytes is measured from the original frame rather than re-serialized, so the cap reflects
+    // what actually crossed the wire.
+    options.presenceService.handleSet(connection, message, Buffer.byteLength(raw, "utf8"));
     return;
   }
 
@@ -208,6 +293,13 @@ async function handleMessage(
         return;
       }
       connection.subscriptions.add(room.id);
+      // Lease this user's room-session cursor colour now, so hues follow join order. Only for a
+      // CRDT-enabled room: nothing else has cursors. Idempotent, so a re-subscribe on reconnect keeps
+      // whatever colour this user already has, and PresenceService itself ignores a connection that
+      // never advertised presence support.
+      if (room.crdt_enabled) {
+        options.presenceService.joinRoom(connection, room.id);
+      }
       // Bring every CRDT document's whole-file content up to date *before* answering with the snapshot.
       // A CRDT document's authoritative text lives in `crdt_updates` and only reaches
       // `files`/`file_versions` when a materialize fires, so a subscribing device reconciles against
@@ -281,12 +373,16 @@ async function handleMessage(
       if (room.crdt_enabled && isCrdtEligiblePath(relativePath)) {
         throw new AppError(
           "CRDT_WRITE_UNSUPPORTED",
-          "This room has CRDT sync enabled for this file - use the CRDT sync message types (or upgrade) instead of a whole-file write.",
+          "This note uses live editing - update the plugin to edit it.",
           409
         );
       }
       if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
-        throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
+        throw new AppError(
+          "FILE_TOO_LARGE",
+          `This file is larger than this server accepts (limit ${formatFileLimit(options.maxFileBytes)}).`,
+          413
+        );
       }
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath });
       assertRoomPermission({
@@ -360,6 +456,9 @@ async function handleMessage(
       });
       if (beforeDelete) {
         options.crdtDocManager.evictDocument(beforeDelete.id, beforeDelete.crdt_epoch);
+        // Same reasoning as the eviction above, for presence: the delete bumped the epoch, so any
+        // live cursor is pinned to an epoch that no longer exists. Uses the *pre-delete* epoch.
+        options.presenceService.removeDocument(room.id, relativePath, beforeDelete.crdt_epoch);
       }
       sendJson(connection.socket, {
         type: "file_delete_ack",
@@ -504,6 +603,11 @@ async function handleMessage(
         // whichever path it actually landed on, rather than rejecting with no way forward.
         actorDisplayName: connection.principal.userDisplayName
       });
+      // A rename is path-only and deliberately leaves crdt_epoch untouched, so presence keyed by
+      // (roomId, relativePath, epoch) does *not* follow the document - it would orphan at the old
+      // path and render a second caret for the same person. Clear the old path before either side
+      // learns about the rename; each client re-announces at the new path after its own handshake.
+      options.presenceService.removeDocument(room.id, result.oldRelativePath, result.epoch);
       sendJson(connection.socket, {
         type: "crdt_renamed",
         requestId: message.requestId,
@@ -543,16 +647,16 @@ async function handleMessage(
       const normalizedPath = requireCrdtTarget(room, relativePath);
       requireCrdtCapability(connection);
       if (!connection.subscriptions.has(room.id)) {
-        throw new AppError("PERMISSION_DENIED", "Subscribe to the room before requesting a CRDT handshake.", 403);
+        throw new AppError("PERMISSION_DENIED", "Open this shared room before starting live editing.", 403);
       }
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:subscribe" });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:read", relativePath: normalizedPath });
       const file = repo.getFile(room.id, normalizedPath);
       if (!file || file.deleted_at) {
-        throw new AppError("NOT_FOUND", "No CRDT document exists at this path yet - send crdt_create first.", 404);
+        throw new AppError("NOT_FOUND", "This note isn't set up for live editing on the server yet.", 404);
       }
       if (message.epoch !== file.crdt_epoch) {
-        throw new AppError("CRDT_STALE_EPOCH", "This document has moved to a new epoch.", 409, { currentEpoch: file.crdt_epoch });
+        throw new AppError("CRDT_STALE_EPOCH", "This note was reset on the server - reopen it.", 409, { currentEpoch: file.crdt_epoch });
       }
       // Answer the client's step1 with the diff it's missing, and independently ask the client
       // for whatever the server itself is missing (contract 1.3) - this second message is the
@@ -596,10 +700,10 @@ async function handleMessage(
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:write", relativePath: normalizedPath });
       const file = repo.getFile(room.id, normalizedPath);
       if (!file || file.deleted_at) {
-        throw new AppError("NOT_FOUND", "No CRDT document exists at this path yet - send crdt_create first.", 404);
+        throw new AppError("NOT_FOUND", "This note isn't set up for live editing on the server yet.", 404);
       }
       if (message.epoch !== file.crdt_epoch) {
-        throw new AppError("CRDT_STALE_EPOCH", "This document has moved to a new epoch.", 409, { currentEpoch: file.crdt_epoch });
+        throw new AppError("CRDT_STALE_EPOCH", "This note was reset on the server - reopen it.", 409, { currentEpoch: file.crdt_epoch });
       }
       const updatedBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
       options.crdtDocManager.applyUpdate(file.id, file.crdt_epoch, message.update, updatedBy);
@@ -638,10 +742,12 @@ async function handleMessage(
 function requireCrdtTarget(room: RoomRow, relativePath: string): string {
   const normalized = normalizeRelativePath(relativePath);
   if (!room.crdt_enabled) {
-    throw new AppError("CRDT_DISABLED", "This room has not enabled CRDT sync.", 409);
+    // Same wording as the presence path's CRDT_DISABLED - one code must not read two different ways
+    // depending on which lane produced it.
+    throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
   }
   if (!isCrdtEligiblePath(normalized)) {
-    throw new AppError("INVALID_PATH", "Only Markdown (.md) files use the CRDT sync lane.", 422);
+    throw new AppError("INVALID_PATH", "Live editing is available only in Markdown notes.", 422);
   }
   return normalized;
 }
@@ -650,7 +756,7 @@ function requireCrdtTarget(room: RoomRow, relativePath: string): string {
  *  use any CRDT-lane message type - absent/false means "no CRDT support", never assumed true. */
 function requireCrdtCapability(connection: SyncConnection): void {
   if (!connection.capabilities.crdt) {
-    throw new AppError("CRDT_CAPABILITY_REQUIRED", "This connection did not advertise CRDT support on hello.", 409);
+    throw new AppError("CRDT_CAPABILITY_REQUIRED", "This connection doesn't support live editing - reconnect, or update the plugin.", 409);
   }
 }
 

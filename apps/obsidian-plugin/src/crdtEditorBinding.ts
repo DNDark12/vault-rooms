@@ -3,17 +3,27 @@ import type { EditorView } from "@codemirror/view";
 import * as Y from "yjs";
 import { yCollab } from "y-codemirror.next";
 import type { CrdtSessionManager } from "./crdtSession.js";
+import type { CrdtPresenceAdapter } from "./crdtPresence.js";
 
 /**
  * Productionized form of the Phase 0.2 spike (crdtEditorBindingSpike.test.ts): binds a Y.Text to a
  * real CM6 `EditorView` via y-codemirror.next's `yCollab`, with a `Y.UndoManager` scoped to the
  * local peer's own edits (yCollab wires `undoManager.addTrackedOrigin(its own sync config)`
  * automatically on mount - see the spike's Step 2 finding - so remote-applied edits are never eaten
- * by a local undo). Awareness (presence/cursors) is deliberately not wired - that's P2 #2, not this
- * effort (see Phase 0.1's dependency-matrix note that awareness is out of scope here).
+ * by a local undo).
+ *
+ * `presence` is the per-view Awareness-shaped facade from crdtPresence.ts, which turns on
+ * y-codemirror.next's remote caret/selection rendering. Passing `null` (the previous behaviour) leaves
+ * both the theme and the selection ViewPlugin out entirely. Note yCollab captures `ytext` and the
+ * adapter *together* into one immutable facet, which is why the adapter must belong to the same
+ * session/Y.Doc as `ytext` and the whole extension is rebuilt when that doc is replaced.
  */
-export function buildCrdtEditorExtension(ytext: Y.Text, undoManager: Y.UndoManager): Extension {
-  return yCollab(ytext, null, { undoManager });
+export function buildCrdtEditorExtension(
+  ytext: Y.Text,
+  undoManager: Y.UndoManager,
+  presence: CrdtPresenceAdapter
+): Extension {
+  return yCollab(ytext, presence, { undoManager });
 }
 
 export type CrdtEditorTarget = { roomId: string; relativePath: string };
@@ -40,6 +50,9 @@ export type OpenCrdtEditorView = { vaultPath: string; view: EditorView };
 
 type ViewBinding = {
   target: CrdtEditorTarget;
+  /** This view's own presence facade, retained so unbinding can destroy exactly the right one. N panes
+   *  share a session but each gets its own facade, mirroring the per-pane Y.UndoManager. */
+  presence?: CrdtPresenceAdapter;
   /** Resolves once this exact binding attempt has either applied (compartment reconfigured with a
    *  live session) or been superseded (view closed / reconciled onto a different target before the
    *  session finished opening). Lets a concurrent syncOpenViews call see "this view is already bound
@@ -172,7 +185,17 @@ export class CrdtEditorController {
     // yields control) so a concurrent syncOpenViews call sees this view as already
     // bound/binding-to-this-target and doesn't start a second, redundant bind for it.
     this.bound.set(view, { target, ready });
-    await ready;
+    try {
+      await ready;
+    } catch (error) {
+      // A rejected attempt must not remain the authoritative entry forever: otherwise every later
+      // reconcile for this same view+target only awaits the already-rejected promise and can never
+      // retry. Guard by the exact promise so an older failure cannot delete a newer replacement bind.
+      if (this.bound.get(view)?.ready === ready) {
+        this.bound.delete(view);
+      }
+      throw error;
+    }
   }
 
   private async openSessionAndBind(view: EditorView, target: CrdtEditorTarget, sessionManager: CrdtSessionManager): Promise<void> {
@@ -198,15 +221,58 @@ export class CrdtEditorController {
     }
     sessionManager.bindToEditor(target.roomId, target.relativePath);
     const undoManager = new Y.UndoManager(session.ytext);
-    view.dispatch({ effects: this.compartment.reconfigure(buildCrdtEditorExtension(session.ytext, undoManager)) });
+    const presence = session.presence.attachView(view);
+    current.presence = presence;
+    try {
+      view.dispatch({
+        effects: this.compartment.reconfigure(buildCrdtEditorExtension(session.ytext, undoManager, presence))
+      });
+    } catch (error) {
+      // `boundToEditor` is what tells the rest of the engine "an editor owns this document, never
+      // reconcile the (older) disk copy into it". A dispatch that throws - e.g. onto a view Obsidian
+      // destroyed while the session was opening - would otherwise leave that flag set for a view that
+      // never received the extension, and no later unbindView can clear it because a destroyed view
+      // never appears in another reconcile pass. Disk reconciliation for that path would then be
+      // suppressed for the rest of the session.
+      // Symmetric with the boundToEditor release below: a facade left attached for a view that never
+      // received the extension would keep that pane in the session's per-view map forever, so the
+      // "last pane closed" retraction would never fire.
+      presence.destroy();
+      current.presence = undefined;
+      this.releaseEditorBinding(view, target, sessionManager);
+      throw error;
+    }
   }
 
   private unbindView(view: EditorView): void {
     const existing = this.bound.get(view);
     this.bound.delete(view);
     if (existing) {
-      this.deps.getSessionManager()?.unbindFromEditor(existing.target.roomId, existing.target.relativePath);
+      // Destroy before releasing: the facade's own teardown decides whether this was the last pane for
+      // the session and therefore whether to retract presence.
+      existing.presence?.destroy();
+      this.releaseEditorBinding(view, existing.target);
     }
     view.dispatch({ effects: this.compartment.reconfigure([]) });
+  }
+
+  /**
+   * Clears a session's `boundToEditor` flag - but only once no *other* tracked view is still bound to
+   * the same (room, path). The flag is one boolean per session while Obsidian happily shows the same
+   * note in two panes, so clearing it unconditionally when one of them goes away would tell the engine
+   * the surviving pane's editor is no longer authoritative and let a stale on-disk copy reconcile over
+   * its unsaved text - which is exactly the delete-propagating failure invariant #1 exists to prevent.
+   */
+  private releaseEditorBinding(
+    view: EditorView,
+    target: CrdtEditorTarget,
+    sessionManager = this.deps.getSessionManager()
+  ): void {
+    for (const [other, binding] of this.bound) {
+      if (other !== view && sameTarget(binding.target, target)) {
+        return;
+      }
+    }
+    sessionManager?.unbindFromEditor(target.roomId, target.relativePath);
   }
 }
