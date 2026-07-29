@@ -185,7 +185,7 @@ whether this device's login still works - then names the step that failed.
   transport is ready, whether this device published its cursor, and which remote names are visible. Most often
   live editing is simply off - it's per room and default-off, so a room created after you last enabled it starts
   without it.
-- **A teammate's cursor isn't visible:** both devices need Vault Rooms 0.2.3 or newer, the same CRDT Markdown note
+- **A teammate's cursor isn't visible:** both devices need Vault Rooms 0.2.4 or newer, the same CRDT Markdown note
   open, the room mounted with live editing enabled, a live connection, and `file:read` access to that exact path.
   Cursor presence is intentionally absent when a note is only synced in the background.
 - **A teammate's edits aren't showing up:** confirm both devices show the room as **mounted**, not just visible.

@@ -3,7 +3,7 @@
 What's next, by priority. Nothing here is a product claim until it ships. See [README](README.md) for what the
 plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
 
-## Shipped in 0.2.3
+## Shipped in 0.2.4
 
 - **Live cursors / note presence v1.** Authorized teammates who open the same CRDT Markdown note now see each
   other's caret, selection, authenticated display name, and stable theme-aware color. Presence is ephemeral and
