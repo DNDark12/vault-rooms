@@ -13,6 +13,7 @@ import {
 import { CrdtEditorController } from "./crdtEditorBinding.js";
 import { CrdtDocStore } from "./crdtDocStore.js";
 import { CrdtRejectedError, CrdtSessionManager } from "./crdtSession.js";
+import { userFacingError } from "./errorMessages.js";
 import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
@@ -185,7 +186,7 @@ export default class VaultRoomsPlugin extends Plugin {
 
     if (this.settings.server.autoStart) {
       this.startEmbeddedServer().catch((error) => {
-        new Notice(error instanceof Error ? `Vault Rooms server failed to start: ${error.message}` : "Vault Rooms server failed to start.");
+        new Notice(`Vault Rooms server failed to start: ${userFacingError(error, "the server did not report a reason.")}`);
       });
     }
 
@@ -273,7 +274,7 @@ export default class VaultRoomsPlugin extends Plugin {
       try {
         pin = pinnedInviteInfoFromParams(params);
       } catch (error) {
-        new Notice(error instanceof Error ? error.message : "Invite contains invalid server identity material.");
+        new Notice(userFacingError(error, "Invite contains invalid server identity material."));
         return;
       }
       // If this device already has an active identity on the exact server, accept the Team/Room/
@@ -287,7 +288,7 @@ export default class VaultRoomsPlugin extends Plugin {
           new JoinTeamModal(this, "join", inviteServer, inviteToken, pin).open();
         })
         .catch((error) => {
-          new Notice(error instanceof Error ? error.message : "Failed to accept invite");
+          new Notice(userFacingError(error, "Failed to accept invite"));
         });
     };
     // Accept both obsidian://vault-rooms?mode=join&... and obsidian://vault-rooms/join?... link shapes.
@@ -906,7 +907,7 @@ export default class VaultRoomsPlugin extends Plugin {
     await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
-      new Notice(error instanceof Error ? error.message : "Failed to load server");
+      new Notice(userFacingError(error, "Failed to load server"));
     });
     this.renderOpenRoomsViews();
     new Notice(`Using ${server.baseUrl}`);
@@ -1316,7 +1317,7 @@ export default class VaultRoomsPlugin extends Plugin {
         // etc.) vanished silently - the file just never showed up for teammates with no
         // indication anything went wrong.
         console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
-        new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error instanceof Error ? error.message : String(error)}`);
+        new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "the server rejected the change.")}`);
       },
       debounceMs: this.settings.debounceMs,
       isStillMounted: () => this.settings.mountedRooms[roomId] === roomState && !roomState.unmounted
@@ -1422,7 +1423,7 @@ export default class VaultRoomsPlugin extends Plugin {
               // forking a duplicate. The next reconnect's room snapshot reconciles this device.
               console.error(`Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}"`, error);
               new Notice(
-                `Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}" - ${error instanceof Error ? error.message : String(error)}`
+                `Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}" - ${userFacingError(error, "the server rejected the rename.")}`
               );
             });
           }
@@ -1621,8 +1622,10 @@ export default class VaultRoomsPlugin extends Plugin {
         void this.saveSettings();
         this.renderOpenRoomsViews();
       },
-      onRevoked: () => {
-        new Notice(`Your access to ${server.baseUrl} was revoked.`);
+      onRevoked: (reason) => {
+        // The relay now says *why* on `hello_error`, so prefer its wording; the per-server fallback
+        // stays for `revoked` and for older relays that send a bare code.
+        new Notice(userFacingError(reason, `Your access to ${server.baseUrl} was revoked.`));
         if (this.settings.activeServerId === server.id) {
           this.settings.activeServerId = undefined;
         }
@@ -1703,7 +1706,7 @@ export default class VaultRoomsPlugin extends Plugin {
         new Notice("This server requires a fresh pinned invite link from its owner to complete strict TLS migration.");
         return;
       }
-      new Notice(error instanceof Error ? error.message : "TLS migration failed");
+      new Notice(userFacingError(error, "TLS migration failed"));
     } finally {
       this.securityMigrationsInFlight.delete(server.id);
     }
@@ -1728,7 +1731,7 @@ export default class VaultRoomsPlugin extends Plugin {
       if (error === originalError) {
         return "normal";
       }
-      new Notice(error instanceof Error ? error.message : "Could not verify the server identity rotation.");
+      new Notice(userFacingError(error, "Could not verify the server identity rotation."));
       return "stop";
     }
   }

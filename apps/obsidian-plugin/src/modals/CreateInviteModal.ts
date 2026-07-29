@@ -1,5 +1,6 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
+import { userFacingError } from "../errorMessages.js";
 
 type InviteType = "room" | "team" | "friend";
 
@@ -52,7 +53,7 @@ export class CreateInviteModal extends Modal {
           await this.submit();
           this.close();
         } catch (error) {
-          new Notice(error instanceof Error ? error.message : "Invite creation failed");
+          new Notice(userFacingError(error, "Invite creation failed"));
         }
       })
     );

@@ -1,6 +1,7 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
+import { userFacingError } from "../errorMessages.js";
 
 export class CreateRoomModal extends Modal {
   private name = "Projects Demo";
@@ -131,7 +132,7 @@ export class CreateRoomModal extends Modal {
           });
           this.close();
         } catch (error) {
-          new Notice(error instanceof Error ? error.message : "Room creation failed");
+          new Notice(userFacingError(error, "Room creation failed"));
         }
       })
     );

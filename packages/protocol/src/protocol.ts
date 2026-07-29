@@ -37,7 +37,25 @@ export type PresenceCursor = {
  */
 export type RemotePresenceState = {
   clientId: number;
-  user: { userId: string; displayName: string };
+  user: {
+    userId: string;
+    displayName: string;
+    /**
+     * Relay-assigned room-session hue in degrees, `[0, 360)`. The relay owns it so every receiver
+     * agrees about who is which colour - a client-side hash cannot, because two users hashing into
+     * one slot look identical on one screen and distinct on another.
+     *
+     * Optional on purpose, in both directions. Sync frames are untrusted input, and a mixed-version
+     * LAN legitimately produces states without a hue; the plugin validates the range and falls back
+     * to a local hash rather than rendering an invalid colour. Note this carries a *number*, never a
+     * CSS value: `y-codemirror.next` injects the caret colour as an inline style attribute, so
+     * accepting relay-supplied CSS text here would hand a remote server a style injection.
+     *
+     * Clients never submit it - `PresenceSet` has no `user` at all, and the relay stamps identity
+     * and hue from the authenticated principal and its own lease table.
+     */
+    hue?: number;
+  };
   cursor: PresenceCursor | null;
 };
 
@@ -123,7 +141,14 @@ export type SyncClientMessage =
 
 export type SyncServerMessage =
   | { type: "hello_ok"; requestId: string; userId: string; deviceId: string }
-  | { type: "hello_error"; requestId?: string; code: "UNAUTHORIZED" }
+  | {
+      type: "hello_error";
+      requestId?: string;
+      code: "UNAUTHORIZED";
+      /** User-facing prose. Optional so a relay predating it stays a valid message: the client then
+       *  looks up its own wording by `code` rather than showing the identifier or nothing at all. */
+      message?: string;
+    }
   | {
       type: "room_snapshot";
       requestId: string;

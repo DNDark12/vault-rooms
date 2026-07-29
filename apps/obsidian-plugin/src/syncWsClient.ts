@@ -15,13 +15,27 @@ import { VaultSyncEngine } from "./syncClient.js";
 
 export type SyncConnectionState = "connected" | "connecting" | "offline";
 
+/**
+ * Why the relay closed this connection, as far as it told us.
+ *
+ * Both fields are optional because the three frames that trigger revocation carry different amounts:
+ * a current relay's `hello_error` has a code and prose, an older one has only the code, and `revoked`
+ * has neither. The UI passes this straight to its display-sink helper (see errorMessages.ts), which
+ * resolves prose -> code catalog -> its own fallback, so any of those shapes yields a usable sentence.
+ * This module itself never formats user-facing text - it only carries what the relay said.
+ */
+export type ConnectionRevocationReason = {
+  code?: string;
+  message?: string;
+};
+
 export type RoomSyncSocketDeps = {
   getMountedRoom: (roomId: string) => MountedRoomState | undefined;
   getApi: () => RelayApiClient;
   syncEngine: VaultSyncEngine;
   /** Called after any remote change/delete is applied locally, so settings can be saved and views refreshed. */
   onApplied: () => void;
-  onRevoked: () => void;
+  onRevoked: (reason: ConnectionRevocationReason) => void;
   /** Called when the owner/admin deletes a room that this device has mounted or subscribed to. */
   onRoomDeleted: (roomId: string) => void;
   /** Called when this device's grant to a still-existing room is revoked (e.g. removed from the team that granted it). */
@@ -364,7 +378,13 @@ export class RoomSyncSocket {
       case "hello_error":
       case "revoked": {
         this.setState("offline");
-        this.deps.onRevoked();
+        // Spread rather than always passing both keys: `revoked` has neither, and an older relay's
+        // `hello_error` has no message. Absent stays absent so the UI's fallback chain can tell
+        // "no prose was sent" from "prose was sent and was empty".
+        this.deps.onRevoked({
+          ...("code" in message ? { code: message.code } : {}),
+          ...("message" in message ? { message: message.message } : {})
+        });
         this.disconnect();
         return;
       }
@@ -458,11 +478,13 @@ export class RoomSyncSocket {
       case "remote_crdt_update":
       case "crdt_renamed":
       case "remote_crdt_rename":
-      // Presence shares the CRDT lane's mounted-room gate and ordering queue: a cursor for a room
-      // whose local ownership has already ended must not reach the session manager either.
       case "presence_snapshot":
       case "remote_presence":
       case "presence_rejected": {
+        // The three presence types share this clause deliberately: they need the CRDT lane's
+        // mounted-room gate and ordering queue too, since a cursor for a room whose local ownership
+        // has already ended must not reach the session manager either.
+        //
         // An unmount marks MountedRoomState.unmounted before it unsubscribes/disposes. A CRDT
         // message already queued on the socket can therefore arrive after local ownership ended;
         // never let it recreate a session or mutate a retired document for that room.

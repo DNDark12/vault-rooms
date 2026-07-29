@@ -3,6 +3,7 @@ import { evaluatePolicy } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import type { RoomRow } from "../db/schema.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
+import { describePermission } from "./userFacingMessages.js";
 
 export function hasRoomPermission(input: {
   repo: RelayRepository;
@@ -73,7 +74,9 @@ export function assertRoomPermission(input: {
       resourceId: input.room.id,
       metadata: { permission: input.permission, relativePath: input.relativePath, reason: decision.reason }
     });
-    throw new AppError("PERMISSION_DENIED", `You do not have ${input.permission} permission for this path.`, 403);
+    // The audit row above keeps the raw permission code for operators; the message a user reads names
+    // the action instead.
+    throw new AppError("PERMISSION_DENIED", `You don't have permission to ${describePermission(input.permission)}.`, 403);
   }
 }
 

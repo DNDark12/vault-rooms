@@ -31,7 +31,7 @@ export function registerAuthRoutes(
         !body.displayName && "displayName",
         !body.deviceName && "deviceName"
       ].filter((field): field is string => Boolean(field));
-      throw new AppError("VALIDATION_ERROR", `Missing required field(s): ${missing.join(", ")}.`, 422);
+      throw new AppError("VALIDATION_ERROR", "This setup request is missing required information.", 422);
     }
     let invalidCredentials = false;
     try {
@@ -59,13 +59,13 @@ export function registerAuthRoutes(
   app.post("/api/invites/accept", async (request) => {
     const body = request.body as Partial<{ inviteToken: string; deviceId: string; deviceProof: string }>;
     if (!body.inviteToken) {
-      throw new AppError("VALIDATION_ERROR", "inviteToken is required.", 422);
+      throw new AppError("VALIDATION_ERROR", "This invite link is missing its token.", 422);
     }
     const usesProof = body.deviceId !== undefined || body.deviceProof !== undefined;
     let principal;
     if (usesProof) {
       if (!body.deviceId || !body.deviceProof) {
-        throw new AppError("VALIDATION_ERROR", "deviceId and deviceProof are required together.", 422);
+        throw new AppError("VALIDATION_ERROR", "This device's identity proof was incomplete.", 422);
       }
       if (requestTransport(request) !== "https") {
         throw new AppError("TLS_REQUIRED", "Strict invite acceptance proof requires HTTPS.", 426);

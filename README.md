@@ -130,7 +130,8 @@ instead of one edit becoming a conflict copy.
 - **Per-keystroke merging needs the note open in your editor.** A device with the room merely mounted still
   receives every change, just on the ordinary latency budget above.
 - **Open notes show live cursors.** When authorized teammates have the same CRDT Markdown note open, each sees
-  the other's caret and selection with their authenticated display name and a stable, theme-aware color.
+  the other's caret and selection with their authenticated display name and a relay-assigned color, unique
+  among live users in that room session and tuned to your theme.
   Presence disappears when the editor or session closes; it is note-scoped, not a room-wide online status.
   V1 deliberately has no participant bar.
 - **Older plugin versions can read but not write** a note in this mode; they get a clear rejection rather than a

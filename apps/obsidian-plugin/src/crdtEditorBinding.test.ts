@@ -667,6 +667,55 @@ describe("CrdtEditorController presence wiring", () => {
     pane.destroy();
   });
 
+  it("renders two remote peers as two distinct carets in a real editor", async () => {
+    // `usr_0` and `usr_8` are deliberate: FNV-1a % 8 mapped them to the same palette slot, so under
+    // the retired client-side scheme these two peers were the same colour on this screen while a
+    // different client could show them as different colours. Real CodeMirror, real decorations - the
+    // adapter-level unit tests all stubbed out the half where this actually surfaced.
+    const manager = makeManager("");
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const session = await manager.ensureSession("room_1", "Board.md");
+    await session.initialSync;
+
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: () => ({ roomId: "room_1", relativePath: "Board.md" })
+    });
+    const pane = editorViewWithCompartment(controller);
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view: pane }]);
+    pane.dispatch({ changes: { from: 0, to: 0, insert: "hello world" } });
+
+    const at = (index: number) =>
+      Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(session.ytext, index));
+    const remote = (clientId: number, userId: string, displayName: string, hue: number, index: number) => ({
+      type: "remote_presence" as const,
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 0,
+      state: {
+        clientId,
+        user: { userId, displayName, hue },
+        cursor: { yanchor: at(index), yhead: at(index) }
+      }
+    });
+
+    session.presence.applyRemote(remote(100, "usr_0", "Alice", 0, 0));
+    session.presence.applyRemote(remote(101, "usr_8", "Bob", 137.508, 5));
+    pane.dispatch({ changes: { from: 0, to: 0, insert: "hi" } });
+
+    const labels = Array.from(pane.dom.querySelectorAll(".cm-ySelectionInfo"), (node) => node.textContent);
+    expect(labels.sort()).toEqual(["Alice", "Bob"]);
+
+    // Two peers, two colours - taken from the relay's hues rather than derived here.
+    const colors = Array.from(
+      pane.dom.querySelectorAll<HTMLElement>(".cm-ySelectionCaret"),
+      (node) => node.style.borderLeftColor || node.style.borderRightColor || (node.getAttribute("style") ?? "")
+    );
+    expect(new Set(colors).size).toBe(2);
+
+    pane.destroy();
+  });
+
   it("gives two panes separate facades over one session presence store", async () => {
     const manager = makeManager();
     manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);

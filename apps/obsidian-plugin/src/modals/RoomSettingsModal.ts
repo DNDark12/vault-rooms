@@ -4,6 +4,7 @@ import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "./ConfirmModal.js";
 import { setDestructiveCompat } from "../obsidianCompat.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
+import { userFacingError } from "../errorMessages.js";
 
 const PERMISSIONS = ["room:read", "room:write", "room:delete", "file:read", "file:write", "file:create", "file:delete", "sync:subscribe", "sync:push"];
 
@@ -64,7 +65,7 @@ export class RoomSettingsModal extends Modal {
       this.aclRules = await this.plugin.listRoomAcl(this.room.id);
       this.render();
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : "Failed to load room settings");
+      new Notice(userFacingError(error, "Failed to load room settings"));
     }
   }
 
@@ -187,7 +188,7 @@ export class RoomSettingsModal extends Modal {
               } catch (error) {
                 this.crdtEnabled = !value;
                 toggle.setValue(!value);
-                new Notice(error instanceof Error ? error.message : "Could not change live editing for this room.");
+                new Notice(userFacingError(error, "Could not change live editing for this room."));
               }
             })();
           })
@@ -279,7 +280,7 @@ export class RoomSettingsModal extends Modal {
           this.room = this.plugin.visibleRooms.find((room) => room.id === this.room.id) ?? this.room;
           this.render();
         } catch (error) {
-          new Notice(error instanceof Error ? error.message : "Room update failed");
+          new Notice(userFacingError(error, "Room update failed"));
         }
       })
     );
@@ -409,7 +410,7 @@ export class RoomSettingsModal extends Modal {
               this.aclRules = await this.plugin.listRoomAcl(this.room.id);
               this.render();
             } catch (error) {
-              new Notice(error instanceof Error ? error.message : "Failed to remove access rule");
+              new Notice(userFacingError(error, "Failed to remove access rule"));
             }
           })
       );
@@ -434,7 +435,7 @@ export class RoomSettingsModal extends Modal {
               await this.plugin.deleteRoom(this.room);
               this.close();
             } catch (error) {
-              new Notice(error instanceof Error ? error.message : "Failed to delete room");
+              new Notice(userFacingError(error, "Failed to delete room"));
             }
           })
       );
@@ -461,7 +462,7 @@ export class RoomSettingsModal extends Modal {
       this.aclRules = await this.plugin.listRoomAcl(this.room.id);
       this.render();
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : "Room access update failed");
+      new Notice(userFacingError(error, "Room access update failed"));
     }
   }
 

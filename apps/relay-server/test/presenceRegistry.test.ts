@@ -237,6 +237,116 @@ describe("PresenceRegistry", () => {
     }
   });
 
+  // Room-session hue leases (docs/superpowers/plans/2026-07-28-room-session-presence-colors.md).
+  // The relay owns colour assignment because a client-side hash cannot be made consistent: two
+  // userIds landing in one slot look identical on one screen and distinct on another. A lease is
+  // keyed by (roomId, userId), so one human with several devices is one colour, and the lease is
+  // released only when their last connection for that room goes away.
+  it("assigns distinct hues to distinct live users in one room", () => {
+    const registry = new PresenceRegistry(() => 0);
+    const alice = registry.joinRoom(connection(), "room_1", "usr_alice");
+    const bob = registry.joinRoom(connection(), "room_1", "usr_bob");
+
+    expect(alice).toBeGreaterThanOrEqual(0);
+    expect(alice).toBeLessThan(360);
+    expect(bob).toBeGreaterThanOrEqual(0);
+    expect(bob).toBeLessThan(360);
+    expect(bob).not.toBe(alice);
+  });
+
+  it("shares one hue across devices until the final connection leaves", () => {
+    const randomValues = [0, 0.5];
+    const registry = new PresenceRegistry(() => randomValues.shift() ?? 0);
+    const laptop = connection();
+    const desktop = connection();
+    const replacement = connection();
+
+    const first = registry.joinRoom(laptop, "room_1", "usr_alice");
+    expect(registry.joinRoom(desktop, "room_1", "usr_alice")).toBe(first);
+
+    registry.removeConnectionRoom(laptop, "room_1");
+    expect(registry.joinRoom(replacement, "room_1", "usr_alice")).toBe(first);
+
+    registry.removeConnectionRoom(desktop, "room_1");
+    registry.removeConnectionRoom(replacement, "room_1");
+    // Every connection gone means the whole room session ended, so the next one starts from a fresh
+    // random hue rather than resurrecting the old assignment.
+    expect(registry.joinRoom(connection(), "room_1", "usr_alice")).not.toBe(first);
+  });
+
+  it("is idempotent for one connection and room", () => {
+    const registry = new PresenceRegistry(() => 0);
+    const a = connection();
+
+    const first = registry.joinRoom(a, "room_1", "usr_a");
+
+    // Re-subscribing (reconnect, ACL refresh) must not consume a second slot or hand back a
+    // different colour for the same live connection.
+    expect(registry.joinRoom(a, "room_1", "usr_a")).toBe(first);
+    expect(registry.joinRoom(a, "room_1", "usr_a")).toBe(first);
+  });
+
+  it("stamps the leased hue into document presence", () => {
+    const registry = new PresenceRegistry(() => 0);
+    const a = connection();
+    const hue = registry.joinRoom(a, "room_1", "usr_a");
+
+    expect(registry.set(a, target, input(7, "usr_a")).current.state.user.hue).toBe(hue);
+  });
+
+  it("allocates a hue from set() even when the subscribe hook never ran", () => {
+    const registry = new PresenceRegistry(() => 0);
+    const a = connection();
+
+    // set() is the authoritative allocation boundary: the subscribe hook only fixes ordering, so a
+    // lifecycle path that reaches set() without it must still produce a valid hue.
+    const hue = registry.set(a, target, input(7, "usr_a")).current.state.user.hue;
+
+    expect(hue).toBeGreaterThanOrEqual(0);
+    expect(hue).toBeLessThan(360);
+  });
+
+  it("never hands two live users the same hue", () => {
+    // Twelve users is past the eight-slot ceiling the retired client-side palette wrapped at, which
+    // is the collision this whole mechanism exists to remove. The allocator must never return a slot
+    // that is already leased, whatever the golden-angle stride lands on.
+    const registry = new PresenceRegistry(() => 0);
+    const hues = new Set<number>();
+    for (let index = 0; index < 12; index += 1) {
+      hues.add(registry.joinRoom(connection(), "room_1", `usr_${index}`));
+    }
+
+    expect(hues.size).toBe(12);
+  });
+
+  it("drops hue leases after room-level access revalidation removes the subscription", () => {
+    const randomValues = [0, 0.5];
+    const registry = new PresenceRegistry(() => randomValues.shift() ?? 0);
+    const a = connection();
+    const first = registry.joinRoom(a, "room_1", "usr_a");
+
+    // revalidateRoomAccess drops connection.subscriptions directly, without telling presence - this
+    // sweep is what keeps a lease from outliving the access that justified it.
+    a.subscriptions.delete("room_1");
+    registry.removeUnsubscribedRoomHues();
+
+    expect(registry.joinRoom(connection(), "room_1", "usr_a")).not.toBe(first);
+  });
+
+  it("releases hue leases when a connection or room goes away entirely", () => {
+    const randomValues = [0, 0.5, 0.25];
+    const registry = new PresenceRegistry(() => randomValues.shift() ?? 0);
+    const a = connection();
+    const first = registry.joinRoom(a, "room_1", "usr_a");
+
+    registry.removeConnection(a);
+    const second = registry.joinRoom(connection(), "room_1", "usr_a");
+    expect(second).not.toBe(first);
+
+    registry.removeRoom("room_1");
+    expect(registry.joinRoom(connection(), "room_1", "usr_a")).not.toBe(second);
+  });
+
   it("never writes through RelayRepository or SQLite", async () => {
     // Structural guarantee rather than a mock assertion: the module must not import a repository,
     // a db adapter, or anything that could persist. Presence is ephemeral by contract - a restart

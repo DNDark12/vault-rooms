@@ -6,9 +6,11 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
 ## Shipped in 0.2.4
 
 - **Live cursors / note presence v1.** Authorized teammates who open the same CRDT Markdown note now see each
-  other's caret, selection, authenticated display name, and stable theme-aware color. Presence is ephemeral and
-  note-scoped: it disappears on editor/session cleanup, is never persisted, and deliberately has no participant
-  bar. It remains separate from chat's future server-wide online/offline presence.
+  other's caret, selection, authenticated display name, and a relay-assigned color, unique among live users in
+  that room session and tuned to your theme. Assigning colors on the relay rather than hashing them per client
+  is what makes every receiver agree on who is which color. Presence is ephemeral and note-scoped: it
+  disappears on editor/session cleanup, is never persisted, and deliberately has no participant bar. It remains
+  separate from chat's future server-wide online/offline presence.
 
 ## Next up
 

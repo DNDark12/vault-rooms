@@ -206,6 +206,44 @@ describe("RoomPushCoordinator", () => {
     coordinator.dispose();
   });
 
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // `syncError` is rendered in the rooms panel, so it is a display sink: a bare code or an
+  // "[object Object]" from a non-Error throw both used to reach the user verbatim.
+  it("stores a readable syncError for a bare code and for a message-less rejection", async () => {
+    // Both fixtures carry a terminal code, because only a terminal error records `syncError` at all -
+    // anything else stays retryable and deliberately leaves the field clear.
+    const cases: Array<{ thrown: unknown; expected: string }> = [
+      // A relay whose prose is just the code, which the panel printed as-is.
+      { thrown: { code: "VALIDATION_ERROR", message: "VALIDATION_ERROR" }, expected: "This server rejected the request." },
+      // A rejection with a code and no message - `String(error)` rendered this as "[object Object]".
+      { thrown: { code: "FILE_TOO_LARGE" }, expected: "That file is larger than this server accepts." }
+    ];
+
+    for (const { thrown, expected } of cases) {
+      const vault = new FakeVaultAdapter();
+      const api = new FakeApi();
+      api.nextWriteError = thrown as Error;
+      const room = createRoom();
+      const coordinator = new RoomPushCoordinator({
+        room,
+        syncEngine: new VaultSyncEngine(vault, api),
+        deviceName: "B laptop",
+        onPersist: () => undefined,
+        onError: () => undefined,
+        debounceMs: 10,
+        isStillMounted: () => true
+      });
+      await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# big\n");
+
+      coordinator.handleLocalChange("modify", "Board.md");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(room.files["Board.md"]?.syncError).toBe(expected);
+      expect(room.files["Board.md"]?.syncError).not.toContain("[object Object]");
+      coordinator.dispose();
+    }
+  });
+
   it("debounces rapid successive edits to the same path into a single push", async () => {
     const vault = new FakeVaultAdapter();
     const api = new FakeApi();

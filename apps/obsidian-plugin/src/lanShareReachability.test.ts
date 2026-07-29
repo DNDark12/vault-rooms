@@ -94,6 +94,22 @@ describe("LanShareReachabilityMonitor", () => {
     });
   });
 
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // The stored `error` is displayed in the panel, so a non-Error throw must not surface as
+  // "[object Object]". The actionable prefix on the *thrown* error is unrelated and stays intact.
+  it("keeps the displayed unreachable reason readable for a non-Error throw", async () => {
+    const monitor = new LanShareReachabilityMonitor(vi.fn().mockRejectedValue({ unexpected: true }), vi.fn());
+
+    await expect(monitor.require({ baseUrl: "http://192.168.1.49:8787" })).rejects.toThrow(
+      "LAN share URL is unreachable"
+    );
+    expect(monitor.getState()).toMatchObject({
+      status: "unreachable",
+      error: "LAN reachability check failed."
+    });
+    expect(JSON.stringify(monitor.getState())).not.toContain("[object Object]");
+  });
+
   it("deduplicates a checked target by URL and full pin unless forced", async () => {
     const probe = vi.fn().mockResolvedValue(undefined);
     const monitor = new LanShareReachabilityMonitor(probe, vi.fn());

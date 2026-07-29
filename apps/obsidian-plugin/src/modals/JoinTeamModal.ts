@@ -2,6 +2,7 @@ import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { defaultDeviceName } from "./deviceName.js";
 import { assertPinMaterial, type PinnedInviteInfo } from "../pinnedTransport.js";
+import { userFacingError } from "../errorMessages.js";
 
 export class JoinTeamModal extends Modal {
   private inviteInput = "";
@@ -113,7 +114,7 @@ export class JoinTeamModal extends Modal {
       await this.plugin.joinServer(this.serverUrl, this.inviteToken, this.displayName, this.deviceName || "Obsidian desktop", this.pin);
       this.close();
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : "Join failed");
+      new Notice(userFacingError(error, "Join failed"));
     }
   }
 

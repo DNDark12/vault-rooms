@@ -138,7 +138,8 @@ async function addMember(
   owner: { deviceToken: string; team: { id: string } },
   room: { id: string },
   preset: "editor" | "reader",
-  pathPattern = "**/*"
+  pathPattern = "**/*",
+  displayName = "Member"
 ) {
   const invite = (
     await app.inject({
@@ -152,7 +153,7 @@ async function addMember(
     await app.inject({
       method: "POST",
       url: "/api/join",
-      payload: { inviteToken: invite.inviteToken, displayName: "Member", deviceName: "Member laptop" }
+      payload: { inviteToken: invite.inviteToken, displayName, deviceName: `${displayName} laptop` }
     })
   ).json();
   const acl = (
@@ -201,9 +202,12 @@ describe("presence over the sync socket", () => {
     a.sendJson({ type: "presence_set", roomId: room.id, relativePath: "Board.md", epoch, clientId: 11, cursor: cursor() });
     const fanout = await nextMessage(b, "remote_presence");
 
-    // Identity comes from the authenticated principal, never the payload - the client never sent a
-    // userId or display name at all.
-    expect(fanout.state.user).toEqual({ userId: owner.user.id, displayName: "Owner" });
+    // Identity and colour both come from the relay, never the payload - the client never sent a
+    // userId, a display name, or a hue at all.
+    expect(fanout.state.user.userId).toBe(owner.user.id);
+    expect(fanout.state.user.displayName).toBe("Owner");
+    expect(fanout.state.user.hue).toBeGreaterThanOrEqual(0);
+    expect(fanout.state.user.hue).toBeLessThan(360);
     expect(fanout.state.clientId).toBe(11);
     expect(fanout.state.cursor).toEqual(cursor());
 
@@ -212,12 +216,93 @@ describe("presence over the sync socket", () => {
     const snapshot = await nextMessage(b, "presence_snapshot");
     expect(snapshot.states).toHaveLength(1);
     expect(snapshot.states[0].clientId).toBe(11);
+    // A and B are the same authenticated user on two connections - one human, one colour. The hue
+    // must also be identical in the snapshot and the fanout, or the two delivery paths disagree.
+    expect(snapshot.states[0].user.hue).toBe(fanout.state.user.hue);
+    const ownSecondDevice = await nextMessage(a, "remote_presence");
+    expect(ownSecondDevice.state.user.hue).toBe(fanout.state.user.hue);
+    drain(a, "remote_presence");
 
     // A second update from the same connection is a plain move: fanout only, no fresh snapshot.
     b.sendJson({ type: "presence_set", roomId: room.id, relativePath: "Board.md", epoch, clientId: 22, cursor: cursor(12) });
     await nextMessage(a, "remote_presence");
     await settle();
     expect(seen(b, "presence_snapshot")).toHaveLength(0);
+  });
+
+  // The bug this reproduces at the serialized relay boundary: with client-side hashing, "one receiver
+  // shows two identical carets while the other looks fine" was possible, because each client derived
+  // colour independently. Three distinct users is the smallest case where a receiver sees two remote
+  // peers at once and can therefore observe a collision.
+  it("gives three distinct users three distinct hues that every receiver agrees on", async () => {
+    const { app, owner, room } = await setupRoom();
+    const alice = await addMember(app, owner, room, "editor", "**/*", "Alice");
+    const bob = await addMember(app, owner, room, "editor", "**/*", "Bob");
+
+    const ownerSocket = await connect(app);
+    await helloAndSubscribe(ownerSocket, owner.deviceToken, room.id);
+    const epoch = await createDocument(ownerSocket, room.id, "Board.md");
+
+    const aliceSocket = await connect(app);
+    await helloAndSubscribe(aliceSocket, alice.member.deviceToken, room.id);
+    const bobSocket = await connect(app);
+    await helloAndSubscribe(bobSocket, bob.member.deviceToken, room.id);
+
+    const base = { type: "presence_set", roomId: room.id, relativePath: "Board.md", epoch };
+    ownerSocket.sendJson({ ...base, clientId: 11, cursor: cursor(1) });
+    aliceSocket.sendJson({ ...base, clientId: 22, cursor: cursor(2) });
+    bobSocket.sendJson({ ...base, clientId: 33, cursor: cursor(3) });
+
+    // `seen` is non-destructive but `nextMessage` splices, so this deliberately settles instead of
+    // awaiting a specific frame - consuming one here would hide it from the collection below.
+    await settle(250);
+
+    const statesFor = (socket: JsonSocket) => {
+      const byClientId = new Map<number, { user: { displayName: string; hue?: number } }>();
+      for (const message of [...seen(socket, "presence_snapshot"), ...seen(socket, "remote_presence")]) {
+        const typed = message as { states?: Array<{ clientId: number }>; state?: { clientId: number } };
+        for (const state of typed.states ?? (typed.state ? [typed.state] : [])) {
+          byClientId.set(state.clientId, state as unknown as { user: { displayName: string; hue?: number } });
+        }
+      }
+      return [...byClientId.values()];
+    };
+
+    const ownerRemoteStates = statesFor(ownerSocket);
+    const aliceRemoteStates = statesFor(aliceSocket);
+
+    expect(ownerRemoteStates.map((state) => state.user.displayName).sort()).toEqual(["Alice", "Bob"]);
+    expect(aliceRemoteStates.map((state) => state.user.displayName).sort()).toEqual(["Bob", "Owner"]);
+    expect(new Set(ownerRemoteStates.map((state) => state.user.hue)).size).toBe(2);
+    expect(new Set(aliceRemoteStates.map((state) => state.user.hue)).size).toBe(2);
+
+    // Across both receivers the three humans must resolve to three distinct hues, and each human must
+    // look the same colour to everyone - that agreement is the whole point of moving assignment to
+    // the relay.
+    const huesByName = new Map(
+      [...ownerRemoteStates, ...aliceRemoteStates].map((state) => [state.user.displayName, state.user.hue])
+    );
+    expect([...huesByName.keys()].sort()).toEqual(["Alice", "Bob", "Owner"]);
+    expect(new Set(huesByName.values()).size).toBe(3);
+
+    const bobAtOwner = ownerRemoteStates.find((state) => state.user.displayName === "Bob");
+    const bobAtAlice = aliceRemoteStates.find((state) => state.user.displayName === "Bob");
+    expect(bobAtOwner?.user.hue).toBe(bobAtAlice?.user.hue);
+  });
+
+  // Two wiring points that no observable frame can prove, verified the same way presenceRegistry's
+  // "never writes through SQLite" guard is - by reading the source. Both are one-line calls that a
+  // refactor can silently drop, and both fail in ways that only show up after minutes of real use:
+  // a lease outliving revoked room access, or hues no longer following join order.
+  it("wires hue preallocation to subscribe_room and lease cleanup to revalidation", async () => {
+    const fs = await import("node:fs");
+    const syncServer = fs.readFileSync(new URL("../src/sync/syncServer.ts", import.meta.url), "utf8");
+    const presenceService = fs.readFileSync(new URL("../src/sync/presenceService.ts", import.meta.url), "utf8");
+
+    // Guarded by room.crdt_enabled: a non-CRDT room has no cursors, so it must not lease a colour.
+    expect(syncServer).toMatch(/if \(room\.crdt_enabled\) \{\s*options\.presenceService\.joinRoom\(connection, room\.id\);/);
+    expect(presenceService).toMatch(/joinRoom\(connection: SyncConnection, roomId: string\): void/);
+    expect(presenceService).toMatch(/removeUnsubscribedRoomHues\(\)/);
   });
 
   it("never sends presence to a legacy or crdt-only connection", async () => {
@@ -406,7 +491,7 @@ describe("presence over the sync socket", () => {
 
     const base = { type: "presence_set", roomId: room.id, relativePath: "Board.md", epoch };
     a.sendJson({ ...base, clientId: 11, cursor: cursor() });
-    await nextMessage(b, "remote_presence");
+    const live = await nextMessage(b, "remote_presence");
 
     // A null from an already-retired renderer key must not remove the live state.
     a.sendJson({ ...base, clientId: 99, cursor: null });
@@ -416,6 +501,9 @@ describe("presence over the sync socket", () => {
     a.sendJson({ ...base, clientId: 11, cursor: null });
     const removal = await nextMessage(b, "remote_presence");
     expect(removal.state).toMatchObject({ clientId: 11, cursor: null });
+    // A removal keeps the full `user` block, hue included. Stripping it would make a receiver
+    // reconcile a retirement against a peer it can no longer identify by colour.
+    expect(removal.state.user).toEqual(live.state.user);
 
     // Repeat removals are inert.
     a.sendJson({ ...base, clientId: 11, cursor: null });

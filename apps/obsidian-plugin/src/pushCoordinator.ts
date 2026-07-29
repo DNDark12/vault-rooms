@@ -1,3 +1,4 @@
+import { userFacingError } from "./errorMessages.js";
 import { isConflictCopyPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
 
 /** Error codes the relay returns for requests that can never succeed by retrying unchanged (see
@@ -158,7 +159,12 @@ export class RoomPushCoordinator {
         if (isTerminalSyncError(error)) {
           const state = this.deps.room.files[relativePath];
           if (state) {
-            this.deps.room.files[relativePath] = { ...state, syncError: error instanceof Error ? error.message : String(error) };
+            // `syncError` is rendered in the rooms panel, so it is a display sink. `onError` below
+            // still receives the raw error for logging and diagnostics.
+            this.deps.room.files[relativePath] = {
+              ...state,
+              syncError: userFacingError(error, "The file could not be synced.")
+            };
           }
           this.deps.onPersist();
         }

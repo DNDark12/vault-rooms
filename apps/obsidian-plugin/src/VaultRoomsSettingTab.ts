@@ -7,6 +7,7 @@ import { confirmModal } from "./modals/ConfirmModal.js";
 import { ConnectionDiagnosticsModal } from "./modals/ConnectionDiagnosticsModal.js";
 import { refreshSettingTab, setDestructiveCompat } from "./obsidianCompat.js";
 import { isRestrictedPort } from "./restrictedPorts.js";
+import { userFacingError } from "./errorMessages.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
   constructor(private readonly plugin: VaultRoomsPlugin) {
@@ -80,7 +81,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
                 await this.plugin.startEmbeddedServer();
               }
             } catch (error) {
-              new Notice(error instanceof Error ? error.message : "Vault Rooms server action failed");
+              new Notice(userFacingError(error, "Vault Rooms server action failed"));
             }
             this.refresh();
           })
@@ -206,7 +207,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
             await this.plugin.activateServer(server.id);
             this.refresh();
           } catch (error) {
-            new Notice(error instanceof Error ? error.message : "Server switch failed");
+            new Notice(userFacingError(error, "Server switch failed"));
           }
         })
       );

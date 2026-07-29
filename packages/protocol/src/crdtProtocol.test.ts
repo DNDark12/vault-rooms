@@ -35,6 +35,23 @@ describe("CRDT protocol messages", () => {
     expect(roundTrip(withoutCapability).capabilities).toBeUndefined();
   });
 
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // `hello_error` used to carry a code and nothing else, so the plugin had no wording to show and fell
+  // back to a generic notice. `message` is optional so a relay that predates this still parses.
+  it("hello_error carries optional prose alongside its code", () => {
+    const rejected: SyncServerMessage = {
+      type: "hello_error",
+      requestId: "hello_1",
+      code: "UNAUTHORIZED",
+      message: "This device is no longer signed in to this server."
+    };
+    const codeOnly: SyncServerMessage = { type: "hello_error", code: "UNAUTHORIZED" };
+
+    expect(roundTrip(rejected)).toEqual(rejected);
+    expect(roundTrip(codeOnly)).toEqual(codeOnly);
+    expect(roundTrip(codeOnly).message).toBeUndefined();
+  });
+
   it("round-trips crdt_create / crdt_created (first-create flow, contract 1.10)", () => {
     const create: SyncClientMessage = { type: "crdt_create", requestId: "req_1", roomId: "room_1", relativePath: "note.md" };
     const created: SyncServerMessage = {
@@ -229,7 +246,7 @@ describe("presence protocol messages", () => {
   it("round-trips the server's snapshot, fanout, and rejection variants", () => {
     const state = {
       clientId: 42,
-      user: { userId: "usr_1", displayName: "Alice" },
+      user: { userId: "usr_1", displayName: "Alice", hue: 137.508 },
       cursor
     };
     const snapshot: SyncServerMessage = {
@@ -268,6 +285,35 @@ describe("presence protocol messages", () => {
     expect(roundTrip(remote)).toEqual(remote);
     expect(roundTrip(removalFanout).state.cursor).toBeNull();
     expect(roundTrip(rejected)).toEqual(rejected);
+    // The relay-assigned hue survives both delivery paths untouched: a receiver must see the same
+    // number in its initial snapshot as in every later fanout, or one peer renders a colour the
+    // others don't agree on.
+    expect(roundTrip(snapshot).states[0]?.user.hue).toBe(137.508);
+    expect(roundTrip(remote).state.user.hue).toBe(137.508);
+    // A removal keeps `user` intact (cursor-null is the whole signal), so the hue rides along and a
+    // receiver never has to guess a colour for the peer it is retiring.
+    expect(roundTrip(removalFanout).state.user.hue).toBe(137.508);
+  });
+
+  // `hue` is optional on purpose. Sync frames are untrusted input, and a mixed-version LAN (a 0.2.4
+  // plugin joining an older relay, or a development build mid-rollout) legitimately emits presence
+  // states without one - that must stay a valid message the client can render from its local
+  // fallback, not a parse-level break.
+  it("round-trips a presence state that carries no hue", () => {
+    const withoutHue: SyncServerMessage = {
+      type: "remote_presence",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      epoch: 3,
+      state: {
+        clientId: 43,
+        user: { userId: "usr_legacy", displayName: "Legacy" },
+        cursor
+      }
+    };
+
+    expect(roundTrip(withoutHue)).toEqual(withoutHue);
+    expect(roundTrip(withoutHue).state.user.hue).toBeUndefined();
   });
 
   it("carries relative positions through JSON unchanged (no live Y objects on the wire)", () => {

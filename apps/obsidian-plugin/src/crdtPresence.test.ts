@@ -608,45 +608,71 @@ describe("presence diagnostics", () => {
 });
 
 describe("presenceColor", () => {
-  it("derives a stable, palette-bound color from the authoritative userId", () => {
-    expect(presenceColor("usr_alice")).toEqual(presenceColor("usr_alice"));
-    expect(presenceColor("usr_alice").color).toMatch(/^var\(--vault-rooms-presence-[0-7]\)$/);
-    expect(presenceColor("usr_alice").colorLight).toContain("color-mix(");
+  it("composes CSS locally from the relay's numeric hue", () => {
+    // Only the number crosses the wire. y-codemirror.next injects this value straight into an inline
+    // style attribute, so accepting a CSS *string* from the relay would hand a remote (or forked, or
+    // hostile) server a style injection into the editor.
+    expect(presenceColor({ userId: "usr_a", hue: 137.508 })).toEqual({
+      color: "hsl(137.508 var(--vault-rooms-presence-saturation, 72%) var(--vault-rooms-presence-lightness, 45%))",
+      colorLight:
+        "color-mix(in srgb, hsl(137.508 var(--vault-rooms-presence-saturation, 72%) var(--vault-rooms-presence-lightness, 45%)) 22%, transparent)"
+    });
+  });
+
+  it("keeps saturation and lightness in CSS so a caret stays legible in either theme", () => {
+    // Hue alone comes from the relay; the two other channels stay themeable, which is what a raw
+    // resolved colour would have thrown away.
+    const { color } = presenceColor({ userId: "usr_a", hue: 0 });
+    expect(color).toContain("var(--vault-rooms-presence-saturation");
+    expect(color).toContain("var(--vault-rooms-presence-lightness");
   });
 
   it("supplies colorLight explicitly rather than relying on the renderer's hex fallback", () => {
-    // y-codemirror.next falls back to `color + '33'`, which is meaningless for a var()/color-mix()
+    // y-codemirror.next falls back to `color + '33'`, which is meaningless for an hsl()/color-mix()
     // expression - so the adapter must always provide both.
-    const { color, colorLight } = presenceColor("usr_bob");
+    const { color, colorLight } = presenceColor({ userId: "usr_bob", hue: 200 });
     expect(colorLight).toContain(color);
     expect(colorLight).not.toBe(`${color}33`);
   });
 
-  it("only ever names palette slots that styles.css actually defines", async () => {
-    // The palette lives in CSS but is indexed from TS, so drift between PALETTE_SIZE and the number of
-    // --vault-rooms-presence-N declarations would silently yield `var(--undefined-slot)` - a caret with
-    // no color, in a build that typechecks and passes every other test.
-    const fs = await import("node:fs");
-    const css = fs.readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-    const declared = new Set([...css.matchAll(/--vault-rooms-presence-(\d+)\s*:/g)].map((match) => match[1]));
-    expect(declared.size).toBeGreaterThan(0);
-
-    const used = new Set(
-      Array.from({ length: 512 }, (_unused, index) => presenceColor(`usr_${index}`).color).map(
-        (color) => /presence-(\d+)\)/.exec(color)![1]
-      )
-    );
-    for (const slot of used) {
-      expect(declared, `slot ${slot} is used by presenceColor but not declared in styles.css`).toContain(slot);
+  it("falls back to a local hash for a missing or out-of-range hue", () => {
+    // Sync frames are untrusted input, and a mixed-version LAN legitimately omits the hue. Rendering
+    // `hsl(undefined ...)` or `hsl(NaN ...)` would make the remote caret invisible, which is strictly
+    // worse than a locally-derived colour that may not match what other clients picked.
+    for (const user of [
+      { userId: "usr_missing" },
+      { userId: "usr_negative", hue: -1 },
+      { userId: "usr_large", hue: 360 },
+      { userId: "usr_nan", hue: Number.NaN },
+      { userId: "usr_infinite", hue: Number.POSITIVE_INFINITY }
+    ]) {
+      const { color } = presenceColor(user);
+      expect(color).toMatch(/^hsl\([0-9.]+ var\(/);
+      expect(color).not.toContain("NaN");
+      expect(color).not.toContain("undefined");
+      expect(color).not.toContain("Infinity");
     }
   });
 
-  it("spreads users across the palette", () => {
-    const slots = new Set(
-      ["usr_a", "usr_b", "usr_c", "usr_d", "usr_e", "usr_f", "usr_g", "usr_h", "usr_i", "usr_j"].map(
-        (userId) => presenceColor(userId).color
+  it("keeps the local fallback stable per user and spread across the wheel", () => {
+    expect(presenceColor({ userId: "usr_alice" })).toEqual(presenceColor({ userId: "usr_alice" }));
+    const hues = new Set(
+      ["usr_a", "usr_b", "usr_c", "usr_d", "usr_e", "usr_f", "usr_g", "usr_h"].map(
+        (userId) => presenceColor({ userId }).color
       )
     );
-    expect(slots.size).toBeGreaterThan(1);
+    expect(hues.size).toBeGreaterThan(1);
+  });
+
+  it("no longer references the retired eight-slot palette", async () => {
+    // The palette used to be indexed from TS into CSS, which capped distinct colours at eight and let
+    // two userIds collide. Both halves must be gone, or a stale declaration keeps implying it exists.
+    const fs = await import("node:fs");
+    const css = fs.readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+
+    expect(css).not.toMatch(/--vault-rooms-presence-\d+\s*:/);
+    expect(css).toMatch(/--vault-rooms-presence-saturation\s*:/);
+    expect(css).toMatch(/--vault-rooms-presence-lightness\s*:/);
+    expect(presenceColor({ userId: "usr_a", hue: 10 }).color).not.toContain("--vault-rooms-presence-0");
   });
 });

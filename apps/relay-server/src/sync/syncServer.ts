@@ -6,6 +6,7 @@ import type { RoomRow } from "../db/schema.js";
 import { requestTransport, type RequestTransport } from "../routes/security.routes.js";
 import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
+import { formatFileLimit } from "../services/userFacingMessages.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 import type { CrdtDocManager } from "./crdtDocManager.js";
 import type { PresenceService } from "./presenceService.js";
@@ -183,14 +184,23 @@ async function handleMessage(
     } catch {
       // A malformed/missing token, or any other unexpected failure - treat it the same as an
       // invalid one rather than letting it become an unhandled rejection.
-      sendJson(connection.socket, { type: "hello_error", requestId: message.requestId, code: "UNAUTHORIZED" });
+      sendJson(connection.socket, {
+        type: "hello_error",
+        requestId: message.requestId,
+        code: "UNAUTHORIZED",
+        message: "This device is no longer signed in to this server."
+      });
       connection.socket.close();
     }
     return;
   }
 
   if (!connection.principal) {
-    sendJson(connection.socket, { type: "hello_error", code: "UNAUTHORIZED" });
+    sendJson(connection.socket, {
+      type: "hello_error",
+      code: "UNAUTHORIZED",
+      message: "This device is no longer signed in to this server."
+    });
     connection.socket.close();
     return;
   }
@@ -246,6 +256,13 @@ async function handleMessage(
         return;
       }
       connection.subscriptions.add(room.id);
+      // Lease this user's room-session cursor colour now, so hues follow join order. Only for a
+      // CRDT-enabled room: nothing else has cursors. Idempotent, so a re-subscribe on reconnect keeps
+      // whatever colour this user already has, and PresenceService itself ignores a connection that
+      // never advertised presence support.
+      if (room.crdt_enabled) {
+        options.presenceService.joinRoom(connection, room.id);
+      }
       // Bring every CRDT document's whole-file content up to date *before* answering with the snapshot.
       // A CRDT document's authoritative text lives in `crdt_updates` and only reaches
       // `files`/`file_versions` when a materialize fires, so a subscribing device reconciles against
@@ -319,12 +336,16 @@ async function handleMessage(
       if (room.crdt_enabled && isCrdtEligiblePath(relativePath)) {
         throw new AppError(
           "CRDT_WRITE_UNSUPPORTED",
-          "This room has CRDT sync enabled for this file - use the CRDT sync message types (or upgrade) instead of a whole-file write.",
+          "This note uses live editing - update the plugin to edit it.",
           409
         );
       }
       if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
-        throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
+        throw new AppError(
+          "FILE_TOO_LARGE",
+          `This file is larger than this server accepts (limit ${formatFileLimit(options.maxFileBytes)}).`,
+          413
+        );
       }
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath });
       assertRoomPermission({
@@ -589,16 +610,16 @@ async function handleMessage(
       const normalizedPath = requireCrdtTarget(room, relativePath);
       requireCrdtCapability(connection);
       if (!connection.subscriptions.has(room.id)) {
-        throw new AppError("PERMISSION_DENIED", "Subscribe to the room before requesting a CRDT handshake.", 403);
+        throw new AppError("PERMISSION_DENIED", "Open this shared room before starting live editing.", 403);
       }
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:subscribe" });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:read", relativePath: normalizedPath });
       const file = repo.getFile(room.id, normalizedPath);
       if (!file || file.deleted_at) {
-        throw new AppError("NOT_FOUND", "No CRDT document exists at this path yet - send crdt_create first.", 404);
+        throw new AppError("NOT_FOUND", "This note isn't set up for live editing on the server yet.", 404);
       }
       if (message.epoch !== file.crdt_epoch) {
-        throw new AppError("CRDT_STALE_EPOCH", "This document has moved to a new epoch.", 409, { currentEpoch: file.crdt_epoch });
+        throw new AppError("CRDT_STALE_EPOCH", "This note was reset on the server - reopen it.", 409, { currentEpoch: file.crdt_epoch });
       }
       // Answer the client's step1 with the diff it's missing, and independently ask the client
       // for whatever the server itself is missing (contract 1.3) - this second message is the
@@ -642,10 +663,10 @@ async function handleMessage(
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:write", relativePath: normalizedPath });
       const file = repo.getFile(room.id, normalizedPath);
       if (!file || file.deleted_at) {
-        throw new AppError("NOT_FOUND", "No CRDT document exists at this path yet - send crdt_create first.", 404);
+        throw new AppError("NOT_FOUND", "This note isn't set up for live editing on the server yet.", 404);
       }
       if (message.epoch !== file.crdt_epoch) {
-        throw new AppError("CRDT_STALE_EPOCH", "This document has moved to a new epoch.", 409, { currentEpoch: file.crdt_epoch });
+        throw new AppError("CRDT_STALE_EPOCH", "This note was reset on the server - reopen it.", 409, { currentEpoch: file.crdt_epoch });
       }
       const updatedBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
       options.crdtDocManager.applyUpdate(file.id, file.crdt_epoch, message.update, updatedBy);
@@ -687,7 +708,7 @@ function requireCrdtTarget(room: RoomRow, relativePath: string): string {
     throw new AppError("CRDT_DISABLED", "This room has not enabled CRDT sync.", 409);
   }
   if (!isCrdtEligiblePath(normalized)) {
-    throw new AppError("INVALID_PATH", "Only Markdown (.md) files use the CRDT sync lane.", 422);
+    throw new AppError("INVALID_PATH", "Live editing is available only in Markdown notes.", 422);
   }
   return normalized;
 }
@@ -696,7 +717,7 @@ function requireCrdtTarget(room: RoomRow, relativePath: string): string {
  *  use any CRDT-lane message type - absent/false means "no CRDT support", never assumed true. */
 function requireCrdtCapability(connection: SyncConnection): void {
   if (!connection.capabilities.crdt) {
-    throw new AppError("CRDT_CAPABILITY_REQUIRED", "This connection did not advertise CRDT support on hello.", 409);
+    throw new AppError("CRDT_CAPABILITY_REQUIRED", "This connection doesn't support live editing - reconnect, or update the plugin.", 409);
   }
 }
 

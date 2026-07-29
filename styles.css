@@ -365,21 +365,26 @@
 
 /* Live cursors / note presence (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
  *
- * The palette is consumed by crdtPresence.ts's presenceColor(), which returns these as CSS
- * expressions rather than resolved colors - y-codemirror.next injects the caret/selection color as an
- * inline style attribute, so referencing the variables directly is what makes a remote caret
- * theme-aware without CSS having to out-specify an inline value. Each entry carries a literal fallback
- * because the semantic --color-* variables are theme-provided and a minimal theme may omit some.
- * Keep the count in sync with PALETTE_SIZE in crdtPresence.ts. */
+ * The *hue* of a remote caret is assigned by the relay and unique among live users in a room session;
+ * only saturation and lightness live here. crdtPresence.ts's presenceColor() composes
+ * `hsl(<relay hue> var(--...-saturation) var(--...-lightness))` and y-codemirror.next injects that as
+ * an inline style attribute, so keeping these two channels as variables is what lets a theme tune
+ * legibility without CSS having to out-specify an inline value.
+ *
+ * The eight-slot `--vault-rooms-presence-N` palette this replaces capped a room at eight distinct
+ * colors and let two userIds hash into one slot - and because each client hashed independently, a
+ * collision could show as one caret on one screen and two on another.
+ *
+ * Dark themes get a lighter caret so it reads against a dark editor background. Note the label text is
+ * `--text-on-accent` (white in most themes), which is low-contrast over yellow-band hues; that was
+ * equally true of the retired palette's yellow slot and is accepted rather than fixed here. */
 body {
-  --vault-rooms-presence-0: var(--color-red, #e5484d);
-  --vault-rooms-presence-1: var(--color-orange, #f76b15);
-  --vault-rooms-presence-2: var(--color-yellow, #f5d90a);
-  --vault-rooms-presence-3: var(--color-green, #46a758);
-  --vault-rooms-presence-4: var(--color-cyan, #05a2c2);
-  --vault-rooms-presence-5: var(--color-blue, #3e63dd);
-  --vault-rooms-presence-6: var(--color-purple, #8e4ec6);
-  --vault-rooms-presence-7: var(--color-pink, #d6409f);
+  --vault-rooms-presence-saturation: 72%;
+  --vault-rooms-presence-lightness: 45%;
+}
+
+body.theme-dark {
+  --vault-rooms-presence-lightness: 58%;
 }
 
 /* The only styling CSS owns here. y-codemirror.next's base theme hardcodes `color: white` and

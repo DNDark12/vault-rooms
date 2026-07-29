@@ -6,6 +6,7 @@ import { lanSharePresentation } from "../lanShareReachability.js";
 import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
 import { ConnectionDiagnosticsModal } from "../modals/ConnectionDiagnosticsModal.js";
+import { userFacingError } from "../errorMessages.js";
 
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
 
@@ -48,7 +49,7 @@ export class VaultRoomsView extends ItemView {
   async onOpen(): Promise<void> {
     if (this.plugin.getActiveServer() && !this.plugin.activeServerIsOwnStoppedServer()) {
       await Promise.all([this.plugin.refreshRooms({ notify: false }), this.plugin.refreshTeams({ notify: false })]).catch((error) => {
-        new Notice(error instanceof Error ? error.message : "Failed to load rooms");
+        new Notice(userFacingError(error, "Failed to load rooms"));
       });
     }
     this.render();
@@ -575,7 +576,7 @@ export class VaultRoomsView extends ItemView {
             this.auditEvents = null;
             void this.loadAuditPage(0)
               .then(() => this.render())
-              .catch((error) => new Notice(error instanceof Error ? error.message : "Failed to load audit log"));
+              .catch((error) => new Notice(userFacingError(error, "Failed to load audit log")));
           };
         }
       }
@@ -648,7 +649,7 @@ export class VaultRoomsView extends ItemView {
       try {
         await action();
       } catch (error) {
-        new Notice(error instanceof Error ? error.message : "Vault Rooms action failed");
+        new Notice(userFacingError(error, "Vault Rooms action failed"));
       } finally {
         button.disabled = false;
       }

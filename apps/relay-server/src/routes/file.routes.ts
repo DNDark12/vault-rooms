@@ -3,6 +3,7 @@ import { AppError, isCrdtEligiblePath, isEligiblePath, normalizeRelativePath } f
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
+import { formatFileLimit } from "../services/userFacingMessages.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
 import type { CrdtDocManager } from "../sync/crdtDocManager.js";
 import type { PresenceService } from "../sync/presenceService.js";
@@ -69,7 +70,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
     const body = request.body as Partial<{ relativePath: string; baseVersion: number; content: string }>;
     if (!body.relativePath || typeof body.content !== "string") {
-      throw new AppError("VALIDATION_ERROR", "relativePath and content are required.", 422);
+      throw new AppError("VALIDATION_ERROR", "This sync request was missing the file path or its contents.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
     if (!isEligiblePath(relativePath)) {
@@ -82,12 +83,16 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     if (room.crdt_enabled && isCrdtEligiblePath(relativePath)) {
       throw new AppError(
         "CRDT_WRITE_UNSUPPORTED",
-        "This room has CRDT sync enabled for this file - use the CRDT sync message types (or upgrade) instead of a whole-file write.",
+        "This note uses live editing - update the plugin to edit it.",
         409
       );
     }
     if (Buffer.byteLength(body.content, "utf8") > options.maxFileBytes) {
-      throw new AppError("FILE_TOO_LARGE", "The file exceeds MAX_FILE_BYTES.", 413);
+      throw new AppError(
+        "FILE_TOO_LARGE",
+        `This file is larger than this server accepts (limit ${formatFileLimit(options.maxFileBytes)}).`,
+        413
+      );
     }
 
     const baseVersion = body.baseVersion ?? 0;
@@ -133,7 +138,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
     const body = request.body as Partial<{ relativePath: string; baseVersion: number }>;
     if (!body.relativePath || typeof body.baseVersion !== "number") {
-      throw new AppError("VALIDATION_ERROR", "relativePath and baseVersion are required.", 422);
+      throw new AppError("VALIDATION_ERROR", "This delete request was missing the file path or the version it was based on.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
     assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });

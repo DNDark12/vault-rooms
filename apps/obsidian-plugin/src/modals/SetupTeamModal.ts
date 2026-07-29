@@ -1,6 +1,7 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { defaultDeviceName } from "./deviceName.js";
+import { userFacingError } from "../errorMessages.js";
 
 export class SetupTeamModal extends Modal {
   private teamName = "";
@@ -52,7 +53,7 @@ export class SetupTeamModal extends Modal {
           await this.plugin.setupServer(this.displayName || "Existing owner", this.deviceName || "Obsidian desktop", this.teamName || undefined);
           this.close();
         } catch (error) {
-          new Notice(error instanceof Error ? error.message : "Server setup failed");
+          new Notice(userFacingError(error, "Server setup failed"));
         }
       })
     );

@@ -65,22 +65,43 @@ export interface CrdtPresenceAdapter {
 type LocalCursorJson = { anchor: unknown; head: unknown };
 
 const COALESCE_MS = 50;
-/** Kept in sync with styles.css's `--vault-rooms-presence-N` palette. */
-const PALETTE_SIZE = 8;
+
+/** Left in CSS rather than baked in here, so a theme can tune legibility per light/dark while the
+ *  relay still owns *which* colour each person is. The literal fallbacks keep a caret visible even if
+ *  styles.css somehow hasn't loaded. */
+const PRESENCE_SATURATION = "var(--vault-rooms-presence-saturation, 72%)";
+const PRESENCE_LIGHTNESS = "var(--vault-rooms-presence-lightness, 45%)";
 
 /**
- * Deterministic, theme-aware color for a user. Derived from the *authoritative* `userId` only - never
- * the display name (changes), the device (one human can have several), or `clientId` (regenerated on
- * every Y.Doc). Color is a cosmetic grouping signal, never an identity or authorization one.
+ * Theme-aware CSS for a remote peer's caret, composed *locally* from the relay-assigned hue.
  *
- * Returns CSS expressions rather than resolved colors: `y-codemirror.next` injects these inline, so
- * referencing the palette variables directly is what makes the caret theme-aware without CSS having
- * to fight an inline attribute. `colorLight` is supplied explicitly because the renderer's fallback
- * is string concatenation (`color + '33'`), which produces garbage for a non-hex value.
+ * The relay owns hue assignment because only it can make colours agree across clients: a local hash
+ * of `userId` collides (this used to be `hash % 8`), and a collision looks like one caret on one
+ * screen and two on another. What crosses the wire is therefore a number, never CSS -
+ * `y-codemirror.next` injects these values into an inline style attribute, so a relay-supplied CSS
+ * string would be a style injection from a remote machine.
+ *
+ * A missing or out-of-range hue falls back to the old local hash. That case is real rather than
+ * defensive: sync frames are untrusted input, and a mixed-version LAN can produce presence states
+ * with no hue. A locally-derived colour that other clients may not match beats an invalid one that
+ * renders nothing at all.
+ *
+ * `colorLight` is supplied explicitly because the renderer's own fallback is string concatenation
+ * (`color + '33'`), which produces garbage for anything but a hex literal.
  */
-export function presenceColor(userId: string): { color: string; colorLight: string } {
-  const variable = `var(--vault-rooms-presence-${stableHash(userId) % PALETTE_SIZE})`;
-  return { color: variable, colorLight: `color-mix(in srgb, ${variable} 22%, transparent)` };
+export function presenceColor(user: { userId: string; hue?: number }): { color: string; colorLight: string } {
+  const hue =
+    typeof user.hue === "number" && Number.isFinite(user.hue) && user.hue >= 0 && user.hue < 360
+      ? user.hue
+      : fallbackHue(user.userId);
+  const color = `hsl(${hue} ${PRESENCE_SATURATION} ${PRESENCE_LIGHTNESS})`;
+  return { color, colorLight: `color-mix(in srgb, ${color} 22%, transparent)` };
+}
+
+/** Spread the 32-bit hash across the whole wheel instead of into a small number of buckets, so two
+ *  users on a hue-less relay are far more likely to differ than under the retired `% 8` palette. */
+function fallbackHue(userId: string): number {
+  return Number((((stableHash(userId) / 0x1_0000_0000) * 360) % 360).toFixed(3));
 }
 
 /** FNV-1a, 32-bit. Stable across processes and runs, unlike anything seeded per session. */
@@ -183,31 +204,29 @@ export class CrdtPresenceSession {
       this.views.set(view, { cursor: null, order: 0 });
     }
 
-    const session = this;
+    // Captured by value, never a live getter - see the class doc comment. Reading it once here is what
+    // makes `awareness.doc` structurally unable to drift ahead of the `ytext` yCollab captured
+    // alongside it, rather than relying on the field merely happening to be readonly.
+    const doc = this.doc;
+    // Arrow functions throughout, so each member closes over this session lexically. Shorthand methods
+    // would bind `this` to the facade object instead, which is what previously forced an alias.
     const facade: CrdtPresenceAdapter = {
-      // Captured, never a live getter - see the class doc comment.
-      get doc() {
-        return session.doc;
-      },
-      getLocalState() {
-        // Must be non-null or the renderer never publishes a local cursor at all.
-        return { cursor: session.views.get(view)?.cursor ?? null };
-      },
-      setLocalStateField(field: string, value: unknown) {
+      doc,
+      // Must be non-null or the renderer never publishes a local cursor at all.
+      getLocalState: () => ({ cursor: this.views.get(view)?.cursor ?? null }),
+      setLocalStateField: (field: string, value: unknown) => {
         if (field !== "cursor") return;
-        session.setViewCursor(view, value);
+        this.setViewCursor(view, value);
       },
-      getStates() {
-        return session.renderStates();
+      getStates: () => this.renderStates(),
+      on: (event: "change", listener: AwarenessListener) => {
+        if (event === "change") this.listeners.add(listener);
       },
-      on(event: "change", listener: AwarenessListener) {
-        if (event === "change") session.listeners.add(listener);
+      off: (event: "change", listener: AwarenessListener) => {
+        if (event === "change") this.listeners.delete(listener);
       },
-      off(event: "change", listener: AwarenessListener) {
-        if (event === "change") session.listeners.delete(listener);
-      },
-      destroy() {
-        session.detachView(view);
+      destroy: () => {
+        this.detachView(view);
       }
     };
     this.facades.set(view, facade);
@@ -428,7 +447,7 @@ export class CrdtPresenceSession {
     for (const [clientId, state] of this.remote) {
       const cursor = toRenderCursor(state.cursor);
       if (!cursor) continue;
-      const { color, colorLight } = presenceColor(state.user.userId);
+      const { color, colorLight } = presenceColor(state.user);
       states.set(clientId, { user: { name: state.user.displayName, color, colorLight }, cursor });
     }
     return states;

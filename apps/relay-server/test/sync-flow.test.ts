@@ -92,10 +92,11 @@ describe("WebSocket sync", () => {
       baseVersion: 0,
       content: "x".repeat(33)
     });
-    expect(await nextMessage(socket, "file_change_rejected")).toMatchObject({
-      requestId: "oversized-file",
-      code: "FILE_TOO_LARGE"
-    });
+    const rejection = await nextMessage(socket, "file_change_rejected");
+    expect(rejection).toMatchObject({ requestId: "oversized-file", code: "FILE_TOO_LARGE" });
+    // Same wording contract as the REST lane - both go through the same AppError.
+    expect(rejection.message).toContain("limit 32 bytes");
+    expect(rejection.message).not.toContain("MAX_FILE_BYTES");
   });
 
   it("authenticates, broadcasts changes/deletes, rejects conflicts, snapshots on reconnect, and closes revoked sockets", async () => {

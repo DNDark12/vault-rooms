@@ -53,29 +53,29 @@ export class PresenceService {
   handleSet(connection: SyncConnection, message: PresenceSet, rawBytes: number): void {
     try {
       if (rawBytes > MAX_PRESENCE_BYTES) {
-        throw new AppError("VALIDATION_ERROR", "This presence update is too large.", 413);
+        throw new AppError("VALIDATION_ERROR", "This live-cursor update was too large.", 413);
       }
       if (!connection.principal) {
-        throw new AppError("UNAUTHORIZED", "Authenticate before sending presence.", 401);
+        throw new AppError("UNAUTHORIZED", "This device isn't signed in to this server yet.", 401);
       }
       if (!connection.capabilities.crdt || !connection.capabilities.presence) {
         throw new AppError(
           "CRDT_CAPABILITY_REQUIRED",
-          "This connection did not advertise presence support on hello.",
+          "This connection doesn't support live cursors - reconnect, or update the plugin.",
           409
         );
       }
       if (typeof message.roomId !== "string" || typeof message.relativePath !== "string") {
-        throw new AppError("VALIDATION_ERROR", "Presence requires a room and a relative path.", 422);
+        throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
       }
       if (!Number.isInteger(message.epoch)) {
-        throw new AppError("VALIDATION_ERROR", "Presence requires an integer epoch.", 422);
+        throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
       }
       if (!isValidClientId(message.clientId)) {
-        throw new AppError("VALIDATION_ERROR", "Presence requires an unsigned 32-bit renderer key.", 422);
+        throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
       }
       if (!connection.subscriptions.has(message.roomId)) {
-        throw new AppError("PERMISSION_DENIED", "Subscribe to the room before sending presence.", 403);
+        throw new AppError("PERMISSION_DENIED", "Open this shared room before sending a live cursor.", 403);
       }
 
       const relativePath = normalizeRelativePath(message.relativePath);
@@ -98,17 +98,17 @@ export class PresenceService {
 
       const room = this.requireRoom(message.roomId);
       if (!room.crdt_enabled) {
-        throw new AppError("CRDT_DISABLED", "This room has not enabled CRDT sync.", 409);
+        throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
       }
       if (!isCrdtEligiblePath(relativePath)) {
-        throw new AppError("INVALID_PATH", "Only Markdown (.md) files carry presence.", 422);
+        throw new AppError("INVALID_PATH", "Live cursors are available only in Markdown notes.", 422);
       }
       const file = this.repo.getFile(room.id, relativePath);
       if (!file || file.deleted_at) {
-        throw new AppError("NOT_FOUND", "No CRDT document exists at this path.", 404);
+        throw new AppError("NOT_FOUND", "This note isn't set up for live editing on the server yet.", 404);
       }
       if (file.crdt_epoch !== message.epoch) {
-        throw new AppError("CRDT_STALE_EPOCH", "This document has moved to a new epoch.", 409, {
+        throw new AppError("CRDT_STALE_EPOCH", "This note was reset on the server - reopen it.", 409, {
           currentEpoch: file.crdt_epoch
         });
       }
@@ -118,7 +118,7 @@ export class PresenceService {
       const teamsByUser = new Map<string, string[]>();
       const canRead = this.pathReader(room, relativePath, aclRules, teamsByUser);
       if (!canRead(connection.principal)) {
-        throw new AppError("PERMISSION_DENIED", "You do not have file:read permission for this path.", 403);
+        throw new AppError("PERMISSION_DENIED", "You don't have permission to read this file.", 403);
       }
 
       const result = this.registry.set(connection, target, {
@@ -148,6 +148,19 @@ export class PresenceService {
       // tear down CRDT editing or close a healthy sync socket.
       this.reject(connection, message, error);
     }
+  }
+
+  /**
+   * Leases this connection's room-session hue at subscribe time.
+   *
+   * An ordering optimization only: `PresenceRegistry.set()` is the authoritative allocation boundary
+   * and is idempotent, so nothing breaks if this never runs. Doing it here means hues follow the order
+   * people *joined* the room rather than the order they happened to first move a caret, which is the
+   * more intuitive assignment when someone reads the room out loud ("you're the green one").
+   */
+  joinRoom(connection: SyncConnection, roomId: string): void {
+    if (!connection.principal || !connection.capabilities.presence) return;
+    this.registry.joinRoom(connection, roomId, connection.principal.userId);
   }
 
   /** Client-side unsubscribe: drop only that connection's states for that room. */
@@ -223,6 +236,13 @@ export class PresenceService {
         });
       }
     }
+
+    // Hue leases are room-scoped, so they survive the per-path sweep above and need their own pass.
+    // `revalidateRoomAccess` runs immediately before every call to this method and drops
+    // `connection.subscriptions` without notifying presence, so this is the only place that learns a
+    // connection lost room-level access - without it a revoked member keeps their colour reserved for
+    // as long as the socket stays open.
+    this.registry.removeUnsubscribedRoomHues();
   }
 
   private dropEntry(entry: PresenceEntry, teamsByUser: Map<string, string[]>): void {
@@ -347,22 +367,22 @@ function isValidClientId(value: unknown): value is number {
  *  something unbounded or non-serializable. */
 function assertCursorShape(cursor: PresenceCursor): void {
   if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) {
-    throw new AppError("VALIDATION_ERROR", "A presence cursor must be an object.", 422);
+    throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
   }
   for (const key of ["yanchor", "yhead"] as const) {
     const value = cursor[key];
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new AppError("VALIDATION_ERROR", `A presence cursor requires a ${key} object.`, 422);
+      throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
     }
   }
   let nodes = 0;
   const walk = (value: unknown, depth: number): void => {
     if (depth > MAX_CURSOR_DEPTH) {
-      throw new AppError("VALIDATION_ERROR", "This presence cursor is nested too deeply.", 422);
+      throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
     }
     nodes += 1;
     if (nodes > MAX_CURSOR_NODES) {
-      throw new AppError("VALIDATION_ERROR", "This presence cursor has too many fields.", 422);
+      throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
     }
     if (value === null) return;
     const kind = typeof value;
@@ -375,12 +395,12 @@ function assertCursorShape(cursor: PresenceCursor): void {
       // Rejects class instances, Dates, Maps - anything that would not survive the transport as the
       // plain object the plugin expects to rehydrate.
       if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
-        throw new AppError("VALIDATION_ERROR", "A presence cursor must be plain JSON.", 422);
+        throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
       }
       for (const item of Object.values(value as Record<string, unknown>)) walk(item, depth + 1);
       return;
     }
-    throw new AppError("VALIDATION_ERROR", "A presence cursor must be plain JSON.", 422);
+    throw new AppError("VALIDATION_ERROR", "This live-cursor update was malformed.", 422);
   };
   walk(cursor.yanchor, 1);
   walk(cursor.yhead, 1);

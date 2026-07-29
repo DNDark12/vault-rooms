@@ -19,6 +19,7 @@ import {
 import { activeServer, type ServerConnection } from "../settings.js";
 import { EmbeddedRelayServer, type EmbeddedServerStatus } from "../serverManager.js";
 import type { PluginContext } from "./PluginContext.js";
+import { userFacingError } from "../errorMessages.js";
 
 type ServerConnectionManagerContext = Pick<
   PluginContext,
@@ -472,7 +473,7 @@ export class ServerConnectionManager {
       if (error === originalError) {
         return "normal";
       }
-      new Notice(error instanceof Error ? error.message : "Could not verify the server identity rotation.");
+      new Notice(userFacingError(error, "Could not verify the server identity rotation."));
       return "stop";
     }
   }

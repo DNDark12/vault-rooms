@@ -1,4 +1,5 @@
 import { RelayApiClient } from "./apiClient.js";
+import { userFacingError } from "./errorMessages.js";
 import { classifyLanAddress } from "./lanAddress.js";
 import type { PinnedServerInfo } from "./pinnedTransport.js";
 
@@ -127,7 +128,10 @@ export class LanShareReachabilityMonitor {
         }
         return;
       }
-      const message = error instanceof Error ? error.message : String(error);
+      // Displayed in the panel, so it goes through the display-sink helper rather than String(error),
+      // which rendered a non-Error rejection as "[object Object]". The thrown error below keeps its
+      // actionable prefix, and this sanitized text is appended to it rather than replacing it.
+      const message = userFacingError(error, "LAN reachability check failed.");
       this.state = { key, baseUrl: target.baseUrl, status: "unreachable", error: message };
       this.onChange();
       if (required) {

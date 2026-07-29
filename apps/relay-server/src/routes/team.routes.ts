@@ -58,7 +58,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     }
 
     if (!body.displayName || !body.deviceName) {
-      throw new AppError("VALIDATION_ERROR", "displayName and deviceName are required.", 422);
+      throw new AppError("VALIDATION_ERROR", "Enter your display name and a name for this device.", 422);
     }
 
     return repo.durable(() =>
@@ -78,7 +78,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     }
     const body = request.body as Partial<{ name: string }>;
     if (!body.name) {
-      throw new AppError("VALIDATION_ERROR", "name is required.", 422);
+      throw new AppError("VALIDATION_ERROR", "Enter a team name.", 422);
     }
     return { team: toTeamResponse(repo.createTeam({ name: body.name, ownerUserId: principal.userId })) };
   });
@@ -114,7 +114,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     const body = request.body as Partial<{ role: TeamRole; expiresInMinutes: number; maxUses: number }>;
     const role = body.role ?? "member";
     if (!isTeamRole(role)) {
-      throw new AppError("VALIDATION_ERROR", "role must be member or admin.", 422);
+      throw new AppError("VALIDATION_ERROR", "Choose whether this person is a member or an admin.", 422);
     }
 
     const invite = await repo.durable(() =>
@@ -168,7 +168,7 @@ export function registerTeamRoutes(app: FastifyInstance, repo: RelayRepository, 
     const body = request.body as Partial<{ userId: string; role: TeamRole }>;
     const role = body.role ?? "member";
     if (!body.userId || !isTeamRole(role)) {
-      throw new AppError("VALIDATION_ERROR", "userId is required and role must be member or admin.", 422);
+      throw new AppError("VALIDATION_ERROR", "Choose a person and whether they are a member or an admin.", 422);
     }
     repo.addTeamMember({ teamId, userId: body.userId, role, actorUserId: principal.userId });
     return { ok: true };

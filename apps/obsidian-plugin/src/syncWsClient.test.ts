@@ -300,6 +300,41 @@ describe("RoomSyncSocket security messages", () => {
     socket.disconnect();
   });
 
+  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
+  // The relay's `hello_error` prose has to reach the notice, which means onRevoked needs a structured
+  // reason rather than no arguments at all - otherwise the wording is parsed and then dropped.
+  it("hands the relay's revocation reason to onRevoked, and stays callable for a code-only frame", async () => {
+    const onRevoked = vi.fn();
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), onRevoked });
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+
+    await handleMessage(
+      JSON.stringify({
+        type: "hello_error",
+        requestId: "hello_1",
+        code: "UNAUTHORIZED",
+        message: "This device is no longer signed in to this server."
+      })
+    );
+    expect(onRevoked).toHaveBeenCalledWith({
+      code: "UNAUTHORIZED",
+      message: "This device is no longer signed in to this server."
+    });
+
+    // An older relay sends no prose; the callback still fires with just the code so the UI can look up
+    // its own wording rather than showing nothing.
+    onRevoked.mockClear();
+    await handleMessage(JSON.stringify({ type: "hello_error", code: "UNAUTHORIZED" }));
+    expect(onRevoked).toHaveBeenCalledWith({ code: "UNAUTHORIZED" });
+
+    // `revoked` carries neither field and must not synthesize empty ones.
+    onRevoked.mockClear();
+    await handleMessage(JSON.stringify({ type: "revoked" }));
+    expect(onRevoked).toHaveBeenCalledWith({});
+
+    socket.disconnect();
+  });
+
   it.each([
     [4001, "credentials_rotated"],
     [4002, "tls_enforced"]
