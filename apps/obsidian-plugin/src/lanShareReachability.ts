@@ -128,9 +128,11 @@ export class LanShareReachabilityMonitor {
         }
         return;
       }
-      // Displayed in the panel, so it goes through the display-sink helper rather than String(error),
-      // which rendered a non-Error rejection as "[object Object]". The thrown error below keeps its
-      // actionable prefix, and this sanitized text is appended to it rather than replacing it.
+      // Both paths out of here are user-visible: `state.error` is rendered in the panel, and the thrown
+      // error's message ends up in a Notice. So both get the sanitized text, and the raw failure - the
+      // `net::ERR_*` / `ECONNREFUSED` token that actually says which layer refused - is logged instead
+      // of being dropped. That keeps the probe diagnosable without putting a machine code on screen.
+      console.warn("Vault Rooms: LAN share reachability probe failed", target.baseUrl, error);
       const message = userFacingError(error, "LAN reachability check failed.");
       this.state = { key, baseUrl: target.baseUrl, status: "unreachable", error: message };
       this.onChange();

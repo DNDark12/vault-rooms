@@ -80,6 +80,7 @@ describe("LanShareReachabilityMonitor", () => {
   });
 
   it("turns a failed required probe into an actionable unreachable state", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const monitor = new LanShareReachabilityMonitor(
       vi.fn().mockRejectedValue(new Error("net::ERR_ADDRESS_UNREACHABLE")),
       vi.fn()
@@ -88,10 +89,22 @@ describe("LanShareReachabilityMonitor", () => {
     await expect(monitor.require({ baseUrl: "http://192.168.1.49:8787" })).rejects.toThrow(
       "LAN share URL is unreachable"
     );
-    expect(monitor.getState()).toMatchObject({
-      status: "unreachable",
-      error: expect.stringContaining("net::ERR_ADDRESS_UNREACHABLE")
-    });
+
+    // Both of these are read by a human: `state.error` is rendered in the panel and the thrown message
+    // reaches a Notice. Neither may carry the Electron network token - a user shown
+    // "net::ERR_ADDRESS_UNREACHABLE" learns nothing actionable from it.
+    const state = monitor.getState();
+    expect(state).toMatchObject({ status: "unreachable" });
+    expect("error" in state && state.error).not.toContain("net::");
+    expect("error" in state && state.error).toMatch(/same network|can't be reached/i);
+
+    // The raw token is not discarded, just moved off-screen: it is what identifies which layer refused.
+    expect(warn).toHaveBeenCalledWith(
+      "Vault Rooms: LAN share reachability probe failed",
+      "http://192.168.1.49:8787",
+      expect.objectContaining({ message: "net::ERR_ADDRESS_UNREACHABLE" })
+    );
+    warn.mockRestore();
   });
 
   // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).

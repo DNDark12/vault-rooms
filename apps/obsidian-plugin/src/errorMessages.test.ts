@@ -64,6 +64,44 @@ describe("userFacingError", () => {
     expect(typeof userFacingError({ code: "constructor", message: "constructor" }, "Action failed.")).toBe("string");
   });
 
+  // Transport failures never carry a relay ErrorCode - they come from Electron's network stack
+  // (`net::ERR_*`) or Node (`ECONNREFUSED` and friends). They are machine tokens, but they do NOT match
+  // the SCREAMING_SNAKE code shape (`net::…` starts lowercase; Node codes arrive embedded in prose like
+  // "connect ECONNREFUSED 192.168.1.5:8787"), so they used to sail through as "usable prose" and land in
+  // a Notice verbatim - which is what a user reported seeing.
+  it("translates Electron and Node transport codes into guidance", () => {
+    const cases: Array<[unknown, RegExp]> = [
+      [new Error("net::ERR_CONNECTION_REFUSED"), /server may be stopped|address or port/i],
+      [new Error("net::ERR_ADDRESS_UNREACHABLE"), /same network|can't be reached/i],
+      [new Error("net::ERR_NAME_NOT_RESOLVED"), /couldn't be looked up|typo/i],
+      [new Error("net::ERR_CONNECTION_TIMED_OUT"), /didn't respond in time/i],
+      [new Error("net::ERR_UNSAFE_PORT"), /port/i],
+      [new Error("net::ERR_CERT_AUTHORITY_INVALID"), /certificate/i],
+      [{ code: "ECONNREFUSED" }, /server may be stopped|address or port/i],
+      [new Error("connect ECONNREFUSED 192.168.1.5:8787"), /server may be stopped|address or port/i],
+      [new Error("getaddrinfo ENOTFOUND relay.local"), /couldn't be looked up|typo/i],
+      [new Error("DEPTH_ZERO_SELF_SIGNED_CERT"), /certificate/i]
+    ];
+
+    for (const [thrown, expected] of cases) {
+      const result = userFacingError(thrown, "Action failed.");
+      expect(result, `unexpected text for ${JSON.stringify(thrown)}`).toMatch(expected);
+      expect(result).not.toContain("net::");
+      expect(result).not.toMatch(/\bE[A-Z]{4,}\b/);
+    }
+  });
+
+  it("does not mistake ordinary prose or relay wording for a transport code", () => {
+    // The transport layer must not swallow real sentences, including ones that mention a network.
+    expect(userFacingError(new Error("The server closed the connection."), "Action failed.")).toBe(
+      "The server closed the connection."
+    );
+    expect(userFacingError({ code: "PERMISSION_DENIED", message: "You don't have permission to read this file." }, "x")).toBe(
+      "You don't have permission to read this file."
+    );
+    expect(userFacingError(new Error("Request timed out."), "Action failed.")).toBe("Request timed out.");
+  });
+
   it("falls back for null, undefined, and blank messages", () => {
     expect(userFacingError(undefined, "Action failed.")).toBe("Action failed.");
     expect(userFacingError(null, "Action failed.")).toBe("Action failed.");
