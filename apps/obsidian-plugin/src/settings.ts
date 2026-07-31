@@ -70,6 +70,16 @@ export function activeServer(settings: VaultRoomsSettings): ServerConnection | u
   return settings.servers.find((server) => server.id === settings.activeServerId) ?? settings.servers[0];
 }
 
+export function isOwnEmbeddedServerConnection(server: ServerConnection): boolean {
+  if (!server.isServerOwner) return false;
+  try {
+    const hostname = new URL(server.baseUrl).hostname.toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
 export function migrateServerConnectionSettings<
   T extends { baseUrl: string; securityMode?: SecurityMode; appliedRotationIds?: string[] }
 >(server: T): T & { securityMode: SecurityMode; appliedRotationIds: string[] } {

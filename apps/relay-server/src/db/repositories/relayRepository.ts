@@ -752,6 +752,7 @@ export class RelayRepository {
     mountName: string;
     ownerUserId: string;
     conflictPolicy?: "keep_both" | "owner_wins";
+    crdtEnabled?: boolean;
     capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
   }): RoomRow {
     const now = new Date().toISOString();
@@ -760,9 +761,20 @@ export class RelayRepository {
     const create = this.db.transaction(() => {
       this.db
         .prepare(
-          "insert into rooms(id, name, type, source_path, mount_name, owner_user_id, conflict_policy, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          "insert into rooms(id, name, type, source_path, mount_name, owner_user_id, conflict_policy, crdt_enabled, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        .run(roomId, input.name, input.type, input.sourcePath, input.mountName, input.ownerUserId, conflictPolicy, now, now);
+        .run(
+          roomId,
+          input.name,
+          input.type,
+          input.sourcePath,
+          input.mountName,
+          input.ownerUserId,
+          conflictPolicy,
+          input.crdtEnabled === false ? 0 : 1,
+          now,
+          now
+        );
       const insertCapability = this.db.prepare(
         "insert into room_capabilities(id, room_id, plugin_id, display_name, mode, min_version) values (?, ?, ?, ?, ?, ?)"
       );

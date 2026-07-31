@@ -17,6 +17,23 @@ export type RoomSummary = {
   // client-side type mirrors the server's toRoomResponse()/managedRoomResponse() shape; consumed
   // starting Phase 5 (editor binding decides CRDT vs whole-file sync per this flag).
   crdtEnabled: boolean;
+  accessSummary?: {
+    level: "reader" | "editor" | "custom";
+    sources: Array<
+      | { type: "owner" }
+      | { type: "direct" }
+      | { type: "team"; teamId: string; teamName: string }
+    >;
+  };
+};
+
+export type CreateRoomInput = {
+  name: string;
+  type: "file" | "folder";
+  sourcePath: string;
+  mountName: string;
+  conflictPolicy?: "keep_both" | "owner_wins";
+  capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
 };
 
 export type TeamMemberSummary = {
@@ -60,9 +77,12 @@ export type AuditEventSummary = {
   teamId: string | null;
   actorType: "user" | "device" | "system";
   actorId: string;
+  actorDisplayName: string | null;
+  actorDeviceDisplayName: string | null;
   action: string;
   resourceType: string;
   resourceId: string;
+  resourceDisplayName: string | null;
   metadata: unknown;
   ipAddress: string | null;
   createdAt: string;
@@ -181,6 +201,7 @@ export class RelayApiClient implements RelayFileApi {
     user: { id: string; displayName: string };
     device: { id: string; displayName: string };
     isServerOwner: boolean;
+    serverOwner?: { id: string; displayName: string };
     /** Owner-only: the address a teammate last reached this server on, used to spot a stale Public URL
      *  override after the machine's LAN address changed. Absent for non-owners and until someone connects. */
     observedClientHost?: { host: string; at: string } | null;
@@ -310,14 +331,7 @@ export class RelayApiClient implements RelayFileApi {
     return this.request("/api/rooms");
   }
 
-  async createRoom(input: {
-    name: string;
-    type: "file" | "folder";
-    sourcePath: string;
-    mountName: string;
-    conflictPolicy?: "keep_both" | "owner_wins";
-    capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
-  }): Promise<{ room: RoomSummary }> {
+  async createRoom(input: CreateRoomInput): Promise<{ room: RoomSummary }> {
     return this.request("/api/rooms", {
       method: "POST",
       body: input

@@ -138,11 +138,16 @@ export function registerAuthRoutes(
         // Ignored on purpose: the next request re-records it.
       }
     }
+    const serverOwnerId = repo.getServerOwnerId();
+    const serverOwner = serverOwnerId ? repo.getUser(serverOwnerId) : null;
     return {
       serverId: repo.getOrCreateServerId(),
       user: { id: principal.userId, displayName: principal.userDisplayName },
       device: { id: principal.deviceId, displayName: principal.deviceDisplayName },
       isServerOwner: principal.isServerOwner,
+      ...(serverOwner
+        ? { serverOwner: { id: serverOwner.id, displayName: serverOwner.display_name } }
+        : {}),
       // Only the owner can act on this (it's their Public URL override that would be wrong), and only they
       // should see where other people are connecting from.
       ...(principal.isServerOwner ? { observedClientHost: repo.getObservedClientHost() } : {}),

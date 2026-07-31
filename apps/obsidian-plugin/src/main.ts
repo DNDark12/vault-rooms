@@ -4,7 +4,9 @@ import { isCrdtEligiblePath } from "@vault-rooms/protocol";
 import {
   RelayApiClient,
   type AclRuleSummary,
+  type CreateRoomInput,
   type FriendSummary,
+  type InviteLinkResponse,
   type RoomSummary,
   type TeamDirectoryEntry,
   type TeamMemberSummary,
@@ -18,6 +20,7 @@ import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatc
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
   DEFAULT_SETTINGS,
+  isOwnEmbeddedServerConnection,
   migrateVaultRoomsSettings,
   type PersistedVaultRoomsSettings,
   type ServerConnection,
@@ -27,6 +30,7 @@ import type { EmbeddedServerStatus } from "./serverManager.js";
 import { VaultRoomsSettingTab } from "./VaultRoomsSettingTab.js";
 import { CreateRoomModal } from "./modals/CreateRoomModal.js";
 import { CreateInviteModal } from "./modals/CreateInviteModal.js";
+import { GuidedOnboardingModal } from "./modals/GuidedOnboardingModal.js";
 import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
@@ -40,8 +44,9 @@ import { withInstalledCapabilities } from "./pluginCapabilities.js";
 import { inviteAcceptanceNotice, inviteJoinNotice } from "./inviteNotices.js";
 import type { LanShareReachability } from "./lanShareReachability.js";
 import type { PluginContext } from "./controllers/PluginContext.js";
-import { ServerConnectionManager } from "./controllers/ServerConnectionManager.js";
+import { ServerConnectionManager, type ServerActionOptions } from "./controllers/ServerConnectionManager.js";
 import { RoomMountController, type RoomMountControllerDeps } from "./controllers/RoomMountController.js";
+import { classifyLanAddress, type LanAddressVerdict } from "./lanAddress.js";
 import {
   assertPinMaterial,
   InvalidPinMaterialError,
@@ -59,6 +64,7 @@ export default class VaultRoomsPlugin extends Plugin {
   /** Owner-only signal from the relay: the address a teammate actually connected on. Null until someone has,
    *  and for non-owners. Refreshed by refreshTeams(); see advertisedAddressDrift for how it's used. */
   private observedClientHost: string | null = null;
+  private serverOwnerIdentity: { id: string; displayName: string } | undefined;
   /** This device's own teams (with ownerUserId) - scoped to the caller's memberships by the server
    *  (server owner sees all). Used for team-management UI (Invite link/Delete team/members), which
    *  needs ownerUserId/role - never use this for the room ACL "Team" picker. */
@@ -83,6 +89,7 @@ export default class VaultRoomsPlugin extends Plugin {
   private roomCoordinators = new Map<string, RoomPushCoordinator>();
   private syncSocket: RoomSyncSocket | null = null;
   private syncState: SyncConnectionState = "offline";
+  private readonly connectedServerIdsThisSession = new Set<string>();
   private readonly securityMigrationsInFlight = new Set<string>();
   private roomMountController!: RoomMountController;
   private crdtDocStore!: CrdtDocStore;
@@ -370,8 +377,13 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.syncState;
   }
 
-  async startEmbeddedServer(): Promise<EmbeddedServerStatus> {
-    const status = await this.serverConnectionManager.startEmbeddedServer();
+  hasConnectedActiveServerThisSession(): boolean {
+    const server = this.getActiveServer();
+    return Boolean(server && this.connectedServerIdsThisSession.has(server.id));
+  }
+
+  async startEmbeddedServer(options: ServerActionOptions = {}): Promise<EmbeddedServerStatus> {
+    const status = await this.serverConnectionManager.startEmbeddedServer(options);
     const server = this.getActiveServer();
     if (status.running && server && this.isOwnEmbeddedServerConnection(server)) {
       this.connectSyncSocket();
@@ -383,12 +395,59 @@ export default class VaultRoomsPlugin extends Plugin {
 
   /** Disconnects live sync when this device's own server is intentionally stopped, so the socket
    *  cannot fall into reconnect backoff against a relay we just shut down on purpose. */
-  async stopEmbeddedServer(): Promise<void> {
+  async stopEmbeddedServer(options: ServerActionOptions = {}): Promise<void> {
     const server = this.getActiveServer();
     const wasOwnEmbeddedServerConnection = Boolean(server && this.isOwnEmbeddedServerConnection(server));
-    await this.serverConnectionManager.stopEmbeddedServer();
+    await this.serverConnectionManager.stopEmbeddedServer(options);
     if (wasOwnEmbeddedServerConnection) {
       this.disconnectSyncSocket();
+    }
+  }
+
+  async configureOnboardingConnection(publicUrlOverride: string): Promise<LanAddressVerdict> {
+    const trimmed = publicUrlOverride.trim();
+    const verdict = classifyLanAddress(trimmed);
+    if (!verdict.usableForTeammates) {
+      throw new Error(verdict.problem ?? "Enter this computer's address on your network.");
+    }
+
+    const previousPublicUrlOverride = this.settings.server.publicUrlOverride;
+    this.settings.server.publicUrlOverride = trimmed;
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.settings.server.publicUrlOverride = previousPublicUrlOverride;
+      throw error;
+    }
+
+    if (this.getServerStatus().running) {
+      await this.stopEmbeddedServer({ notify: false });
+    }
+    await this.startEmbeddedServer({ notify: false });
+    await this.serverConnectionManager.assertLanShareReachable();
+
+    if (verdict.class !== "link-local") {
+      await this.persistOnboardingAutoStart();
+    }
+    return verdict;
+  }
+
+  async confirmOnboardingConnection(): Promise<void> {
+    const verdict = classifyLanAddress(this.settings.server.publicUrlOverride ?? "");
+    if (verdict.class !== "link-local" || !verdict.usableForTeammates) {
+      throw new Error("The saved address no longer needs link-local confirmation. Check the connection again.");
+    }
+    await this.persistOnboardingAutoStart();
+  }
+
+  private async persistOnboardingAutoStart(): Promise<void> {
+    const previousAutoStart = this.settings.server.autoStart;
+    this.settings.server.autoStart = true;
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.settings.server.autoStart = previousAutoStart;
+      throw error;
     }
   }
 
@@ -418,7 +477,7 @@ export default class VaultRoomsPlugin extends Plugin {
    *  setupServer() and serverManager.ts), so pairing owner identity with a loopback baseUrl pins it
    *  to this device's embedded server. */
   private isOwnEmbeddedServerConnection(server: ServerConnection): boolean {
-    return server.isServerOwner && isLoopbackUrl(server.baseUrl);
+    return isOwnEmbeddedServerConnection(server);
   }
 
   activeServerIsOwnEmbeddedServer(): boolean {
@@ -443,6 +502,10 @@ export default class VaultRoomsPlugin extends Plugin {
    */
   hasOwnServer(): boolean {
     return this.serverConnectionManager.hasOwnServer();
+  }
+
+  ownEmbeddedServerId(): string | undefined {
+    return this.serverConnectionManager.ownEmbeddedServerId();
   }
 
   async testConnection(baseUrl: string, pin?: PinnedServerInfo): Promise<void> {
@@ -616,10 +679,14 @@ export default class VaultRoomsPlugin extends Plugin {
   }
 
   async createRoomInvite(roomId: string, preset: "reader" | "editor"): Promise<void> {
+    const invite = await this.issueRoomInvite(roomId, preset);
+    new InviteMemberModal(this, invite.joinUrl).open();
+  }
+
+  async issueRoomInvite(roomId: string, preset: "reader" | "editor"): Promise<InviteLinkResponse> {
     const server = this.requireActiveServer();
     await this.assertInviteServerReachable(server);
-    const invite = await this.apiFor(server).createRoomInvite(roomId, preset);
-    new InviteMemberModal(this, invite.joinUrl).open();
+    return this.apiFor(server).createRoomInvite(roomId, preset);
   }
 
   async createFriendInvite(): Promise<void> {
@@ -666,6 +733,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // Owner-only, and absent until a teammate has actually connected - see advertisedAddressDrift for what
     // it's compared against and why that comparison is the only way to notice a stale Public URL override.
     this.observedClientHost = me.observedClientHost?.host ?? null;
+    this.serverOwnerIdentity = me.serverOwner;
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
     this.teamDirectory = directoryResult.teams;
@@ -695,6 +763,10 @@ export default class VaultRoomsPlugin extends Plugin {
   canManageRoom(room: RoomSummary): boolean {
     const server = this.getActiveServer();
     return Boolean(server && (server.isServerOwner || room.ownerUserId === server.userId));
+  }
+
+  getServerOwnerIdentity(): { id: string; displayName: string } | undefined {
+    return this.serverOwnerIdentity;
   }
 
   canCreateAnyInvite(): boolean {
@@ -764,18 +836,60 @@ export default class VaultRoomsPlugin extends Plugin {
     }
   }
 
-  async createRoom(input: {
-    name: string;
-    type: "file" | "folder";
-    sourcePath: string;
-    mountName: string;
-    conflictPolicy?: "keep_both" | "owner_wins";
-    capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
-  }): Promise<void> {
+  async createRoom(input: CreateRoomInput): Promise<RoomSummary> {
     const server = this.requireActiveServer();
-    await this.apiFor(server).createRoom(input);
-    await this.refreshRooms();
+    let room: RoomSummary;
+    try {
+      ({ room } = await this.apiFor(server).createRoom(input));
+    } catch (createError) {
+      try {
+        await this.refreshRooms({ notify: false });
+      } catch {
+        throw createError;
+      }
+      const recoveredRoom = this.visibleRooms.find(
+        (candidate) =>
+          candidate.ownerUserId === server.userId &&
+          candidate.name === input.name &&
+          candidate.type === input.type &&
+          candidate.sourcePath === input.sourcePath &&
+          candidate.mountName === input.mountName &&
+          candidate.conflictPolicy === (input.conflictPolicy ?? "keep_both") &&
+          candidate.capabilities.length === input.capabilities.length &&
+          input.capabilities.every((requested) =>
+            candidate.capabilities.some(
+              (actual) =>
+                actual.pluginId === requested.pluginId &&
+                actual.displayName === requested.displayName &&
+                actual.mode === requested.mode &&
+                actual.minVersion === requested.minVersion
+            )
+          )
+      );
+      if (!recoveredRoom) {
+        throw createError;
+      }
+      new Notice(`Created room ${input.name}`);
+      return recoveredRoom;
+    }
+    try {
+      await this.refreshRooms();
+    } catch (error) {
+      this.visibleRooms = [
+        ...this.visibleRooms.filter((candidate) => candidate.id !== room.id),
+        room
+      ];
+      this.renderOpenRoomsViews();
+      new Notice(
+        `Created room ${input.name}, but the room list could not refresh: ${userFacingError(
+          error,
+          "Refresh the room list to load its latest state."
+        )}`
+      );
+      return room;
+    }
     new Notice(`Created room ${input.name}`);
+    return room;
   }
 
   async updateRoomSettings(
@@ -1014,8 +1128,18 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.roomMountController.roomMountPathFor(room);
   }
 
-  openSetupServerModal(): void {
+  openOwnerRecoveryModal(): void {
     new SetupTeamModal(this).open();
+  }
+
+  openSetupServerModal(): void {
+    const status = this.getServerStatus();
+    const recovering = !this.hasOwnServer() && status.running && status.bootstrapped;
+    if (recovering) {
+      this.openOwnerRecoveryModal();
+      return;
+    }
+    new GuidedOnboardingModal(this).open();
   }
 
   openCreateRoomModal(): void {
@@ -1270,6 +1394,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // Scoped to the active server: leaving it stale would compare another server's observation against this
     // device's own hosted LAN URL and warn about drift that doesn't exist.
     this.observedClientHost = null;
+    this.serverOwnerIdentity = undefined;
     this.visibleRooms = [];
     this.teams = [];
     this.teamDirectory = [];
@@ -1596,6 +1721,7 @@ export default class VaultRoomsPlugin extends Plugin {
         // machinery rather than a second queue, and each coordinator's own isStillMounted guard
         // covers a room being unmounted while offline.
         if (state === "connected") {
+          this.connectedServerIdsThisSession.add(server.id);
           for (const coordinator of this.roomCoordinators.values()) {
             coordinator.retryPending();
           }
@@ -1777,15 +1903,6 @@ function pinnedInviteInfoFromParams(params: ObsidianProtocolData): PinnedInviteI
   };
   assertPinMaterial(pin);
   return pin;
-}
-
-function isLoopbackUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]" || parsed.hostname === "::1";
-  } catch {
-    return false;
-  }
 }
 
 /**

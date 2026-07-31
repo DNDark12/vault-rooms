@@ -17,25 +17,25 @@ any team. A room's access list grants or denies a user or a team, per path patte
 ## What it is not
 
 Not cloud sync, not NAT traversal, not mobile, and not a sandbox for other Obsidian plugins. It syncs Markdown
-plus a limited set of common file types (see "Known limitations"). Character-level co-editing exists only as a
-per-room opt-in for Markdown notes (see "CRDT sync") and is off unless an owner turns it on.
+plus a limited set of common file types (see "Known limitations"). Character-level co-editing applies only to
+Markdown notes (see "CRDT sync"); it starts on for new rooms and can be changed per room.
 
 ## Quick start
 
 **On the hosting device:**
 
-1. Command palette → **Vault Rooms: Start server**.
-2. Settings → Vault Rooms → Relay server → **Public URL override** → enter this machine's LAN address (e.g.
-   `192.168.1.100`), then stop and start the server. Confirm the panel shows **LAN share: reachable from this
-   device**. This step is required - the host never guesses its own address.
-3. Panel → **Set up server** (makes you the owner, and optionally creates your first team).
-4. Panel → **Rooms** → **Create room**, and pick a folder to share.
-5. In the room's Settings, grant access to a user or team.
-6. Panel → **Invite** → choose what it grants → **Create invite** → **Copy**. Send the whole link: it carries
-   the server's identity and fingerprint, not just an address.
+1. Panel → **Set up and share**.
+2. Enter this computer's address on the local network and complete the guided check.
+3. Enter your display name, choose one folder, and create the room.
+4. Create and copy the first room invite.
 
-**On the teammate's device:** click the link, add a display name, join, then **mount** the room that appears
-under **Rooms**.
+The plugin cannot discover the LAN address automatically. After the entered address passes the host-side
+check, automatic server startup is enabled. The guided flow applies the current room defaults without asking
+for technical settings, including Live editing for Markdown notes. The teammate still needs Vault Rooms
+installed before opening the invite.
+
+**On the teammate's device:** install Vault Rooms, click the link, add a display name, join, then choose
+**Add to this computer** for the room under **Rooms**.
 
 A green reachability badge only proves the host can reach its own address. It cannot prove the teammate's
 firewall or Wi-Fi client isolation will allow the connection - if they can't connect, use **Test connection**
@@ -100,8 +100,8 @@ reconciliation runs on first mount, re-mount, and reconnect.
 ## How edits sync
 
 By default, concurrent edits to the same file are **first save wins**: the device that saves second keeps its
-version as a **local-only conflict copy** rather than losing it. The Rooms panel lists any conflict copy with
-**Keep mine** / **Keep synced version** so you don't have to sort it out by hand.
+version as a **local-only conflict copy** rather than losing it. The Rooms panel marks the room
+**Needs a choice** and offers **Keep mine** / **Keep teammate's version**.
 
 Two things soften that for files which autosave constantly (a drawing plugin can save on every stroke): rapid
 edits to one file are coalesced into a single push, and a room can be set to **Owner's version always wins**
@@ -112,11 +112,11 @@ every mounted device immediately - there is no polling. A device that was offlin
 re-subscribes, and reconciles; you never need to remount manually. The panel's connection badge tells you whether
 you're actually live.
 
-## CRDT sync (opt-in live editing for Markdown notes)
+## CRDT sync (live editing for Markdown notes)
 
-Per room, an owner can turn on **Room Settings → "Live editing (CRDT sync)"** (default off) to get real-time,
-character-level merging for that room's Markdown notes. Two people typing in the same note merge deterministically
-instead of one edit becoming a conflict copy.
+New rooms start with **Manage → Live editing** on, giving their Markdown notes real-time, character-level
+merging. Existing rooms keep their previously saved value, and a manager can turn the setting on or off per
+room. Two people typing in the same note merge deterministically instead of one edit becoming a conflict copy.
 
 - **Markdown only.** Every other file type in the room keeps using normal whole-file sync.
 - **Turning it on or off is non-destructive.** Existing notes are seeded from their current content; disabling
@@ -138,12 +138,13 @@ instead of one edit becoming a conflict copy.
   silent conflict.
 - **No new network surface** - it rides the same authenticated connection.
 
-This is the newest part of the plugin. Enable it per room, on content you have a backup of. See
+This is the newest part of the plugin. Keep backups for important content while it continues its soak period. See
 [SECURITY.md](SECURITY.md) for its durability characteristics.
 
 ## Plugin capability model
 
-A room can *recommend* companion plugins (Kanban, Tasks) and the panel shows whether they're enabled locally.
+A room can *recommend* companion plugins (Kanban, Tasks); the room's **Manage** surface shows whether they're
+enabled locally.
 Vault Rooms never grants permission to run someone else's plugin code.
 
 ## Known limitations
@@ -154,7 +155,7 @@ Vault Rooms never grants permission to run someone else's plugin code.
   Other binaries (audio, video, Office documents) are not synced. Images and PDFs count against the size limit at
   roughly 1.33x their real size.
 - Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
-- Character-level co-editing and cursor presence only exist via a room's CRDT opt-in, and only for Markdown.
+- Character-level co-editing and cursor presence only exist when a room has Live editing enabled, and only for Markdown.
   Cursor presence is ephemeral: it appears only for authorized teammates who currently have the same note open,
   is not persisted, and does not provide a room-wide participant or online list.
 - CRDT caveats: per-keystroke merging applies only to a note open in your editor; renaming a note that's open on
@@ -170,7 +171,7 @@ Vault Rooms never grants permission to run someone else's plugin code.
 
 ## Troubleshooting
 
-Start with the **Test** button (Settings → Vault Rooms → Servers, or beside a saved server in the panel). It
+Start with **Connection details → Test connection** in the panel (or **Test** in Settings → Vault Rooms → Servers). It
 checks the address, whether anything answers, whether it's a Vault Rooms server with the expected identity, and
 whether this device's login still works - then names the step that failed.
 
@@ -184,13 +185,13 @@ whether this device's login still works - then names the step that failed.
 - **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live
   editing (CRDT) for the active note"**. It names the missing content-sync link and also reports whether cursor
   transport is ready, whether this device published its cursor, and which remote names are visible. Most often
-  live editing is simply off - it's per room and default-off, so a room created after you last enabled it starts
-  without it.
+  Live editing is simply off for that room. Existing rooms keep their saved value; check **Manage → Live editing**
+  and save the room settings.
 - **A teammate's cursor isn't visible:** both devices need Vault Rooms 0.2.4 or newer, the same CRDT Markdown note
   open, the room mounted with live editing enabled, a live connection, and `file:read` access to that exact path.
   Cursor presence is intentionally absent when a note is only synced in the background.
-- **A teammate's edits aren't showing up:** confirm both devices show the room as **mounted**, not just visible.
-  Only mounted rooms hold a live subscription.
+- **A teammate's edits aren't showing up:** confirm both devices show **In your vault at …**, not
+  **Not on this computer**. Only rooms added to the computer hold a live subscription.
 - **Server identity mismatch:** the peer presented a different identity, so Vault Rooms stopped before sending
   credentials. Confirm the address; after a reinstall, get a fresh invite and verify its fingerprint with the
   owner through a channel you trust. There is deliberately no trust-anyway override.

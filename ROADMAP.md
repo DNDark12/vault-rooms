@@ -12,18 +12,27 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   disappears on editor/session cleanup, is never persisted, and deliberately has no participant bar. It remains
   separate from chat's future server-wide online/offline presence.
 
+## Implemented for the next release
+
+- **Guided onboarding.** A fresh host now follows one four-step path to verify its LAN address, create the
+  owner account, create the first room with safe defaults, and issue a room invite. Loopback and unspecified
+  addresses are rejected before mutation; link-local addresses require explicit acknowledgement; automatic
+  startup is enabled only after the host-side reachability check passes. Existing owners, saved rooms, owner
+  recovery, room defaults, and the per-room live-editing setting remain intact.
+- **Rooms-first panel UX.** The full panel now uses one active-sync status, a separate contextual hosting line,
+  and Rooms / People / Activity tabs for every role and server state. Room and team management is
+  permission-driven, technical details are progressively disclosed, stale data is marked, and routine actions
+  use plain file-oriented language. People is grouped by effective room access, and Room Manage translates
+  exact permission presets into human language while keeping custom/raw rules under disclosure.
+- **Live editing default for new rooms.** New rooms start with Markdown live editing enabled. Existing rooms
+  keep their persisted choice; there is no silent migration. The toggle shares the room's explicit
+  **Save changes** path.
+
 ## Next up
 
-- **Onboarding.** In progress. An address that cannot work for a teammate (loopback, `0.0.0.0`) is now
-  refused at the host with an explanation, instead of passing the host's own reachability check and failing
-  later on the teammate's machine; a self-assigned `169.254.x` is allowed but flagged. The relay records the
-  address teammates actually connect on, and the panel warns when that disagrees with what invites advertise -
-  which is how a stale override after a DHCP change becomes visible. Still to do: reduce the remaining manual
-  steps. Hard limit worth knowing: the plugin cannot auto-detect its own LAN address, because reading network
-  interfaces is flagged by Obsidian's review as fingerprinting.
-- **CRDT soak, then default-on for new rooms.** Live editing works and has been through extended two-device
-  testing; it stays opt-in per room until it has run on real content for a while. Two of the three known gaps are
-  now closed (an edit typed inside the rename acknowledgement window is re-offered immediately, and an in-flight
+- **Continue CRDT soak.** Live editing works, has been through extended two-device testing, and is now the
+  default for new rooms. Two of the three known gaps are now closed (an edit typed inside the rename
+  acknowledgement window is re-offered immediately, and an in-flight
   request is failed rather than stranded when the socket drops). The remaining one is a coexistence trade-off
   needing a decision: a peer on a build older than the rename protocol applies a rename only after reconnecting.
   Closing it means also broadcasting the rename as a delete+create to non-CRDT peers, which is more traffic and

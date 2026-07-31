@@ -72,7 +72,8 @@ export type RoomRow = {
   created_at: string;
   updated_at: string;
   /** CRDT sync opt-in flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). SQLite
-   *  boolean (0/1), default 0. Only `.md` files in a room with this set to 1 use the CRDT lane;
+   *  boolean (0/1). Existing rows default to 0 during migration; newly created rooms start at 1.
+   *  Only `.md` files in a room with this set to 1 use the CRDT lane;
    *  everything else stays on the whole-file compare-and-swap lane. */
   crdt_enabled: 0 | 1;
 };

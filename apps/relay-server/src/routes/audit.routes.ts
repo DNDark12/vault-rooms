@@ -13,9 +13,12 @@ export type AuditEventResponse = {
   teamId: string | null;
   actorType: "user" | "device" | "system";
   actorId: string;
+  actorDisplayName: string | null;
+  actorDeviceDisplayName: string | null;
   action: string;
   resourceType: string;
   resourceId: string;
+  resourceDisplayName: string | null;
   metadata: unknown;
   ipAddress: string | null;
   createdAt: string;
@@ -46,23 +49,70 @@ export function registerAuditRoutes(app: FastifyInstance, repo: RelayRepository)
       limit,
       offset
     });
-    return { events: events.map(toAuditEventResponse), limit, offset };
+    return { events: events.map((event) => toAuditEventResponse(repo, event)), limit, offset };
   });
 }
 
-function toAuditEventResponse(row: AuditEventRow): AuditEventResponse {
+function toAuditEventResponse(repo: RelayRepository, row: AuditEventRow): AuditEventResponse {
+  const metadata = parseMetadata(row.metadata_json);
+  const actor = resolveActorDisplay(repo, row);
   return {
     id: row.id,
     teamId: row.team_id,
     actorType: row.actor_type,
     actorId: row.actor_id,
+    actorDisplayName: actor.name,
+    actorDeviceDisplayName: actor.deviceName,
     action: row.action,
     resourceType: row.resource_type,
     resourceId: row.resource_id,
-    metadata: parseMetadata(row.metadata_json),
+    resourceDisplayName: resolveResourceDisplay(repo, row, metadata),
+    metadata,
     ipAddress: row.ip_address,
     createdAt: row.created_at
   };
+}
+
+function resolveActorDisplay(
+  repo: RelayRepository,
+  row: AuditEventRow
+): { name: string | null; deviceName: string | null } {
+  if (row.actor_type === "system") {
+    return { name: "This server", deviceName: null };
+  }
+  if (row.actor_type === "user") {
+    return { name: repo.getUser(row.actor_id)?.display_name ?? null, deviceName: null };
+  }
+  const device = repo.getDevice(row.actor_id);
+  return {
+    name: device ? repo.getUser(device.user_id)?.display_name ?? null : null,
+    deviceName: device?.display_name ?? null
+  };
+}
+
+function resolveResourceDisplay(
+  repo: RelayRepository,
+  row: AuditEventRow,
+  metadata: unknown
+): string | null {
+  if (row.resource_type === "room") return repo.getRoom(row.resource_id)?.name ?? null;
+  if (row.resource_type === "team") return repo.getTeam(row.resource_id)?.name ?? null;
+  if (row.resource_type === "user") return repo.getUser(row.resource_id)?.display_name ?? null;
+  if (row.resource_type === "device") return repo.getDevice(row.resource_id)?.display_name ?? null;
+  if (row.resource_type === "file") return metadataValue(metadata, "relativePath");
+  if (row.resource_type === "invite") {
+    if (row.team_id) return repo.getTeam(row.team_id)?.name ?? "Invitation";
+    const roomId = metadataValue(metadata, "roomId");
+    return roomId ? repo.getRoom(roomId)?.name ?? "Invitation" : "Invitation";
+  }
+  if (row.resource_type === "server" || row.resource_type === "security") return "This server";
+  return null;
+}
+
+function metadataValue(metadata: unknown, key: string): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
 }
 
 function parseMetadata(json: string): unknown {

@@ -74,7 +74,15 @@ describe("friends, teams, and room visibility", () => {
       headers: { authorization: `Bearer ${member.deviceToken}` }
     });
     expect(bRoomsAfterGrant.statusCode).toBe(200);
-    expect(bRoomsAfterGrant.json().rooms).toEqual([expect.objectContaining({ id: room.id })]);
+    expect(bRoomsAfterGrant.json().rooms).toEqual([
+      expect.objectContaining({
+        id: room.id,
+        accessSummary: {
+          level: "reader",
+          sources: [{ type: "team", teamId: team2.id, teamName: "Team 2" }]
+        }
+      })
+    ]);
 
     const revokeFromTeam2 = await app.inject({
       method: "POST",

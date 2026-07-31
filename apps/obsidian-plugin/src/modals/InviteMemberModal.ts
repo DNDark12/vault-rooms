@@ -1,5 +1,5 @@
 import { Modal, Notice } from "obsidian";
-import { copyInviteLink } from "../inviteClipboard.js";
+import { copyInviteLinkFromNavigator } from "../inviteClipboard.js";
 import type VaultRoomsPlugin from "../main.js";
 
 export class InviteMemberModal extends Modal {
@@ -31,7 +31,7 @@ export class InviteMemberModal extends Modal {
     const copyButton = linkActions.createEl("button", { text: "Copy" });
     copyButton.addClass("mod-cta");
     copyButton.onClickEvent(async () => {
-      if (await copyInviteLink(this.joinUrl, navigator.clipboard, selectLink)) {
+      if (await copyInviteLinkFromNavigator(this.joinUrl, selectLink)) {
         new Notice("Invite link copied.");
       }
     });

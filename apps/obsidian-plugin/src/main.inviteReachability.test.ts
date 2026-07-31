@@ -20,6 +20,7 @@ vi.mock("./VaultRoomsSettingTab.js", () => ({ VaultRoomsSettingTab: class VaultR
 vi.mock("./modals/ConfirmModal.js", () => ({ confirmModal: vi.fn() }));
 vi.mock("./modals/CreateRoomModal.js", () => ({ CreateRoomModal: class CreateRoomModal {} }));
 vi.mock("./modals/CreateInviteModal.js", () => ({ CreateInviteModal: class CreateInviteModal {} }));
+vi.mock("./modals/GuidedOnboardingModal.js", () => ({ GuidedOnboardingModal: class GuidedOnboardingModal {} }));
 vi.mock("./modals/InviteMemberModal.js", () => ({
   InviteMemberModal: class InviteMemberModal {
     open(): void {
@@ -82,6 +83,19 @@ describe("VaultRoomsPlugin invite LAN reachability gate", () => {
 
     expect(assertLanShareReachable).toHaveBeenCalledOnce();
     expect(api.createFriendInvite).toHaveBeenCalledOnce();
+    expect(modalMocks.open).toHaveBeenCalledOnce();
+  });
+
+  it("keeps normal room invite presentation after the fresh LAN assertion succeeds", async () => {
+    const server = serverConnection("http://127.0.0.1:8787", true);
+    const api = inviteApi();
+    const assertLanShareReachable = vi.fn().mockResolvedValue(undefined);
+    const plugin = createPlugin(server, api, assertLanShareReachable);
+
+    await plugin.createRoomInvite("room_1", "editor");
+
+    expect(assertLanShareReachable).toHaveBeenCalledOnce();
+    expect(api.createRoomInvite).toHaveBeenCalledWith("room_1", "editor");
     expect(modalMocks.open).toHaveBeenCalledOnce();
   });
 });

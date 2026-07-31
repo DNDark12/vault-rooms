@@ -206,6 +206,131 @@
   margin: 18px 0 8px;
 }
 
+.vault-rooms-settings-modal {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 140px);
+  max-width: 720px;
+  overflow: hidden;
+}
+
+.vault-rooms-settings-scroll {
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.vault-rooms-settings-scroll .setting-item,
+.vault-rooms-settings-scroll .setting-item-info {
+  min-width: 0;
+}
+
+.vault-rooms-settings-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+  padding-inline: 14px;
+}
+
+.vault-rooms-settings-card > .setting-item {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.vault-rooms-settings-card > .setting-item + .setting-item {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.vault-rooms-access-form {
+  margin-top: 10px;
+  padding-bottom: 4px;
+}
+
+.vault-rooms-advanced-settings {
+  margin-top: 6px;
+  padding-bottom: 10px;
+}
+
+.vault-rooms-advanced-settings > .vault-rooms-setting-hint {
+  margin: 8px 0 10px;
+}
+
+.vault-rooms-settings-disclosure {
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+.vault-rooms-capability-row .setting-item-info {
+  display: none;
+}
+
+.vault-rooms-capability-row .setting-item-control {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+}
+
+.vault-rooms-capability-row select {
+  min-width: 0;
+  width: 100%;
+}
+
+.vault-rooms-capability-row button {
+  white-space: nowrap;
+}
+
+.vault-rooms-raw-permissions {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.vault-rooms-room-danger-zone {
+  border-top: 1px solid color-mix(in srgb, var(--color-red) 55%, var(--background-modifier-border));
+  margin-top: 24px;
+  padding-left: 14px;
+  padding-right: 14px;
+  padding-top: 4px;
+}
+
+.vault-rooms-room-danger-zone > .setting-item {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.vault-rooms-room-danger-zone > .setting-item.vault-rooms-danger-action {
+  border-top: 0;
+  justify-content: flex-start;
+  padding-top: 0;
+}
+
+.vault-rooms-danger-action .setting-item-info {
+  display: none;
+}
+
+.vault-rooms-danger-action .setting-item-control {
+  justify-content: flex-start;
+  margin-left: 0;
+  width: 100%;
+}
+
+.vault-rooms-outline-danger {
+  background: transparent;
+  border: 1px solid var(--color-red);
+  color: var(--text-error);
+}
+
+.vault-rooms-outline-danger:hover,
+.vault-rooms-outline-danger:focus-visible {
+  background: color-mix(in srgb, var(--color-red) 12%, transparent);
+  color: var(--text-error);
+}
+
 .vault-rooms-setting-hint {
   color: var(--text-muted);
   font-size: var(--font-ui-small);
@@ -318,6 +443,85 @@
   padding-top: 10px;
 }
 
+.vault-rooms-onboarding {
+  max-width: 560px;
+}
+
+.vault-rooms-onboarding-steps {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.vault-rooms-onboarding-steps li {
+  border-bottom: 2px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 4px 2px 8px;
+}
+
+.vault-rooms-onboarding-steps li.is-complete {
+  border-color: var(--color-green);
+  color: var(--text-success);
+}
+
+.vault-rooms-onboarding-steps li.is-current {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.vault-rooms-onboarding-help,
+.vault-rooms-onboarding-secondary {
+  margin: 0 8px 8px 0;
+}
+
+.vault-rooms-field-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  margin: -8px 0 10px;
+}
+
+.vault-rooms-onboarding-warning {
+  background: color-mix(in srgb, var(--color-orange) 12%, transparent);
+  border-left: 3px solid var(--color-orange);
+  color: var(--text-normal);
+  padding: 8px 10px;
+}
+
+.vault-rooms-onboarding-ready,
+.vault-rooms-onboarding-done {
+  color: var(--text-success);
+  font-weight: 600;
+}
+
+.vault-rooms-onboarding-summary {
+  display: grid;
+  gap: 4px 12px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  margin: 8px 0 14px;
+}
+
+.vault-rooms-onboarding-summary dt {
+  color: var(--text-muted);
+}
+
+.vault-rooms-onboarding-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 440px) {
+  .vault-rooms-onboarding-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .vault-rooms-diagnostic-list {
   display: flex;
   flex-direction: column;
@@ -361,6 +565,429 @@
 
 .vault-rooms-diagnostic-summary.is-fail {
   color: var(--text-error);
+}
+
+/* Rooms-first operational panel (0.2.5). All selectors stay plugin-scoped and use Obsidian theme
+ * variables so the same hierarchy remains legible in light, dark, and community themes. */
+.vault-rooms-panel-b {
+  --vault-rooms-panel-gap: 12px;
+  padding: 0 12px 24px;
+}
+
+.vault-rooms-panel-header .setting-item {
+  border: 0;
+  padding-bottom: 4px;
+}
+
+.vault-rooms-status-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 var(--vault-rooms-panel-gap);
+  padding: 12px;
+}
+
+.vault-rooms-live-status {
+  display: grid;
+  gap: 8px;
+}
+
+.vault-rooms-connection-chip {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+  justify-self: start;
+  padding: 4px 9px;
+}
+
+.vault-rooms-connection-chip.is-positive {
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
+  color: var(--text-success);
+}
+
+.vault-rooms-connection-chip.is-warning {
+  background: color-mix(in srgb, var(--color-orange) 16%, transparent);
+  color: var(--text-warning);
+}
+
+.vault-rooms-connection-chip.is-negative {
+  background: color-mix(in srgb, var(--color-red) 14%, transparent);
+  color: var(--text-error);
+}
+
+.vault-rooms-connection-chip.is-neutral {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.vault-rooms-status-summary {
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold);
+}
+
+.vault-rooms-host-line {
+  align-items: center;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding-top: 8px;
+}
+
+.vault-rooms-status-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.vault-rooms-status-card .vault-rooms-section-heading {
+  margin-top: 6px;
+}
+
+.vault-rooms-connection-list {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 8px;
+}
+
+.vault-rooms-host-copy {
+  display: grid;
+  font-size: var(--font-ui-small);
+  gap: 2px;
+  min-width: 0;
+}
+
+.vault-rooms-host-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+}
+
+.vault-rooms-alert {
+  align-items: center;
+  border-left: 3px solid var(--background-modifier-border);
+  display: flex;
+  font-size: var(--font-ui-small);
+  gap: 8px;
+  justify-content: space-between;
+  margin: 8px 0;
+  padding: 8px 10px;
+}
+
+.vault-rooms-alert.is-error {
+  background: color-mix(in srgb, var(--color-red) 10%, transparent);
+  border-color: var(--color-red);
+}
+
+.vault-rooms-alert.is-warning {
+  background: color-mix(in srgb, var(--color-orange) 10%, transparent);
+  border-color: var(--color-orange);
+}
+
+.vault-rooms-alert.is-muted {
+  color: var(--text-muted);
+}
+
+.vault-rooms-tabs {
+  border-bottom: 1px solid var(--background-modifier-border);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 12px 0 8px;
+}
+
+.vault-rooms-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text-muted);
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 8px 4px;
+}
+
+.vault-rooms-tab:hover,
+.vault-rooms-tab:focus-visible {
+  color: var(--text-normal);
+}
+
+.vault-rooms-tab.is-active {
+  border-bottom-color: var(--interactive-accent);
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+}
+
+.vault-rooms-tab-attention {
+  background: var(--color-orange);
+  border-radius: 999px;
+  color: var(--text-on-accent);
+  font-size: var(--font-ui-smaller);
+  line-height: 1;
+  padding: 3px 6px;
+}
+
+.vault-rooms-tab-panel {
+  min-width: 0;
+}
+
+.vault-rooms-toolbar,
+.vault-rooms-card-actions,
+.vault-rooms-inline-create,
+.vault-rooms-section-heading-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vault-rooms-toolbar {
+  justify-content: flex-end;
+  margin: 8px 0;
+}
+
+.vault-rooms-primary-list,
+.vault-rooms-compact-list {
+  display: grid;
+  gap: 8px;
+}
+
+.vault-rooms-room-card,
+.vault-rooms-team-card,
+.vault-rooms-connection-card,
+.vault-rooms-activity-row {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  padding: 11px;
+}
+
+.vault-rooms-activity-technical {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-top: 8px;
+}
+
+.vault-rooms-activity-technical summary {
+  cursor: pointer;
+}
+
+.vault-rooms-activity-technical pre {
+  background: var(--background-primary-alt);
+  border-radius: var(--radius-s);
+  margin: 8px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
+.vault-rooms-room-card.needs-attention {
+  border-left: 3px solid var(--color-orange);
+}
+
+.vault-rooms-card-title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.vault-rooms-card-title strong {
+  overflow-wrap: anywhere;
+}
+
+.vault-rooms-card-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.vault-rooms-card-actions {
+  margin-top: 9px;
+}
+
+.vault-rooms-access-list {
+  gap: 0;
+}
+
+.vault-rooms-access-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-bottom-width: 0;
+  padding: 11px;
+}
+
+.vault-rooms-access-card:first-child {
+  border-radius: var(--radius-m) var(--radius-m) 0 0;
+}
+
+.vault-rooms-access-card:last-child {
+  border-bottom-width: 1px;
+  border-radius: 0 0 var(--radius-m) var(--radius-m);
+}
+
+.vault-rooms-access-card:only-child {
+  border-radius: var(--radius-m);
+}
+
+.vault-rooms-access-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.vault-rooms-access-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vault-rooms-person-avatar {
+  align-items: center;
+  aspect-ratio: 1;
+  background: color-mix(in srgb, var(--interactive-accent) 22%, var(--background-primary));
+  border-radius: 999px;
+  color: var(--interactive-accent);
+  display: flex;
+  font-size: var(--font-ui-small);
+  justify-content: center;
+  width: 38px;
+}
+
+.vault-rooms-access-note {
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  border-radius: var(--radius-m);
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.vault-rooms-attention-label,
+.vault-rooms-role-label {
+  background: var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.vault-rooms-attention-label {
+  background: color-mix(in srgb, var(--color-orange) 14%, transparent);
+  color: var(--text-warning);
+}
+
+.vault-rooms-compact-row {
+  align-items: center;
+  border-bottom: 1px solid var(--background-modifier-border);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 8px 2px;
+}
+
+.vault-rooms-compact-row.is-revoked {
+  opacity: 0.68;
+}
+
+.vault-rooms-section-heading {
+  font-size: var(--font-ui-medium);
+  margin: 18px 0 8px;
+}
+
+.vault-rooms-section-heading-row {
+  justify-content: space-between;
+}
+
+.vault-rooms-empty-state {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 18px 8px;
+  text-align: center;
+}
+
+.vault-rooms-management-surface {
+  background: var(--background-primary-alt);
+  border-radius: var(--radius-s);
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.vault-rooms-danger-zone {
+  border-top: 1px solid var(--background-modifier-border);
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 10px;
+}
+
+.vault-rooms-choice-list {
+  border-top: 1px solid var(--background-modifier-border);
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.vault-rooms-choice-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.vault-rooms-connection-card.is-active {
+  border-color: var(--interactive-accent);
+}
+
+@media (max-width: 440px) {
+  .vault-rooms-panel-b {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .vault-rooms-host-line,
+  .vault-rooms-compact-row,
+  .vault-rooms-card-title {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .vault-rooms-host-line button,
+  .vault-rooms-card-actions button,
+  .vault-rooms-toolbar button {
+    min-height: 34px;
+  }
+
+  .vault-rooms-inline-create input,
+  .vault-rooms-inline-create select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .vault-rooms-access-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .vault-rooms-access-row > button {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
 }
 
 /* Live cursors / note presence (docs/superpowers/specs/2026-07-28-live-cursors-design.md).

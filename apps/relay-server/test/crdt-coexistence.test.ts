@@ -118,7 +118,9 @@ class FakeCrdtTimerHost implements SyncTimerHost {
   }
 }
 
-async function setupRoom(options: { crdtTimerHost?: SyncTimerHost } = {}) {
+async function setupRoom(
+  options: { crdtTimerHost?: SyncTimerHost; crdtEnabled?: boolean } = {}
+) {
   const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787", crdtTimerHost: options.crdtTimerHost });
   apps.push(app);
   const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Owner laptop" })).json();
@@ -127,7 +129,14 @@ async function setupRoom(options: { crdtTimerHost?: SyncTimerHost } = {}) {
       method: "POST",
       url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
-      payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [] }
+      payload: {
+        name: "Room",
+        type: "folder",
+        sourcePath: "Room",
+        mountName: "Room",
+        capabilities: [],
+        crdtEnabled: options.crdtEnabled
+      }
     })
   ).json().room;
   return { app, owner, room };
@@ -144,7 +153,7 @@ async function toggleCrdt(app: Awaited<ReturnType<typeof createApp>>, owner: { d
 
 describe("CRDT coexistence (Phase 6)", () => {
   it("[contract 1.4] a REST PUT to a CRDT-enabled .md path is rejected with CRDT_WRITE_UNSUPPORTED, not silently applied", async () => {
-    const { app, owner, room } = await setupRoom();
+    const { app, owner, room } = await setupRoom({ crdtEnabled: false });
     await toggleCrdt(app, owner, room, true);
 
     const putResponse = await app.inject({
@@ -188,7 +197,7 @@ describe("CRDT coexistence (Phase 6)", () => {
 
   it("[contract 1.6] GET files/content on a CRDT-enabled file still returns the materialized latest text", async () => {
     const timers = new FakeCrdtTimerHost();
-    const { app, owner, room } = await setupRoom({ crdtTimerHost: timers });
+    const { app, owner, room } = await setupRoom({ crdtTimerHost: timers, crdtEnabled: false });
     await toggleCrdt(app, owner, room, true);
     const socket = await connect(app);
     await helloAndSubscribe(socket, owner.deviceToken, room.id);
@@ -222,7 +231,7 @@ describe("CRDT coexistence (Phase 6)", () => {
   });
 
   it("[toggle-ON conversion] turning CRDT on for a room with existing .md files seeds each from its current text at a fresh (bumped) epoch, never discarding content", async () => {
-    const { app, owner, room } = await setupRoom();
+    const { app, owner, room } = await setupRoom({ crdtEnabled: false });
     // Two pre-existing Markdown files, written through the ordinary (pre-CRDT) whole-file lane.
     await app.inject({
       method: "PUT",
@@ -298,7 +307,7 @@ describe("CRDT coexistence (Phase 6)", () => {
 
   it("[toggle-ON conversion] a legacy (non-CRDT-capable) subscriber only ever sees room_snapshot + materialized remote_file_change for a converted file, never remote_crdt_update", async () => {
     const timers = new FakeCrdtTimerHost();
-    const { app, owner, room } = await setupRoom({ crdtTimerHost: timers });
+    const { app, owner, room } = await setupRoom({ crdtTimerHost: timers, crdtEnabled: false });
     await app.inject({
       method: "PUT",
       url: `/api/rooms/${room.id}/files/content`,
@@ -347,7 +356,7 @@ describe("CRDT coexistence (Phase 6)", () => {
   });
 
   it("[toggle-OFF] disabling CRDT after conversion is non-destructive and cleanly reverts to the CAS lane", async () => {
-    const { app, owner, room } = await setupRoom();
+    const { app, owner, room } = await setupRoom({ crdtEnabled: false });
     await app.inject({
       method: "PUT",
       url: `/api/rooms/${room.id}/files/content`,

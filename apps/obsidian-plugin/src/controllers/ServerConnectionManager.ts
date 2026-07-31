@@ -16,7 +16,7 @@ import {
   type PinnedInviteInfo,
   type PinnedServerInfo
 } from "../pinnedTransport.js";
-import { activeServer, type ServerConnection } from "../settings.js";
+import { activeServer, isOwnEmbeddedServerConnection, type ServerConnection } from "../settings.js";
 import { EmbeddedRelayServer, type EmbeddedServerStatus } from "../serverManager.js";
 import type { PluginContext } from "./PluginContext.js";
 import { userFacingError } from "../errorMessages.js";
@@ -27,6 +27,8 @@ type ServerConnectionManagerContext = Pick<
 > & {
   showPinMismatch?: (server: ServerConnection, presentedSpkiSha256: string) => void;
 };
+
+export type ServerActionOptions = { notify?: boolean };
 
 /** Owns the embedded relay server lifecycle and per-server RelayApiClient construction/revocation. */
 export class ServerConnectionManager {
@@ -46,7 +48,7 @@ export class ServerConnectionManager {
     return this.embeddedServer?.getStatus() ?? { running: false };
   }
 
-  async startEmbeddedServer(): Promise<EmbeddedServerStatus> {
+  async startEmbeddedServer(options: ServerActionOptions = {}): Promise<EmbeddedServerStatus> {
     const server = this.getOrCreateEmbeddedServer();
     const previousPinnedPort = this.ctx.settings.server.pinnedPort;
     const previousTlsPort = this.ctx.settings.server.tlsPort;
@@ -72,19 +74,27 @@ export class ServerConnectionManager {
           0
         );
       }
-      new Notice(`Vault Rooms server running at ${status.localUrl}`);
+      if (options.notify !== false) {
+        new Notice("Vault Rooms is ready to share.");
+      }
       this.refreshLanShareReachability();
     }
     return status;
   }
 
-  async stopEmbeddedServer(): Promise<void> {
+  async stopEmbeddedServer(options: ServerActionOptions = {}): Promise<void> {
     await this.embeddedServer?.stop();
     this.lanShareReachability.clear();
-    new Notice("Vault Rooms server stopped.");
+    if (options.notify !== false) {
+      new Notice("Vault Rooms server stopped.");
+    }
   }
 
-  /** Best-effort teardown for plugin unload - unlike stopEmbeddedServer(), does not render views or show a Notice (see VaultRoomsPlugin.onunload's doc comment). */
+  /**
+   * Best-effort teardown for plugin unload. Both this method and
+   * `{ notify: false }` suppress the generic stopped Notice; only this teardown
+   * method also suppresses the reachability-clear render callback.
+   */
   async stopSilently(): Promise<void> {
     await this.embeddedServer?.stop();
     this.suppressLanShareRender = true;
@@ -404,7 +414,11 @@ export class ServerConnectionManager {
    * completed"). The panel uses this to stop offering "Set up server" once it would only ever fail.
    */
   hasOwnServer(): boolean {
-    return this.ctx.settings.servers.some((server) => server.isServerOwner);
+    return this.ownEmbeddedServerId() !== undefined;
+  }
+
+  ownEmbeddedServerId(): string | undefined {
+    return this.ctx.settings.servers.find(isOwnEmbeddedServerConnection)?.id;
   }
 
   async testConnection(baseUrl: string, pin?: PinnedServerInfo): Promise<void> {

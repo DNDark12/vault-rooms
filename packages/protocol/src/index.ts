@@ -1,5 +1,5 @@
 export const PRODUCT_NAME = "vault-rooms";
-export const PRODUCT_VERSION = "0.2.4";
+export const PRODUCT_VERSION = "0.2.5";
 
 export * from "./errors.js";
 export * from "./ids.js";

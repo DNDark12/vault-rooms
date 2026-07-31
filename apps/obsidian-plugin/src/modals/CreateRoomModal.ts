@@ -2,6 +2,7 @@ import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
 import { userFacingError } from "../errorMessages.js";
+import { recommendedRoomInput, sanitizeRoomMountName } from "../onboarding.js";
 
 export class CreateRoomModal extends Modal {
   private name = "Projects Demo";
@@ -15,10 +16,7 @@ export class CreateRoomModal extends Modal {
   /** Once the user edits "Mount name" directly, stop overwriting it when "Name" changes. */
   private mountNameTouched = false;
   private conflictPolicy: "keep_both" | "owner_wins" = "keep_both";
-  private capabilities = [
-    { pluginId: "obsidian-tasks-plugin", displayName: "Tasks", mode: "recommended" },
-    { pluginId: "obsidian-kanban", displayName: "Kanban", mode: "recommended" }
-  ];
+  private capabilities = recommendedRoomInput("Projects/Demo").capabilities;
   constructor(private readonly plugin: VaultRoomsPlugin) {
     super(plugin.app);
   }
@@ -31,7 +29,7 @@ export class CreateRoomModal extends Modal {
       text.setValue(this.name).onChange((value) => {
         this.name = value.trim();
         if (!this.mountNameTouched) {
-          this.mountName = sanitizeMountName(this.name);
+          this.mountName = sanitizeRoomMountName(this.name);
         }
       })
     );
@@ -144,7 +142,7 @@ export class CreateRoomModal extends Modal {
       this.name = basename(path);
     }
     if (!this.mountNameTouched) {
-      this.mountName = sanitizeMountName(this.name);
+      this.mountName = sanitizeRoomMountName(this.name);
     }
     this.onOpen();
   }
@@ -152,13 +150,4 @@ export class CreateRoomModal extends Modal {
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
-}
-
-/** Keeps "Mount name" a single, filesystem-safe path segment (matches the server's isSafeMountName check). */
-function sanitizeMountName(name: string): string {
-  const cleaned = name
-    .trim()
-    .replace(/[/\\]+/g, "-")
-    .replace(/^\.+/, "");
-  return cleaned || "Room";
 }

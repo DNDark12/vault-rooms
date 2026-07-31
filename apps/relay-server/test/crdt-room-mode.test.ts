@@ -64,9 +64,35 @@ async function setup() {
 }
 
 describe("CRDT room mode (Phase 3)", () => {
-  it("a freshly created room has crdtEnabled: false by default", async () => {
+  it("a freshly created room has crdtEnabled: true by default", async () => {
     const { room } = await setup();
-    expect(room.crdtEnabled).toBe(false);
+    expect(room.crdtEnabled).toBe(true);
+  });
+
+  it("rejects a non-boolean Live editing value on room creation", async () => {
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    apps.push(app);
+    const owner = (await injectBootstrap(app, {
+      displayName: "Owner",
+      deviceName: "Owner laptop"
+    })).json();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: {
+        name: "Room",
+        type: "folder",
+        sourcePath: "Room",
+        mountName: "Room",
+        capabilities: [],
+        crdtEnabled: "yes"
+      }
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().error.message).toContain("Live editing");
   });
 
   it("PATCH /api/rooms/:roomId accepts crdtEnabled, gated the same way as other room settings (canManageRoom)", async () => {
@@ -134,15 +160,21 @@ describe("CRDT room mode (Phase 3)", () => {
       method: "PATCH",
       url: `/api/rooms/${room.id}`,
       headers: { authorization: `Bearer ${owner.deviceToken}` },
-      payload: { name: room.name, type: room.type, sourcePath: room.sourcePath, mountName: room.mountName, crdtEnabled: true }
+      payload: { name: room.name, type: room.type, sourcePath: room.sourcePath, mountName: room.mountName, crdtEnabled: false }
     });
 
     const modeChanged = await nextMessage(socket, "room_mode_changed");
-    expect(modeChanged).toMatchObject({ roomId: room.id, crdtEnabled: true });
+    expect(modeChanged).toMatchObject({ roomId: room.id, crdtEnabled: false });
   });
 
   it("room_snapshot carries crdtEpoch for .md files in a CRDT-enabled room, and omits it otherwise", async () => {
     const { app, owner, room } = await setup();
+    await app.inject({
+      method: "PATCH",
+      url: `/api/rooms/${room.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: room.name, type: room.type, sourcePath: room.sourcePath, mountName: room.mountName, crdtEnabled: false }
+    });
     await app.inject({
       method: "PUT",
       url: `/api/rooms/${room.id}/files/content`,

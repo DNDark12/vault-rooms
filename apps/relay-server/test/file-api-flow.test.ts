@@ -29,7 +29,7 @@ async function setupFileFlow() {
       method: "POST",
       url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
-      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
     })
   ).json().room;
   await app.inject({

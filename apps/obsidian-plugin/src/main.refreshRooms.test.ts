@@ -15,6 +15,7 @@ vi.mock("./VaultRoomsSettingTab.js", () => ({ VaultRoomsSettingTab: class VaultR
 vi.mock("./modals/ConfirmModal.js", () => ({ confirmModal: vi.fn() }));
 vi.mock("./modals/CreateRoomModal.js", () => ({ CreateRoomModal: class CreateRoomModal {} }));
 vi.mock("./modals/CreateInviteModal.js", () => ({ CreateInviteModal: class CreateInviteModal {} }));
+vi.mock("./modals/GuidedOnboardingModal.js", () => ({ GuidedOnboardingModal: class GuidedOnboardingModal {} }));
 vi.mock("./modals/InviteMemberModal.js", () => ({ InviteMemberModal: class InviteMemberModal {} }));
 vi.mock("./modals/JoinTeamModal.js", () => ({ JoinTeamModal: class JoinTeamModal {} }));
 vi.mock("./modals/RoomSettingsModal.js", () => ({ RoomSettingsModal: class RoomSettingsModal {} }));

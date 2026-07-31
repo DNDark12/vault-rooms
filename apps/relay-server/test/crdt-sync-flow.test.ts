@@ -417,7 +417,7 @@ describe("CRDT sync flow (Phase 4)", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [] }
+        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     const socket = await connect(app);

@@ -13,3 +13,10 @@ export async function copyInviteLink(joinUrl: string, clipboard: InviteClipboard
   selectFallback();
   return false;
 }
+
+export async function copyInviteLinkFromNavigator(
+  joinUrl: string,
+  selectFallback: () => void
+): Promise<boolean> {
+  return copyInviteLink(joinUrl, navigator.clipboard, selectFallback);
+}

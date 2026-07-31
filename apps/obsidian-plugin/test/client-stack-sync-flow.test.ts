@@ -253,7 +253,7 @@ async function setupRoomWithTwoMembers(app: Awaited<ReturnType<typeof createApp>
       method: "POST",
       url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
-      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
     })
   ).json().room;
   await app.inject({
@@ -291,7 +291,7 @@ async function setupRoomWithTeamGrant(app: Awaited<ReturnType<typeof createApp>>
       method: "POST",
       url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
-      payload: { name: "Team Room", type: "folder", sourcePath: "Team/Room", mountName: "Team Room", capabilities: [] }
+      payload: { name: "Team Room", type: "folder", sourcePath: "Team/Room", mountName: "Team Room", capabilities: [], crdtEnabled: false }
     })
   ).json().room;
 

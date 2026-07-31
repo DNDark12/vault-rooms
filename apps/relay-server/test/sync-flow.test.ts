@@ -44,7 +44,7 @@ async function setupSyncFlow() {
       method: "POST",
       url: "/api/rooms",
       headers: { authorization: `Bearer ${owner.deviceToken}` },
-      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+      payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
     })
   ).json().room;
   await app.inject({
@@ -72,7 +72,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [] }
+        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     const socket = await connect(app);
@@ -278,7 +278,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     // Member M is a reader, but only scoped to "public/**/*" - unlike every other ACL fixture in
@@ -372,7 +372,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     // Member M is a reader, but only scoped to "public/**/*" - unlike every other ACL fixture in
@@ -464,7 +464,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     // Member M is a reader, but only scoped to "public/**/*" - unlike every other ACL fixture in
@@ -547,7 +547,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     // Broad allow covering the whole room, including relativePath="".
@@ -621,7 +621,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     // Grant access only via a team-subject ACL rule - member has no user-specific ACL rule.
@@ -695,7 +695,7 @@ describe("WebSocket sync", () => {
         method: "POST",
         url: "/api/rooms",
         headers: { authorization: `Bearer ${owner.deviceToken}` },
-        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [] }
+        payload: { name: "Projects Demo", type: "folder", sourcePath: "Projects/Demo", mountName: "Projects Demo", capabilities: [], crdtEnabled: false }
       })
     ).json().room;
     const aclRule = (

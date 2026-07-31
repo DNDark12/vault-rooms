@@ -46,6 +46,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       sourcePath: string;
       mountName: string;
       conflictPolicy: ConflictPolicy;
+      crdtEnabled: boolean;
       capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
     }>;
     validateRoomBody(body);
@@ -58,6 +59,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         mountName: body.mountName!,
         ownerUserId: principal.userId,
         conflictPolicy: body.conflictPolicy,
+        crdtEnabled: body.crdtEnabled,
         capabilities: body.capabilities ?? []
       });
       return { room: toRoomResponse(room) };
@@ -277,11 +279,12 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
 
 function visibleRoom(repo: RelayRepository, principal: DevicePrincipal, room: RoomRow, teamIds: string[]) {
   const subject = { type: "user" as const, id: principal.userId, userId: principal.userId, teamIds };
+  const aclRules = repo.listAclRulesForRoom(room.id);
   const roomRead = evaluatePolicy({
     subject,
     resource: { type: "room", roomId: room.id, roomOwnerUserId: room.owner_user_id },
     permission: "room:read",
-    aclRules: repo.listAclRulesForRoom(room.id),
+    aclRules,
     membershipRevokedAt: principal.userRevokedAt,
     deviceRevokedAt: principal.deviceRevokedAt
   });
@@ -289,10 +292,9 @@ function visibleRoom(repo: RelayRepository, principal: DevicePrincipal, room: Ro
     return null;
   }
 
-  const aclRules = repo.listAclRulesForRoom(room.id);
-  return {
-    ...managedRoomResponse(repo, room),
-    permissions: LISTED_PERMISSIONS.filter((permission) =>
+  const decisions = new Map(
+    LISTED_PERMISSIONS.map((permission) => [
+      permission,
       evaluatePolicy({
         subject,
         resource: resourceFor(permission, room),
@@ -300,8 +302,54 @@ function visibleRoom(repo: RelayRepository, principal: DevicePrincipal, room: Ro
         aclRules,
         membershipRevokedAt: principal.userRevokedAt,
         deviceRevokedAt: principal.deviceRevokedAt
-      }).allowed
-    )
+      })
+    ])
+  );
+  const permissions = LISTED_PERMISSIONS.filter((permission) => decisions.get(permission)?.allowed);
+  const editorPermissions = expandPreset("editor");
+  const readerPermissions = expandPreset("reader");
+  const accessLevel = editorPermissions.every((permission) => decisions.get(permission)?.allowed)
+    ? "editor" as const
+    : readerPermissions.every((permission) => decisions.get(permission)?.allowed)
+      ? "reader" as const
+      : "custom" as const;
+  const sourcePermissions = accessLevel === "editor"
+    ? editorPermissions
+    : accessLevel === "reader"
+      ? readerPermissions
+      : permissions;
+  const matchedRuleIds = [
+    ...new Set(sourcePermissions.flatMap((permission) => decisions.get(permission)?.matchedRuleIds ?? []))
+  ];
+  type AccessSource =
+    | { type: "owner" }
+    | { type: "direct" }
+    | { type: "team"; teamId: string; teamName: string };
+  const sources: AccessSource[] = matchedRuleIds.length === 0 && room.owner_user_id === principal.userId
+    ? [{ type: "owner" as const }]
+    : matchedRuleIds.flatMap<AccessSource>((ruleId) => {
+        const rule = aclRules.find((candidate) => candidate.id === ruleId);
+        if (!rule) return [];
+        if (rule.subjectType === "user") return [{ type: "direct" as const }];
+        const team = repo.getTeam(rule.subjectId);
+        return team
+          ? [{ type: "team" as const, teamId: team.id, teamName: team.name }]
+          : [];
+      });
+
+  return {
+    ...managedRoomResponse(repo, room),
+    permissions,
+    accessSummary: {
+      level: accessLevel,
+      sources: sources.filter(
+        (source, index, all) =>
+          all.findIndex((candidate) =>
+            candidate.type === source.type &&
+            (candidate.type !== "team" || (source.type === "team" && candidate.teamId === source.teamId))
+          ) === index
+      )
+    }
   };
 }
 
@@ -348,7 +396,14 @@ function requireRoom(repo: RelayRepository, roomId: string): RoomRow {
   return room;
 }
 
-function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder"; sourcePath: string; mountName: string; conflictPolicy: ConflictPolicy }>): void {
+function validateRoomBody(body: Partial<{
+  name: string;
+  type: "file" | "folder";
+  sourcePath: string;
+  mountName: string;
+  conflictPolicy: ConflictPolicy;
+  crdtEnabled: boolean;
+}>): void {
   if (!body.name || !body.type || !body.sourcePath || !body.mountName) {
     throw new AppError("VALIDATION_ERROR", "Enter a room name, choose the shared folder, and enter its folder name.", 422);
   }
@@ -369,6 +424,9 @@ function validateRoomBody(body: Partial<{ name: string; type: "file" | "folder";
   }
   if (body.conflictPolicy !== undefined && body.conflictPolicy !== "keep_both" && body.conflictPolicy !== "owner_wins") {
     throw new AppError("VALIDATION_ERROR", "Choose how this room handles conflicting file changes.", 422);
+  }
+  if (body.crdtEnabled !== undefined && typeof body.crdtEnabled !== "boolean") {
+    throw new AppError("VALIDATION_ERROR", "Choose whether Live editing is on for this room.", 422);
   }
 }
 

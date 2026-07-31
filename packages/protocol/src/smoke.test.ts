@@ -13,7 +13,7 @@ import {
 describe("protocol metadata", () => {
   it("uses the v0.2 product identity", () => {
     expect(PRODUCT_NAME).toBe("vault-rooms");
-    expect(PRODUCT_VERSION).toBe("0.2.4");
+    expect(PRODUCT_VERSION).toBe("0.2.5");
   });
 
   it("exposes the TLS security protocol contract", () => {

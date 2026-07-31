@@ -33,10 +33,42 @@ function makeRoomAndFile(repo: RelayRepository) {
 }
 
 describe("CRDT persistence (Phase 2)", () => {
-  it("adds rooms.crdt_enabled (default 0) without disturbing existing rooms", async () => {
+  it("creates new rooms with live editing enabled", async () => {
     const { repo } = await createTestRepo();
     const { room } = makeRoomAndFile(repo);
-    expect(room.crdt_enabled).toBe(0);
+    expect(room.crdt_enabled).toBe(1);
+  });
+
+  it("adds rooms.crdt_enabled as 0 when migrating an existing room", async () => {
+    const db = await openSqlJsDb(":memory:");
+    db.exec(`
+      create table rooms(
+        id text primary key,
+        name text not null,
+        type text not null,
+        source_path text not null,
+        mount_name text not null,
+        owner_user_id text not null,
+        conflict_policy text not null default 'keep_both',
+        created_at text not null,
+        updated_at text not null,
+        unique(owner_user_id, mount_name)
+      );
+      insert into rooms(
+        id, name, type, source_path, mount_name, owner_user_id,
+        conflict_policy, created_at, updated_at
+      ) values (
+        'room_existing', 'Existing', 'folder', 'Existing', 'Existing', 'usr_owner',
+        'keep_both', '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'
+      );
+    `);
+
+    runMigrations(db);
+
+    expect(
+      (db.prepare("select crdt_enabled from rooms where id = ?").get("room_existing") as { crdt_enabled: number })
+        .crdt_enabled
+    ).toBe(0);
   });
 
   it("adds files.crdt_epoch (default 0) as the authoritative epoch source", async () => {

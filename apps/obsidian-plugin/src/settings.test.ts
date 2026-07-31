@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { migrateVaultRoomsSettings } from "./settings.js";
+import { isOwnEmbeddedServerConnection, migrateVaultRoomsSettings } from "./settings.js";
+
+describe("embedded owner connection identity", () => {
+  const owner = {
+    id: "owner",
+    baseUrl: "http://127.0.0.1:8787",
+    userId: "user",
+    userDisplayName: "Owner",
+    deviceId: "device",
+    deviceName: "Mac",
+    deviceToken: "token",
+    isServerOwner: true,
+    status: "active" as const,
+    securityMode: "plain" as const
+  };
+
+  it("does not mistake ownership of a remote relay for this computer's embedded server", () => {
+    expect(isOwnEmbeddedServerConnection(owner)).toBe(true);
+    expect(isOwnEmbeddedServerConnection({ ...owner, baseUrl: "http://192.168.1.20:8787" })).toBe(false);
+    expect(isOwnEmbeddedServerConnection({ ...owner, isServerOwner: false })).toBe(false);
+  });
+});
 
 describe("v0.1 plugin settings migration", () => {
   it("quarantines malformed server entries without dropping valid connections", () => {

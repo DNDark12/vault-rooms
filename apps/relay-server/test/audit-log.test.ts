@@ -44,7 +44,15 @@ describe("GET /api/audit", () => {
     });
     expect(response.statusCode).toBe(200);
     const body = response.json() as {
-      events: Array<{ action: string; createdAt: string; metadata: unknown; teamId: string | null }>;
+      events: Array<{
+        action: string;
+        createdAt: string;
+        metadata: unknown;
+        teamId: string | null;
+        actorDisplayName: string | null;
+        actorDeviceDisplayName: string | null;
+        resourceDisplayName: string | null;
+      }>;
       limit: number;
       offset: number;
     };
@@ -60,6 +68,58 @@ describe("GET /api/audit", () => {
     for (const event of body.events) {
       expect(typeof event.metadata).toBe("object");
     }
+    const inviteCreated = body.events.find((event) => event.action === "invite.created");
+    expect(inviteCreated).toMatchObject({
+      actorDisplayName: "Owner",
+      actorDeviceDisplayName: null,
+      resourceDisplayName: "Core"
+    });
+    const memberJoined = body.events.find((event) => event.action === "member.joined");
+    expect(memberJoined).toMatchObject({
+      actorDisplayName: "B",
+      actorDeviceDisplayName: null,
+      resourceDisplayName: "B"
+    });
+  });
+
+  it("uses the audited relative path as the display name for file activity", async () => {
+    const app = await createApp({ dbPath: ":memory:" });
+    const owner = await bootstrapOwnerWithTeam(app);
+    const roomResponse = await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: {
+        name: "Daily Report",
+        type: "folder",
+        sourcePath: "Daily Report",
+        mountName: "Daily Report",
+        capabilities: [],
+        crdtEnabled: false
+      }
+    });
+    expect(roomResponse.statusCode).toBe(200);
+    const room = roomResponse.json().room as { id: string };
+
+    const created = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "Notes/Planning.md", baseVersion: 0, content: "draft" }
+    });
+    expect(created.statusCode).toBe(200);
+
+    const audit = await app.inject({
+      method: "GET",
+      url: "/api/audit",
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(audit.statusCode).toBe(200);
+    const fileCreated = (audit.json() as {
+      events: Array<{ action: string; resourceDisplayName: string | null }>;
+    }).events.find((event) => event.action === "file.created");
+
+    expect(fileCreated?.resourceDisplayName).toBe("Notes/Planning.md");
   });
 
   it("rejects unauthenticated and non-owner server-wide reads", async () => {
