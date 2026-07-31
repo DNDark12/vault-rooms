@@ -172,6 +172,28 @@ describe("panelModel", () => {
       expect(descriptor.connection.label, scenario.id).toBe(scenario.expectedConnection);
       expect(descriptor.tabs.rooms.attentionCount, scenario.id).toBe(scenario.expectedRoomAttention);
       expect(descriptor.tabs.people.attentionCount, scenario.id).toBe(scenario.expectedPeopleAttention);
+      expect(descriptor.tabs.activity.attentionCount, scenario.id).toBe(
+        scenario.expectedActivityAttention
+      );
     }
+  });
+
+  it("has no two scenarios describing the same state", () => {
+    const seen = new Map<string, string>();
+    for (const scenario of panelScenarios) {
+      const key = JSON.stringify(scenario.state);
+      const previous = seen.get(key);
+      expect(previous, `${scenario.id} duplicates ${previous ?? ""}`).toBeUndefined();
+      seen.set(key, scenario.id);
+    }
+    expect(seen.size).toBe(panelScenarios.length);
+  });
+
+  it("exercises each tab's attention indicator with a non-zero count", () => {
+    const nonZero = (pick: (s: (typeof panelScenarios)[number]) => number) =>
+      panelScenarios.some((scenario) => pick(scenario) > 0);
+    expect(nonZero((s) => s.expectedRoomAttention), "rooms").toBe(true);
+    expect(nonZero((s) => s.expectedPeopleAttention), "people").toBe(true);
+    expect(nonZero((s) => s.expectedActivityAttention), "activity").toBe(true);
   });
 });

@@ -16,7 +16,8 @@ export const PANEL_COPY = {
     location: (path: string) => `In your vault at ${path}`,
     notOnDevice: "Not on this computer",
     paused: "Local files are paused while another server is active",
-    needsChoice: (count: number) => `${count} file${count === 1 ? "" : "s"} need a choice`,
+    needsChoice: (count: number) =>
+      count === 1 ? "1 file needs a choice" : `${count} files need a choice`,
     noRoomsOwner: "No rooms yet. Create one to start sharing.",
     noRoomsMember: "No rooms are available yet. Ask the room owner to invite you."
   },

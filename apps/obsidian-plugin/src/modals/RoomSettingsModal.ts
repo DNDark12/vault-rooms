@@ -1,10 +1,6 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
-import {
-  EDITOR_PERMISSION_SET,
-  READER_PERMISSION_SET,
-  accessRulePresentation
-} from "../accessPresentation.js";
+import { EDITOR_PERMISSION_SET, accessRulePresentation } from "../accessPresentation.js";
 import { userFacingError } from "../errorMessages.js";
 import type VaultRoomsPlugin from "../main.js";
 import { setDestructiveCompat } from "../obsidianCompat.js";
@@ -538,7 +534,7 @@ export class RoomSettingsModal extends Modal {
       pathPattern,
       ...(this.accessChoice === "custom"
         ? { permissions: [...this.customPermissions] }
-        : { preset: (this.accessChoice === "deny" ? "reader" : this.accessChoice) as "reader" | "editor" })
+        : { preset: this.accessChoice === "deny" ? "reader" : this.accessChoice })
     };
     try {
       await this.plugin.grantRoomAccess(this.room.id, input);
