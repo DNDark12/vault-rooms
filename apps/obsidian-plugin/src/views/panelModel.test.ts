@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CONNECTION_STATUS_COPY } from "../onboarding.js";
 import { panelScenarios } from "./panelScenarios.js";
-import { countPausedLocalRooms, panelModel, type PanelState } from "./panelModel.js";
+import { countPausedLocalRooms, panelModel, visiblePanelTabs, type PanelState } from "./panelModel.js";
 
 const baseState = (): PanelState => ({
   activeServer: {
@@ -23,6 +23,7 @@ const baseState = (): PanelState => ({
   rooms: [],
   peopleAttentionItems: [],
   activityAttentionItems: [],
+  activityAccess: "allowed" as const,
   canCreateRoom: false
 });
 
@@ -165,8 +166,8 @@ describe("panelModel", () => {
     expect(descriptor.dataNotice).toMatchObject({ action: "retry" });
   });
 
-  it("covers the approved fourteen-scenario matrix", () => {
-    expect(panelScenarios).toHaveLength(14);
+  it("covers the approved scenario matrix", () => {
+    expect(panelScenarios).toHaveLength(15);
     for (const scenario of panelScenarios) {
       const descriptor = panelModel(scenario.state);
       expect(descriptor.connection.label, scenario.id).toBe(scenario.expectedConnection);
@@ -175,7 +176,30 @@ describe("panelModel", () => {
       expect(descriptor.tabs.activity.attentionCount, scenario.id).toBe(
         scenario.expectedActivityAttention
       );
+      expect(visiblePanelTabs(descriptor), scenario.id).toEqual(scenario.expectedVisibleTabs);
     }
+  });
+
+  it("hides Activity only when access is known to be denied", () => {
+    const denied = panelModel({ ...baseState(), activityAccess: "denied" });
+    expect(visiblePanelTabs(denied)).toEqual(["rooms", "people"]);
+
+    // Permission depends on team data that loads asynchronously. Until it is known the tab stays, so a
+    // slow or failed load can never hide a feature from someone entitled to it.
+    for (const access of ["allowed", "unknown"] as const) {
+      expect(visiblePanelTabs(panelModel({ ...baseState(), activityAccess: access })), access)
+        .toEqual(["rooms", "people", "activity"]);
+    }
+  });
+
+  it("suppresses the attention count of a hidden tab", () => {
+    const descriptor = panelModel({
+      ...baseState(),
+      activityAccess: "denied",
+      activityAttentionItems: ["something the user cannot reach"]
+    });
+    expect(descriptor.tabs.activity.visible).toBe(false);
+    expect(descriptor.tabs.activity.attentionCount).toBe(0);
   });
 
   it("has no two scenarios describing the same state", () => {

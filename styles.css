@@ -232,6 +232,7 @@
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m);
   overflow: hidden;
+  padding-block: 4px;
   padding-inline: 14px;
 }
 
@@ -317,18 +318,6 @@
   justify-content: flex-start;
   margin-left: 0;
   width: 100%;
-}
-
-.vault-rooms-outline-danger {
-  background: transparent;
-  border: 1px solid var(--color-red);
-  color: var(--text-error);
-}
-
-.vault-rooms-outline-danger:hover,
-.vault-rooms-outline-danger:focus-visible {
-  background: color-mix(in srgb, var(--color-red) 12%, transparent);
-  color: var(--text-error);
 }
 
 .vault-rooms-setting-hint {
@@ -553,6 +542,22 @@
   color: var(--text-faint);
 }
 
+.vault-rooms-diagnostic-evidence {
+  margin-top: 4px;
+}
+
+.vault-rooms-diagnostic-evidence > summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+}
+
+.vault-rooms-diagnostic-evidence .vault-rooms-room-meta {
+  font-family: var(--font-monospace);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .vault-rooms-diagnostic-summary {
   border-top: 1px solid var(--background-modifier-border);
   margin-top: 10px;
@@ -690,10 +695,14 @@
   color: var(--text-muted);
 }
 
+/* Auto columns rather than a hard-coded three: the tab count varies (Activity is hidden without audit
+ * access), and a fixed track count left an empty column where the missing tab used to be. Each rendered
+ * tab gets one equal column, so two share the width evenly and three still fit. */
 .vault-rooms-tabs {
   border-bottom: 1px solid var(--background-modifier-border);
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   margin: 12px 0 8px;
 }
 
@@ -745,6 +754,18 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* The text field takes the free space and the action keeps its intrinsic width, so "New team name"
+ * and "Create team" sit on one row. flex-wrap still lets them stack below the narrow breakpoint. */
+.vault-rooms-inline-create > input,
+.vault-rooms-inline-create > select {
+  flex: 1 1 12ch;
+  min-width: 0;
+}
+
+.vault-rooms-inline-create > button {
+  flex: 0 0 auto;
 }
 
 .vault-rooms-toolbar {
@@ -823,7 +844,7 @@
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
   border-bottom-width: 0;
-  padding: 11px;
+  padding: 12px 14px;
 }
 
 .vault-rooms-access-card:first-child {
@@ -844,6 +865,40 @@
   display: grid;
   gap: 10px;
   grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+/* Manage opens a detail surface; it is not the row's primary action and should not read like one. */
+.vault-rooms-access-row > button {
+  font-size: var(--font-ui-smaller);
+  padding: 3px 10px;
+}
+
+/* The expanded detail area carries no horizontal padding of its own, so the controls inside line up
+ * with the name and Manage button on the row above instead of sitting indented under them. */
+.vault-rooms-access-details {
+  border-top: 1px solid var(--background-modifier-border);
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+/* Access level and removal share one row: the level select takes the free space, the destructive
+ * action keeps its intrinsic width. Both are bare controls, so their heights match. */
+.vault-rooms-access-manage-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vault-rooms-access-manage-row > select {
+  flex: 1 1 12ch;
+  min-width: 0;
+}
+
+.vault-rooms-access-manage-row > .vault-rooms-access-remove {
+  flex: 0 0 auto;
 }
 
 .vault-rooms-access-copy {
@@ -895,7 +950,7 @@
   gap: 8px;
   justify-content: space-between;
   min-width: 0;
-  padding: 8px 2px;
+  padding: 8px 6px;
 }
 
 .vault-rooms-compact-row.is-revoked {
@@ -933,6 +988,14 @@
   gap: 6px;
   margin-top: 6px;
   padding-top: 10px;
+}
+
+/* A single-column grid stretches its children, which gave Delete team the widest, heaviest button on
+ * the surface - more visual weight than anything routine next to it. */
+.vault-rooms-danger-zone > button {
+  font-size: var(--font-ui-smaller);
+  justify-self: start;
+  padding: 3px 10px;
 }
 
 .vault-rooms-choice-list {
@@ -974,19 +1037,21 @@
     min-height: 34px;
   }
 
-  .vault-rooms-inline-create input,
-  .vault-rooms-inline-create select {
+  .vault-rooms-inline-create > input,
+  .vault-rooms-inline-create > select {
+    flex-basis: 100%;
     min-width: 0;
-    width: 100%;
   }
 
   .vault-rooms-access-row {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
+  /* Wraps to its own line at this width, but stays its natural size: a full-width Manage reads as
+   * the primary action of the row, which it is not. */
   .vault-rooms-access-row > button {
     grid-column: 1 / -1;
-    justify-self: stretch;
+    justify-self: start;
   }
 }
 

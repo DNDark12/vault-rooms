@@ -718,15 +718,30 @@ export default class VaultRoomsPlugin extends Plugin {
       api.listFriends()
     ]);
     const authoritativeServerId = me.serverId ?? server.serverId;
-    if (server.isServerOwner !== me.isServerOwner || server.serverId !== authoritativeServerId) {
-      const previous = { isServerOwner: server.isServerOwner, serverId: server.serverId };
+    // Cache the owner's name alongside the identity fields from this same response, so the connection
+    // list can name a saved server after a person even while it is not the active one.
+    const ownerDisplayName = me.isServerOwner
+      ? me.user.displayName
+      : (me.serverOwner?.displayName ?? server.serverOwnerDisplayName);
+    if (
+      server.isServerOwner !== me.isServerOwner ||
+      server.serverId !== authoritativeServerId ||
+      server.serverOwnerDisplayName !== ownerDisplayName
+    ) {
+      const previous = {
+        isServerOwner: server.isServerOwner,
+        serverId: server.serverId,
+        serverOwnerDisplayName: server.serverOwnerDisplayName
+      };
       server.isServerOwner = me.isServerOwner;
       server.serverId = authoritativeServerId;
+      server.serverOwnerDisplayName = ownerDisplayName;
       try {
         await this.saveSettings();
       } catch (error) {
         server.isServerOwner = previous.isServerOwner;
         server.serverId = previous.serverId;
+        server.serverOwnerDisplayName = previous.serverOwnerDisplayName;
         throw error;
       }
     }

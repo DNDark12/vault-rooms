@@ -1,3 +1,4 @@
+import { userFacingError } from "./errorMessages.js";
 import { PinMismatchError } from "./pinnedTransport.js";
 
 /**
@@ -18,6 +19,13 @@ export type DiagnosticStep = {
   status: "pass" | "fail" | "skipped";
   /** Human-readable hint: what passed exactly, or what to check when this step failed. */
   detail?: string;
+  /**
+   * The raw transport/relay message behind a failure, kept separate from `detail` so the modal can put
+   * it behind a disclosure. A user reading "Test connection" should not have to parse
+   * `net::ERR_CONNECTION_REFUSED`, but the token is still the diagnosable fact and must remain
+   * available and copyable for whoever is helping them.
+   */
+  evidence?: string;
 };
 
 export type ConnectionDiagnosticsReport = {
@@ -43,8 +51,18 @@ const STEP_LABELS: Record<DiagnosticStepId, string> = {
 
 export async function runConnectionDiagnostics(baseUrl: string, probes: DiagnosticsProbes): Promise<ConnectionDiagnosticsReport> {
   const steps: DiagnosticStep[] = [];
-  const fail = (id: DiagnosticStepId, detail: string): ConnectionDiagnosticsReport => {
-    steps.push({ id, label: STEP_LABELS[id], status: "fail", detail });
+  const fail = (
+    id: DiagnosticStepId,
+    detail: string,
+    evidence?: string
+  ): ConnectionDiagnosticsReport => {
+    steps.push({
+      id,
+      label: STEP_LABELS[id],
+      status: "fail",
+      detail,
+      ...(evidence === undefined ? {} : { evidence })
+    });
     for (const remaining of remainingSteps(id, probes)) {
       steps.push({ id: remaining, label: STEP_LABELS[remaining], status: "skipped" });
     }
@@ -78,11 +96,14 @@ export async function runConnectionDiagnostics(baseUrl: string, probes: Diagnost
         "The server answered but presented a different identity than the one saved for it. If the owner rotated or reinstalled the server, compare fingerprints with them; do not trust it blindly."
       );
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const raw = error instanceof Error ? error.message : String(error);
+    // userFacingError already maps net::ERR_*/Node transport tokens to plain language; the raw token
+    // moves to `evidence` rather than being dropped.
+    const explained = userFacingError(error, "Couldn't reach that server.");
     const hint = probes.pinned
       ? "Check that the server is running and the address/port are current. Pinned TLS also fails here if a proxy intercepts the connection."
       : "Check that the server is running, the address and port are current, and the network allows the connection (firewall on the host, Wi-Fi AP/client isolation, different subnet).";
-    return fail("reach-server", `${message} - ${hint}`);
+    return fail("reach-server", `${explained} ${hint}`, raw);
   }
   pass("reach-server");
 
@@ -106,7 +127,8 @@ export async function runConnectionDiagnostics(baseUrl: string, probes: Diagnost
       "authenticate",
       code === "UNAUTHORIZED"
         ? "The server no longer recognizes this device's saved login (its data may have been reset or this device revoked). Rejoin with a new invite, or recover owner access."
-        : `Authenticated request failed: ${error instanceof Error ? error.message : String(error)}`
+        : userFacingError(error, "The server rejected this device's saved login."),
+      error instanceof Error ? error.message : String(error)
     );
   }
   pass("authenticate");

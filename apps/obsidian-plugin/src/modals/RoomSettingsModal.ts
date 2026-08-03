@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting } from "obsidian";
+import { ButtonComponent, Modal, Notice, Setting } from "obsidian";
 import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
 import { EDITOR_PERMISSION_SET, accessRulePresentation } from "../accessPresentation.js";
 import { userFacingError } from "../errorMessages.js";
@@ -43,6 +43,8 @@ export class RoomSettingsModal extends Modal {
 
   private advancedExpanded = false;
   private accessFormExpanded = false;
+  /** The scroll container from the previous render, read only to carry scrollTop across re-renders. */
+  private scrollEl?: HTMLElement;
   private rawPermissionsVisible = false;
   private expandedAclRules = new Set<string>();
   private subjectType: "team" | "user" = "team";
@@ -87,17 +89,30 @@ export class RoomSettingsModal extends Modal {
     }
   }
 
+  onClose(): void {
+    // Drops the reference to a detached element and makes a reopened modal start at the top.
+    this.scrollEl = undefined;
+    this.contentEl.empty();
+  }
+
   private render(): void {
     const { contentEl } = this;
+    // Every render replaces the scroll container, so its scrollTop would reset to 0. Adding a plugin
+    // suggestion or toggling Advanced re-renders from a control far down the modal, and jumping the user
+    // back to the title loses the row they were working in.
+    const previousScrollTop = this.scrollEl?.scrollTop ?? 0;
     contentEl.empty();
     contentEl.addClass("vault-rooms-settings-modal");
     this.setTitle(this.room.name);
 
     const scroll = contentEl.createDiv({ cls: "vault-rooms-settings-scroll" });
+    this.scrollEl = scroll;
     this.renderSharing(scroll);
     this.renderAccess(scroll);
     this.renderAdvanced(scroll);
     this.renderDangerZone(scroll);
+    // Children exist by now, so scrollHeight is final and this lands on the same content as before.
+    scroll.scrollTop = previousScrollTop;
   }
 
   private renderSharing(parent: HTMLElement): void {
@@ -186,7 +201,7 @@ export class RoomSettingsModal extends Modal {
     });
     if (!expanded) return;
 
-    const details = card.createDiv({ cls: "vault-rooms-management-surface" });
+    const details = card.createDiv({ cls: "vault-rooms-access-details" });
     if (presentation.rawPermissions || this.rawPermissionsVisible) {
       details.createDiv({
         cls: "vault-rooms-raw-permissions",
@@ -197,26 +212,98 @@ export class RoomSettingsModal extends Modal {
         text: `Path: ${rule.pathPattern}`
       });
     }
-    const remove = details.createEl("button", {
-      cls: "vault-rooms-outline-danger",
-      text: "Remove access"
-    });
-    remove.onClickEvent(async () => {
-      const confirmed = await confirmModal(
-        this.app,
-        "Remove room access",
-        `Remove ${this.subjectLabel(rule)} from "${this.room.name}"?`,
-        "Remove access"
-      );
-      if (!confirmed) return;
+    // Level change and removal share one row; a deny rule has no level to change, so it gets the
+    // removal control on its own.
+    this.renderAccessLevelChange(details, rule, presentation.kind);
+  }
+
+  /**
+   * Manage previously offered only Remove access, so the sole way to change someone from edit to view was
+   * to remove them and grant again from scratch.
+   *
+   * `acl_rules` has no unique key on (room, subject, path) and `createAclRule` always inserts, so
+   * re-granting the same subject and path does not replace the old rule - it adds a second one, and the
+   * wider of the two keeps winning. Changing a level therefore has to create the new rule and delete the
+   * old one. It grants first: if the delete then fails the subject briefly holds two rules, which is
+   * harmless, whereas deleting first and failing to grant would drop their access entirely.
+   */
+  private renderAccessLevelChange(
+    parent: HTMLElement,
+    rule: AclRuleSummary,
+    kind: "reader" | "editor" | "custom" | "deny"
+  ): void {
+    const row = parent.createDiv({ cls: "vault-rooms-access-manage-row" });
+    if (kind === "deny") {
+      this.renderRemoveAccess(row, rule);
+      return;
+    }
+    const select = row.createEl("select");
+    select.createEl("option", { text: "Can edit", value: "editor" });
+    select.createEl("option", { text: "Can view", value: "reader" });
+    if (kind === "custom") {
+      // Never silently collapse a hand-built permission set into a preset name.
+      select.createEl("option", { text: "Custom (unchanged)", value: "custom" });
+    }
+    select.value = kind === "editor" || kind === "reader" ? kind : "custom";
+    select.setAttribute("aria-label", `Access level for ${this.subjectLabel(rule)}`);
+
+    // Changing the level saves immediately - there is no separate apply step. Because the write is a
+    // grant followed by a delete rather than one update, a failure is reported and the list is reloaded
+    // from the server so the control can never show a level the server does not hold.
+    select.onchange = async () => {
+      const preset = select.value;
+      if (preset !== "reader" && preset !== "editor") return;
+      if (preset === kind) return;
+      select.disabled = true;
       try {
+        await this.plugin.grantRoomAccess(this.room.id, {
+          subjectType: rule.subjectType,
+          subjectId: rule.subjectId,
+          effect: "allow",
+          pathPattern: rule.pathPattern,
+          preset
+        });
         await this.plugin.removeRoomAccess(this.room.id, rule.id);
-        this.aclRules = await this.plugin.listRoomAcl(this.room.id);
-        this.expandedAclRules.delete(rule.id);
-        this.render();
+        new Notice(
+          `${this.subjectLabel(rule)} can now ${preset === "editor" ? "edit" : "view"} this room.`
+        );
       } catch (error) {
-        new Notice(userFacingError(error, "Failed to remove access"));
+        new Notice(userFacingError(error, "Failed to change access"));
       }
+      this.aclRules = await this.plugin.listRoomAcl(this.room.id);
+      this.expandedAclRules.delete(rule.id);
+      this.render();
+    };
+
+    this.renderRemoveAccess(row, rule);
+  }
+
+  /**
+   * Same destructive treatment as Delete room, so one visual language covers both.
+   *
+   * A bare ButtonComponent rather than a Setting: Setting brings a full flex layout box with its own
+   * padding and border, which pushed this control out of alignment with the select beside it and with
+   * the row above.
+   */
+  private renderRemoveAccess(row: HTMLElement, rule: AclRuleSummary): void {
+    const button = new ButtonComponent(row);
+    button.buttonEl.addClass("vault-rooms-access-remove");
+    setDestructiveCompat(button.setButtonText("Remove access")).onClick(async () => {
+        const confirmed = await confirmModal(
+          this.app,
+          "Remove room access",
+          `Remove ${this.subjectLabel(rule)} from "${this.room.name}"?`,
+          "Remove access"
+        );
+        if (!confirmed) return;
+        try {
+          await this.plugin.removeRoomAccess(this.room.id, rule.id);
+          this.aclRules = await this.plugin.listRoomAcl(this.room.id);
+          this.expandedAclRules.delete(rule.id);
+          this.render();
+        } catch (error) {
+          new Notice(userFacingError(error, "Failed to remove access"));
+        }
     });
   }
 

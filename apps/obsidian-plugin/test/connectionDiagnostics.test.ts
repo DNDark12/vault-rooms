@@ -41,6 +41,21 @@ describe("runConnectionDiagnostics", () => {
     expect(report.steps.find((step) => step.id === "identify-server")?.status).toBe("skipped");
   });
 
+  it("keeps a raw transport token out of the readable detail but not out of the report", async () => {
+    const report = await runConnectionDiagnostics("http://192.168.12.21:8787", {
+      pinned: false,
+      fetchHealth: async () => {
+        throw new Error("net::ERR_CONNECTION_REFUSED");
+      }
+    });
+    const reach = report.steps.find((step) => step.id === "reach-server");
+    // The sentence a user reads first must be language, not a Chromium error code.
+    expect(reach?.detail).not.toContain("ERR_CONNECTION_REFUSED");
+    expect(reach?.detail).toContain("firewall");
+    // The token is still the diagnosable fact, so it stays in the report behind a disclosure.
+    expect(reach?.evidence).toBe("net::ERR_CONNECTION_REFUSED");
+  });
+
   it("reports a pin mismatch as an identity failure, not unreachability", async () => {
     const report = await runConnectionDiagnostics("https://192.168.1.10:8787", {
       pinned: true,

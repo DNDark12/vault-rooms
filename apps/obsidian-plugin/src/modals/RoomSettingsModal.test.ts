@@ -9,6 +9,9 @@ import { confirmModal } from "./ConfirmModal.js";
 vi.mock("obsidian", () => {
   class ButtonComponent {
     readonly buttonEl = document.createElement("button");
+    // The real component appends itself when constructed with a container; Setting.addButton
+    // constructs it without one and appends buttonEl itself.
+    constructor(container?: HTMLElement) { container?.append(this.buttonEl); }
     setButtonText(text: string): this { this.buttonEl.textContent = text; return this; }
     setIcon(icon: string): this { this.buttonEl.dataset.icon = icon; return this; }
     setTooltip(text: string): this { this.buttonEl.title = text; return this; }
@@ -106,6 +109,7 @@ vi.mock("obsidian", () => {
     close(): void { this.closed = true; }
   }
   return {
+    ButtonComponent,
     Modal,
     Notice: class Notice {},
     Setting

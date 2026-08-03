@@ -18,6 +18,12 @@ export type ServerConnection = {
   tlsName?: string;
   serverId?: string;
   lastSuccessfulConnectionAt?: string;
+  /**
+   * The server owner's display name, cached from /api/me so a saved-but-inactive connection can still be
+   * named after a person. Optional and additive: entries saved before this field existed simply fall back
+   * to the port until their next successful refresh.
+   */
+  serverOwnerDisplayName?: string;
   securityState?: "ok" | "pin_mismatch" | "migrating";
   appliedRotationIds?: string[];
 };

@@ -9,6 +9,7 @@ import type {
   TeamSummary
 } from "../apiClient.js";
 import type { ServerConnection, VaultRoomsSettings } from "../settings.js";
+import { PANEL_COPY } from "./panelCopy.js";
 import { VaultRoomsView } from "./VaultRoomsView.js";
 
 vi.mock("obsidian", () => {
@@ -299,6 +300,27 @@ describe("VaultRoomsView UX B", () => {
     expect(revealInFolder).toHaveBeenCalledWith({ path: "Vault Rooms/Daily Report" });
   });
 
+  it("renders only the tabs a member can reach, with no leftover panel", () => {
+    const { view } = harness({
+      active: server({
+        id: "remote",
+        baseUrl: "http://192.168.1.20:8787",
+        isServerOwner: false,
+        userDisplayName: "huynd2"
+      }),
+      hasOwnServer: false,
+      canCreateAnyInvite: false
+    });
+    view.render();
+
+    // A member with no managed team cannot read the audit log, so Activity is not rendered at all.
+    // The tablist must not keep a slot for it: the CSS gives one equal column per rendered tab.
+    expect(Array.from(view.containerEl.querySelectorAll("[role=tab]")).map((tab) => tab.textContent))
+      .toEqual(["Rooms", "People"]);
+    expect(view.containerEl.querySelectorAll("[role=tabpanel]")).toHaveLength(2);
+    expect(view.containerEl.querySelector("#vault-rooms-panel-activity")).toBeNull();
+  });
+
   it("does not place local-server setup inside the active remote connection card", () => {
     const { view } = harness({
       active: server({
@@ -317,7 +339,7 @@ describe("VaultRoomsView UX B", () => {
     details?.click();
 
     const currentConnection = view.containerEl.querySelector(".vault-rooms-connection-card.is-active");
-    expect(currentConnection?.textContent).toContain("Remote server");
+    expect(currentConnection?.textContent).toContain(PANEL_COPY.connection.someoneElse);
     expect(currentConnection?.textContent).toContain("Signed in as huynd2");
     expect(currentConnection?.textContent).not.toContain("Set up and share");
     expect(currentConnection?.textContent).not.toContain("Invite");
@@ -388,7 +410,7 @@ describe("VaultRoomsView UX B", () => {
       .find((button) => button.textContent === "Connection details")?.click();
 
     const details = view.containerEl.querySelector(".vault-rooms-status-card");
-    expect(details?.textContent).toContain("This computer's server");
+    expect(details?.textContent).toContain(PANEL_COPY.connection.thisComputer);
     expect(details?.textContent).not.toContain("http://127.0.0.1:8787");
     expect(details?.textContent).toContain("http://192.168.1.20:8787");
   });

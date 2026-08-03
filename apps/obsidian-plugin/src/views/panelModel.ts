@@ -2,6 +2,14 @@ import { CONNECTION_STATUS_COPY, HOSTING_STATUS_COPY } from "../onboarding.js";
 import { PANEL_COPY } from "./panelCopy.js";
 
 export type PanelTab = "rooms" | "people" | "activity";
+/**
+ * `unknown` is not the same as `denied`. Activity permission depends on team membership, which loads
+ * asynchronously, so before that data arrives we cannot tell a member from a team admin. Hiding on
+ * `unknown` would remove the tab from someone entitled to it whenever teams are still loading or a
+ * refresh failed, and they would have no way to find it again. The model keeps the tab visible until
+ * it knows.
+ */
+export type ActivityAccess = "allowed" | "denied" | "unknown";
 export type PanelDataState = "current" | "refreshing" | "stale-error";
 export type PanelRoomAction = "open" | "add" | "remove" | "switch" | "manage";
 
@@ -26,6 +34,7 @@ export type PanelState = {
   rooms: PanelRoomState[];
   peopleAttentionItems: readonly string[];
   activityAttentionItems: readonly string[];
+  activityAccess: ActivityAccess;
   canCreateRoom: boolean;
 };
 
@@ -49,7 +58,7 @@ export type PanelDescriptor = {
   hostLine?: { status: string; text: string; action?: "setup" | "recover" | "start" | "stop" };
   alert?: string;
   dataNotice?: { text: string; action?: "retry" };
-  tabs: Record<PanelTab, { label: string; attentionCount: number }>;
+  tabs: Record<PanelTab, { label: string; attentionCount: number; visible: boolean }>;
   rooms: RoomPresentation[];
   emptyRoomMessage?: string;
 };
@@ -70,11 +79,19 @@ export function countPausedLocalRooms(
   ).length;
 }
 
+/** The tabs a user can actually reach, in display order. */
+export function visiblePanelTabs(descriptor: PanelDescriptor): PanelTab[] {
+  return (["rooms", "people", "activity"] as const).filter((tab) => descriptor.tabs[tab].visible);
+}
+
 export function panelModel(state: PanelState): PanelDescriptor {
   const connection = connectionPresentation(state);
   const rooms = state.rooms.map((room) => roomPresentation(room, state.activeServer?.id));
   const roomAttention = rooms.filter((room) => room.attention).length;
-  const activityAttention = state.activityAttentionItems.length;
+  const activityVisible = state.activityAccess !== "denied";
+  // A count on a hidden tab is an attention item the user has no route to, so it is suppressed with
+  // the tab rather than left pointing nowhere.
+  const activityAttention = activityVisible ? state.activityAttentionItems.length : 0;
 
   return {
     connection,
@@ -87,9 +104,17 @@ export function panelModel(state: PanelState): PanelDescriptor {
           ? { text: PANEL_COPY.data.stale, action: "retry" }
           : undefined,
     tabs: {
-      rooms: { label: PANEL_COPY.tabs.rooms, attentionCount: roomAttention },
-      people: { label: PANEL_COPY.tabs.people, attentionCount: state.peopleAttentionItems.length },
-      activity: { label: PANEL_COPY.tabs.activity, attentionCount: activityAttention }
+      rooms: { label: PANEL_COPY.tabs.rooms, attentionCount: roomAttention, visible: true },
+      people: {
+        label: PANEL_COPY.tabs.people,
+        attentionCount: state.peopleAttentionItems.length,
+        visible: true
+      },
+      activity: {
+        label: PANEL_COPY.tabs.activity,
+        attentionCount: activityAttention,
+        visible: activityVisible
+      }
     },
     rooms,
     emptyRoomMessage:

@@ -7,11 +7,14 @@ import { lanSharePresentation } from "../lanShareReachability.js";
 import type VaultRoomsPlugin from "../main.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
 import { ConnectionDiagnosticsModal } from "../modals/ConnectionDiagnosticsModal.js";
+import { CONNECTION_STATUS_COPY, HOSTING_STATUS_COPY } from "../onboarding.js";
 import { activityPresentation } from "./activityPresentation.js";
 import { PANEL_COPY } from "./panelCopy.js";
 import {
   countPausedLocalRooms,
   panelModel,
+  visiblePanelTabs,
+  type ActivityAccess,
   type PanelDataState,
   type PanelDescriptor,
   type PanelRoomAction,
@@ -22,7 +25,15 @@ import { peopleModel, type PersonAccessPresentation, type TeamAccessPresentation
 
 export const VAULT_ROOMS_VIEW_TYPE = "vault-rooms-view";
 
-const PANEL_TABS: readonly PanelTab[] = ["rooms", "people", "activity"];
+
+/** Port only - never the host, which is deliberately hidden from members. */
+function portOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).port;
+  } catch {
+    return "";
+  }
+}
 
 type FileExplorerView = {
   revealInFolder(file: TFolder): Promise<void> | void;
@@ -88,10 +99,14 @@ export class VaultRoomsView extends ItemView {
     container.addClass("vault-rooms-view", "vault-rooms-panel-b");
 
     const descriptor = panelModel(this.buildPanelState());
+    const tabs = visiblePanelTabs(descriptor);
+    // Switching to a server without audit access while Activity is open would otherwise render a tab
+    // that is no longer in the tablist.
+    if (!tabs.includes(this.activeTab)) this.activeTab = tabs[0] ?? "rooms";
     this.renderHeader(container, descriptor);
-    this.renderTabs(container, descriptor);
+    this.renderTabs(container, descriptor, tabs);
 
-    for (const tab of PANEL_TABS) {
+    for (const tab of tabs) {
       const panel = container.createDiv({
         cls: "vault-rooms-tab-panel",
         attr: {
@@ -139,7 +154,7 @@ export class VaultRoomsView extends ItemView {
       activeServer: active
         ? {
             id: active.id,
-            name: activeIsOwnEmbedded ? "This computer's server" : "Selected server",
+            name: this.connectionLabel(active),
             status: active.status,
             securityState: active.securityState ?? "ok",
             isOwnEmbedded: activeIsOwnEmbedded
@@ -158,8 +173,49 @@ export class VaultRoomsView extends ItemView {
       rooms: roomStates,
       peopleAttentionItems,
       activityAttentionItems,
+      activityAccess: this.activityAccess(),
       canCreateRoom: Boolean(active?.isServerOwner)
     };
+  }
+
+  /**
+   * Names a saved connection so two of them can be told apart. "Someone else's server" alone collapsed
+   * every remote entry into one label, which defeated the point.
+   *
+   * Preference order: this computer, then the owner's cached name, then the port. Port is the weaker
+   * discriminator - two teammates hosting on separate machines usually share the default port - so it is
+   * only the fallback for entries saved before the owner name was cached.
+   */
+  private connectionLabel(server: {
+    id: string;
+    isServerOwner: boolean;
+    baseUrl: string;
+    serverOwnerDisplayName?: string;
+  }): string {
+    if (server.id === this.plugin.ownEmbeddedServerId()) return PANEL_COPY.connection.thisComputer;
+    if (server.isServerOwner) return PANEL_COPY.connection.yourServer;
+    if (server.serverOwnerDisplayName) {
+      return PANEL_COPY.connection.ownedBy(server.serverOwnerDisplayName);
+    }
+    const port = portOf(server.baseUrl);
+    return port ? PANEL_COPY.connection.unnamedOnPort(port) : PANEL_COPY.connection.someoneElse;
+  }
+
+  /**
+   * Mirrors renderAudit's own gate: the server owner always qualifies, otherwise it takes managing at
+   * least one team. Team membership loads asynchronously, so an empty team list while data is still
+   * arriving or after a failed refresh is reported as `unknown` rather than `denied` - hiding the tab on
+   * missing data would take it away from a team admin with no route back to it.
+   */
+  private activityAccess(): ActivityAccess {
+    const active = this.plugin.getActiveServer();
+    if (!active) return "denied";
+    if (active.isServerOwner) return "allowed";
+    if (this.plugin.teams.some((team) => this.plugin.canManageTeam(team))) return "allowed";
+    // Only a load still in flight counts as "not known yet". A failed refresh is different: the audit
+    // log cannot be fetched either, so the tab would be an empty dead end rather than a feature the
+    // user is being denied - and it returns as soon as a refresh succeeds.
+    return this.plugin.teams.length === 0 && this.dataState === "refreshing" ? "unknown" : "denied";
   }
 
   private renderHeader(parent: HTMLElement, descriptor: PanelDescriptor): void {
@@ -230,12 +286,16 @@ export class VaultRoomsView extends ItemView {
     }
   }
 
-  private renderTabs(parent: HTMLElement, descriptor: PanelDescriptor): void {
+  private renderTabs(
+    parent: HTMLElement,
+    descriptor: PanelDescriptor,
+    tabs: readonly PanelTab[]
+  ): void {
     const tablist = parent.createDiv({
       cls: "vault-rooms-tabs",
       attr: { role: "tablist", "aria-label": "Vault Rooms sections" }
     });
-    for (const tab of PANEL_TABS) {
+    for (const tab of tabs) {
       const tabDescriptor = descriptor.tabs[tab];
       const label = tabDescriptor.attentionCount > 0
         ? `${tabDescriptor.label}, ${tabDescriptor.attentionCount} needs attention`
@@ -262,20 +322,20 @@ export class VaultRoomsView extends ItemView {
       button.onClickEvent(() => {
         this.activateTab(tab);
       });
-      button.onkeydown = (event) => this.handleTabKey(event, tab);
+      button.onkeydown = (event) => this.handleTabKey(event, tab, tabs);
     }
   }
 
-  private handleTabKey(event: KeyboardEvent, current: PanelTab): void {
-    const currentIndex = PANEL_TABS.indexOf(current);
+  private handleTabKey(event: KeyboardEvent, current: PanelTab, tabs: readonly PanelTab[]): void {
+    const currentIndex = tabs.indexOf(current);
     let nextIndex: number | undefined;
-    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % PANEL_TABS.length;
-    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + PANEL_TABS.length) % PANEL_TABS.length;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
     if (event.key === "Home") nextIndex = 0;
-    if (event.key === "End") nextIndex = PANEL_TABS.length - 1;
+    if (event.key === "End") nextIndex = tabs.length - 1;
     if (nextIndex === undefined) return;
     event.preventDefault();
-    this.activateTab(PANEL_TABS[nextIndex] ?? "rooms");
+    this.activateTab(tabs[nextIndex] ?? "rooms");
     this.containerEl.querySelector<HTMLElement>(`#vault-rooms-tab-${this.activeTab}`)?.focus();
   }
 
@@ -315,7 +375,7 @@ export class VaultRoomsView extends ItemView {
       const title = card.createDiv({ cls: "vault-rooms-card-title" });
       title.createEl("strong", { text: presentation.name });
       if (presentation.conflictCount > 0) {
-        title.createSpan({ cls: "vault-rooms-attention-label", text: "Needs a choice" });
+        title.createSpan({ cls: "vault-rooms-attention-label", text: PANEL_COPY.room.attentionLabel });
       }
       card.createDiv({ cls: "vault-rooms-card-status", text: presentation.status });
       const actions = card.createDiv({ cls: "vault-rooms-card-actions" });
@@ -402,7 +462,7 @@ export class VaultRoomsView extends ItemView {
   private renderPeople(parent: HTMLElement): void {
     const active = this.plugin.getActiveServer();
     if (!active) {
-      parent.createDiv({ cls: "vault-rooms-empty-state", text: "Join a server to see people." });
+      parent.createDiv({ cls: "vault-rooms-empty-state", text: PANEL_COPY.empty.peopleNoServer });
       return;
     }
     const descriptor = peopleModel({
@@ -419,9 +479,21 @@ export class VaultRoomsView extends ItemView {
       canManageTeam: (team) => this.plugin.canManageTeam(team)
     });
 
-    this.renderPeopleGroup(parent, "People with access", descriptor.withAccess);
+    this.renderPeopleGroup(
+      parent,
+      "People with access",
+      descriptor.withAccess,
+      active.isServerOwner
+        ? PANEL_COPY.empty.peopleWithAccessOwner
+        : PANEL_COPY.empty.peopleWithAccessMember
+    );
     if (descriptor.withoutAccess.length > 0) {
-      this.renderPeopleGroup(parent, "No access yet", descriptor.withoutAccess);
+      this.renderPeopleGroup(
+        parent,
+        "No access yet",
+        descriptor.withoutAccess,
+        PANEL_COPY.empty.peopleWithoutAccess
+      );
     }
 
     const teamsHeader = parent.createDiv({ cls: "vault-rooms-section-heading-row" });
@@ -437,7 +509,10 @@ export class VaultRoomsView extends ItemView {
     }
     const teamList = parent.createDiv({ cls: "vault-rooms-primary-list vault-rooms-access-list" });
     if (descriptor.teams.length === 0) {
-      teamList.createDiv({ cls: "vault-rooms-empty-state", text: "No teams yet." });
+      teamList.createDiv({
+        cls: "vault-rooms-empty-state",
+        text: active.isServerOwner ? PANEL_COPY.empty.teamsOwner : PANEL_COPY.empty.teamsMember
+      });
     }
     for (const presentation of descriptor.teams) {
       const team = this.plugin.teams.find((candidate) => candidate.id === presentation.id);
@@ -451,13 +526,14 @@ export class VaultRoomsView extends ItemView {
   private renderPeopleGroup(
     parent: HTMLElement,
     title: string,
-    people: PersonAccessPresentation[]
+    people: PersonAccessPresentation[],
+    emptyText: string
   ): void {
     const heading = parent.createDiv({ cls: "vault-rooms-section-heading-row" });
     this.renderCountHeading(heading, title, people.length);
     const list = parent.createDiv({ cls: "vault-rooms-primary-list vault-rooms-access-list" });
     if (people.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty-state", text: "No one is listed here yet." });
+      list.createDiv({ cls: "vault-rooms-empty-state", text: emptyText });
       return;
     }
     for (const person of people) {
@@ -468,7 +544,7 @@ export class VaultRoomsView extends ItemView {
       copy.createEl("strong", { text: person.name });
       copy.createDiv({ cls: "vault-rooms-card-status", text: person.subtitle });
       if (person.canManage) {
-        this.addPanelButton(row, this.expandedPeople.has(person.id) ? "Close Manage" : "Manage", () => {
+        this.addPanelButton(row, this.expandedPeople.has(person.id) ? `Close ${PANEL_COPY.room.manage}` : PANEL_COPY.room.manage, () => {
           if (this.expandedPeople.has(person.id)) this.expandedPeople.delete(person.id);
           else this.expandedPeople.add(person.id);
           this.render();
@@ -533,7 +609,7 @@ export class VaultRoomsView extends ItemView {
     card.createDiv({ cls: "vault-rooms-card-status", text: presentation.subtitle });
     if (!presentation.canManage) return;
 
-    this.addPanelButton(card, this.expandedTeams.has(team.id) ? "Close Manage" : "Manage", () => {
+    this.addPanelButton(card, this.expandedTeams.has(team.id) ? `Close ${PANEL_COPY.room.manage}` : PANEL_COPY.room.manage, () => {
       if (this.expandedTeams.has(team.id)) this.expandedTeams.delete(team.id);
       else this.expandedTeams.add(team.id);
       this.render();
@@ -567,6 +643,8 @@ export class VaultRoomsView extends ItemView {
       danger.createEl("strong", { text: "Delete team" });
       danger.createDiv({ cls: "vault-rooms-card-status", text: "Removes memberships and room access. Rooms stay available." });
       const button = this.addPanelButton(danger, "Delete team", () => this.deleteTeamWithConfirm(team));
+      // Same class setDestructiveCompat falls back to, so Delete team, Delete room, and Remove access
+      // share one destructive treatment. Its size and alignment come from .vault-rooms-danger-zone.
       button.addClass("mod-warning");
     }
   }
@@ -604,7 +682,7 @@ export class VaultRoomsView extends ItemView {
     if (!this.renderAudit(parent)) {
       parent.createDiv({
         cls: "vault-rooms-empty-state",
-        text: "Activity is available to server owners and team managers."
+        text: PANEL_COPY.empty.activityNoPermission
       });
     }
   }
@@ -616,19 +694,17 @@ export class VaultRoomsView extends ItemView {
     if (active) {
       const card = list.createDiv({ cls: "vault-rooms-connection-card is-active" });
       const title = card.createDiv({ cls: "vault-rooms-card-title" });
-      title.createEl("strong", {
-        text: this.plugin.activeServerIsOwnEmbeddedServer()
-          ? "This computer's server"
-          : "Remote server"
-      });
+      title.createEl("strong", { text: this.connectionLabel(active) });
       title.createSpan({ cls: "vault-rooms-role-label", text: "Selected" });
       if (!this.plugin.activeServerIsOwnEmbeddedServer()) {
         card.createDiv({ cls: "vault-rooms-card-status", text: `Signed in as ${active.userDisplayName}` });
-        card.createDiv({ cls: "vault-rooms-card-status", text: active.baseUrl });
+        // The host's address is deliberately not shown: a member connects by invite and never types it,
+        // and the one warning that depends on it (advertised-vs-observed drift) is host-side only. It
+        // stays available in Test connection, which is the surface for "I can't connect".
       }
       this.renderActiveConnectionDetails(card);
     } else {
-      list.createDiv({ cls: "vault-rooms-empty-state", text: "No connection selected." });
+      list.createDiv({ cls: "vault-rooms-empty-state", text: PANEL_COPY.empty.connectionNone });
     }
 
     const savedServers = this.plugin.settings.servers.filter((server) => server.id !== active?.id);
@@ -642,10 +718,9 @@ export class VaultRoomsView extends ItemView {
     for (const saved of savedServers) {
       const card = list.createDiv({ cls: "vault-rooms-connection-card" });
       const title = card.createDiv({ cls: "vault-rooms-card-title" });
-      title.createEl("strong", { text: "Saved server" });
-      if (saved.status === "revoked") title.createSpan({ cls: "vault-rooms-attention-label", text: "No access" });
+      title.createEl("strong", { text: this.connectionLabel(saved) });
+      if (saved.status === "revoked") title.createSpan({ cls: "vault-rooms-attention-label", text: CONNECTION_STATUS_COPY.noAccess });
       card.createDiv({ cls: "vault-rooms-card-status", text: `Signed in as ${saved.userDisplayName}` });
-      card.createDiv({ cls: "vault-rooms-card-status", text: saved.baseUrl });
       const actions = card.createDiv({ cls: "vault-rooms-card-actions" });
       this.addPanelButton(actions, PANEL_COPY.activity.switch, () => this.plugin.activateServer(saved.id), true);
       this.addPanelButton(actions, PANEL_COPY.activity.test, () => {
@@ -696,10 +771,10 @@ export class VaultRoomsView extends ItemView {
     const status = this.plugin.getServerStatus();
     const details = parent.createDiv({ cls: "vault-rooms-management-surface" });
     if (!this.plugin.hasOwnServer() && status.running && status.bootstrapped) {
-      details.createDiv({ cls: "vault-rooms-card-status", text: "Locked out on this computer" });
+      details.createDiv({ cls: "vault-rooms-card-status", text: HOSTING_STATUS_COPY.recovery });
       details.createDiv({
         cls: "vault-rooms-card-status",
-        text: "Recover access without resetting the rooms already stored here."
+        text: PANEL_COPY.hosting.recovery
       });
       this.addPanelButton(details, PANEL_COPY.hosting.recover, () => this.plugin.openOwnerRecoveryModal(), true);
       return;
@@ -790,7 +865,7 @@ export class VaultRoomsView extends ItemView {
     if (!this.auditEvents) return true;
     const list = parent.createDiv({ cls: "vault-rooms-compact-list" });
     if (this.auditEvents.length === 0) {
-      list.createDiv({ cls: "vault-rooms-empty-state", text: "No activity yet." });
+      list.createDiv({ cls: "vault-rooms-empty-state", text: PANEL_COPY.empty.activityNone });
     }
     for (const event of this.auditEvents) {
       const presentation = activityPresentation(event);
@@ -802,7 +877,7 @@ export class VaultRoomsView extends ItemView {
       });
       title.createSpan({ cls: "vault-rooms-card-status", text: new Date(event.createdAt).toLocaleString() });
       const technical = row.createEl("details", { cls: "vault-rooms-activity-technical" });
-      technical.createEl("summary", { text: "Technical details" });
+      technical.createEl("summary", { text: PANEL_COPY.diagnostics.technical });
       technical.createEl("pre", { text: presentation.technicalDetails });
     }
     if (this.auditHasMore) {
