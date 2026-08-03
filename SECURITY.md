@@ -58,8 +58,7 @@ whose fingerprint they verify with the owner out of band.
 
 Character-level live editing applies to a room's Markdown notes and is a per-room setting (room **Manage** →
 "Live editing"). **New rooms start enabled**; existing rooms keep whatever value they already had and are never
-silently migrated. See `docs/superpowers/specs/2026-07-30-crdt-default-on-decision.md`. It adds no new listener
-or transport: the messages ride the same authenticated sync
+silently migrated. It adds no new listener or transport: the messages ride the same authenticated sync
 connection every room already uses, under whatever transport mode the server is in, and are gated by the same
 per-path ACL checks.
 
@@ -85,7 +84,8 @@ per-path ACL checks.
   unbound, and its in-memory and persisted documents disposed before it returns.
 
 This is the newest and least-proven surface in the sync engine, despite extended two-device testing on a real
-LAN. Enable it per room, on content you have a backup of.
+LAN. Keep backups for important content; existing rooms retain their saved setting and new rooms can still turn
+Live editing off from **Manage**.
 
 ## Token storage
 

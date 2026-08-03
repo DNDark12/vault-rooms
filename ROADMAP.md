@@ -12,13 +12,7 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   disappears on editor/session cleanup, is never persisted, and deliberately has no participant bar. It remains
   separate from chat's future server-wide online/offline presence.
 
-## Implemented for the next release
-
-Code complete and covered by the automated suite. **Not yet verified, and not releasable until it is:** the
-guided-onboarding and panel manual matrices in a clean vault on macOS and Windows, plus the two-device
-real-hardware CRDT smoke for the new-room default in
-`docs/superpowers/specs/2026-07-30-crdt-default-on-decision.md`. The unit suite cannot cover which sync lane a
-new room actually uses.
+## Shipped in 0.2.5
 
 - **Guided onboarding.** A fresh host now follows one four-step path to verify its LAN address, create the
   owner account, create the first room with safe defaults, and issue a room invite. Loopback and unspecified
@@ -36,8 +30,9 @@ new room actually uses.
 
 ## Next up
 
-- **Continue CRDT soak.** Live editing works and went through extended two-device testing *before* the default
-  flipped; the default-on change itself still owes its own two-device run. It is now the default for new rooms. Two of the three known gaps are now closed (an edit typed inside the rename
+- **Continue CRDT soak.** Live editing is now the default for new rooms and remains the newest, most
+  integrity-sensitive part of the plugin. Continue broadening the real-machine and mixed-version soak beyond
+  the 0.2.5 release checks. Two of the three known gaps are now closed (an edit typed inside the rename
   acknowledgement window is re-offered immediately, and an in-flight
   request is failed rather than stranded when the socket drops). The remaining one is a coexistence trade-off
   needing a decision: a peer on a build older than the rename protocol applies a rename only after reconnecting.

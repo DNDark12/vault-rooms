@@ -53,7 +53,7 @@ leaves your local network: there is no cloud service, no third-party server, and
 
 The relay can run two ways, speaking the same protocol either way:
 
-- **Embedded** (recommended) - the plugin runs it in-process. Click **Start server**; no terminal, no config
+- **Embedded** (recommended) - the plugin runs it in-process. Click **Start sharing**; no terminal, no config
   file.
 - **Standalone** - a separate process, for development or for hosting on an always-on machine or NAS instead of
   someone's laptop.

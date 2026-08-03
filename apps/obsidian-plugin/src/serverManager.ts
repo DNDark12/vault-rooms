@@ -474,6 +474,7 @@ function withHttpsPort(urlString: string, port: number): string {
 }
 
 function toArrayBuffer(buffer: Uint8Array): ArrayBuffer {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- TypeScript models Uint8Array.buffer as ArrayBufferLike here.
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }
 
