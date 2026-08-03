@@ -54,10 +54,12 @@ trust-anyway override. A planned rotation is accepted automatically only when th
 chain from the previously pinned identity; after a reinstall or a lost identity file, members need a fresh invite
 whose fingerprint they verify with the owner out of band.
 
-## CRDT sync (opt-in, per room)
+## CRDT sync (per room, on by default for new rooms)
 
-A room can opt into character-level live editing for its Markdown notes (Room Settings → "Live editing (CRDT
-sync)", default off). It adds no new listener or transport: the messages ride the same authenticated sync
+Character-level live editing applies to a room's Markdown notes and is a per-room setting (room **Manage** →
+"Live editing"). **New rooms start enabled**; existing rooms keep whatever value they already had and are never
+silently migrated. See `docs/superpowers/specs/2026-07-30-crdt-default-on-decision.md`. It adds no new listener
+or transport: the messages ride the same authenticated sync
 connection every room already uses, under whatever transport mode the server is in, and are gated by the same
 per-path ACL checks.
 

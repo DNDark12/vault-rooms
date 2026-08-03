@@ -24,21 +24,26 @@ Markdown notes (see "CRDT sync"); it starts on for new rooms and can be changed 
 
 **On the hosting device:**
 
-1. Panel → **Set up and share**.
-2. Enter this computer's address on the local network and complete the guided check.
-3. Enter your display name, choose one folder, and create the room.
-4. Create and copy the first room invite.
+1. Panel → **Set up and share**. The wizard shows four steps: **Connection**, **About you**, **Shared folder**,
+   **Invite**.
+2. *Connection* - enter this computer's address on the local network, then **Check connection**. It does not
+   advance on its own; press **Continue** once the check passes.
+3. *About you* - enter the name teammates will see, then **Create my account**.
+4. *Shared folder* - **Choose folder**, adjust **Room name** if you want, then **Create room**.
+5. *Invite* - pick **View and edit** or **View only**, then **Create invite link**. **Copy message** gives you a
+   sendable message with the link in it; **Copy link only** gives the bare link. The link works once, expires in
+   60 minutes, and needs Vault Rooms installed on your teammate's computer. **Create another link** if it
+   expires; **I'll invite someone later** finishes without creating one.
 
 The plugin cannot discover the LAN address automatically. After the entered address passes the host-side
 check, automatic server startup is enabled. The guided flow applies the current room defaults without asking
-for technical settings, including Live editing for Markdown notes. The teammate still needs Vault Rooms
-installed before opening the invite.
+for technical settings, including Live editing for Markdown notes.
 
 **On the teammate's device:** install Vault Rooms, click the link, add a display name, join, then choose
 **Add to this computer** for the room under **Rooms**.
 
-A green reachability badge only proves the host can reach its own address. It cannot prove the teammate's
-firewall or Wi-Fi client isolation will allow the connection - if they can't connect, use **Test connection**
+**LAN share: reachable from this device** only proves the host can reach its own address. It cannot prove the
+teammate's firewall or Wi-Fi client isolation will allow the connection - if they can't connect, use **Test connection**
 and see "Troubleshooting".
 
 ## Architecture
@@ -72,12 +77,35 @@ See [SECURITY.md](SECURITY.md) for the threat model, token handling, and revocat
 - A server created before pinned TLS stays on plaintext until its owner runs the migration in Settings.
 - Vault Rooms cannot sandbox other Obsidian plugins: a local plugin that can read a synced file can read it.
 
+## The panel
+
+One status chip answers a single question - is your work syncing - using six states: **Syncing**,
+**Connecting**, **Reconnecting**, **Not syncing**, **No access**, **Not set up**. Hosting is a separate line
+below it, and appears only when this computer hosts, needs recovery, or has a hosting error; the two can
+disagree, which is exactly what happens when you work on a teammate's server while your own keeps running for
+others.
+
+Below that are three tabs:
+
+- **Rooms** - the working list. Each row says where the room is on this computer and offers **Open**,
+  **Add to this computer**, **Remove from this computer**, or **Switch**, plus **Manage**.
+- **People** - grouped by what someone can actually reach (**Can edit**/**Can view** and whether it comes
+  through a team), not by Friends versus Teams. Teams are listed below with their own **Manage**.
+- **Activity** - the audit log. It is **not shown at all** unless you can read it: the server owner and team
+  managers can, an ordinary member cannot.
+
+A tab with something needing attention shows a count next to its name. Technical detail - the server address,
+raw permissions, plugin suggestions, the folder overrides - lives behind **Connection details**, **Manage**, or
+**Advanced** rather than on the default screen. Destructive actions sit inside those surfaces and confirm first.
+Tabs are keyboard-navigable with arrow keys.
+
 ## Rooms, mounting, and access
 
-**Source path** is the folder in the *owner's* vault that the room shares - the one real copy everyone else
-reconciles against. **Local mount path** is where a given device keeps its working copy: the owner mounts in
-place (no second copy), while everyone else downloads the room into a folder under their mount root. Either can
-be overridden per room in its Settings.
+The room's source is the folder in the *owner's* vault that it shares - the one real copy everyone else
+reconciles against. In the room's **Manage** surface the owner sees it as **In your vault at …**, and everyone
+else as **Shared from the owner's vault at …**. Each device then keeps its own working copy: the owner shares in
+place (no second copy), while everyone else downloads the room into a folder under their root. Both the folder
+name teammates see and the folder used on this computer can be changed under **Manage → Advanced**.
 
 Access can be withdrawn at four granularities, all enforced by the relay:
 
@@ -109,7 +137,7 @@ instead of keeping both.
 
 Latency: after you stop typing your edit is pushed within a fraction of a second, and the relay broadcasts it to
 every mounted device immediately - there is no polling. A device that was offline reconnects on its own,
-re-subscribes, and reconciles; you never need to remount manually. The panel's connection badge tells you whether
+re-subscribes, and reconciles; you never need to add the room again. The panel's status chip tells you whether
 you're actually live.
 
 ## CRDT sync (live editing for Markdown notes)
@@ -175,8 +203,8 @@ Start with **Connection details → Test connection** in the panel (or **Test** 
 checks the address, whether anything answers, whether it's a Vault Rooms server with the expected identity, and
 whether this device's login still works - then names the step that failed.
 
-- **A teammate can't reach the server:** on the host, confirm the LAN share badge is green. If it says **not a
-  LAN address**, the address can't work for anyone else no matter what your own machine says - a loopback
+- **A teammate can't reach the server:** on the host, open **Connection details** and confirm the line reads
+  **LAN share: reachable from this device**. If it says **not a LAN address**, the address can't work for anyone else no matter what your own machine says - a loopback
   address like `127.0.0.1` always means "the computer that's asking", so it sends every teammate back to their
   own machine. Use this device's LAN address instead. A browser can't validate a pinned server, so it isn't a
   useful check either.
