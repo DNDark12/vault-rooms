@@ -16,9 +16,10 @@ any team. A room's access list grants or denies a user or a team, per path patte
 
 ## What it is not
 
-Not cloud sync, not NAT traversal, not mobile, and not a sandbox for other Obsidian plugins. It syncs Markdown
-plus a limited set of common file types (see "Known limitations"). Character-level co-editing applies only to
-Markdown notes (see "CRDT sync"); it starts on for new rooms and can be changed per room.
+Not cloud sync, not NAT traversal, not mobile, and not a sandbox for other Obsidian plugins. It syncs every
+regular file in a shared folder - text as text, everything else as binary - except dotfiles and dotfolders (see
+"Known limitations"). Character-level co-editing applies only to Markdown notes (see "CRDT sync"); it starts on
+for new rooms and can be changed per room.
 
 ## Quick start
 
@@ -48,8 +49,15 @@ and see "Troubleshooting".
 
 ## Architecture
 
-One device runs the relay; every other device is a client that only makes outbound connections to it. Nothing
-leaves your local network: there is no cloud service, no third-party server, and no telemetry of any kind.
+One device runs the relay; every other device is a client that only makes outbound connections to it. **Your vault
+content never leaves your local network:** there is no cloud service, no relay outside your LAN, and no analytics
+or telemetry of any kind.
+
+There is exactly one exception to "no Internet traffic at all", and it carries no vault data: on load, the plugin
+makes a single anonymous `GET` to the public GitHub Releases API to see whether a newer version exists, and shows
+a notice if so. It sends no vault content, no room or file names, and no identifier of you or your server - only
+what any HTTPS request reveals to GitHub (your IP address and the fact that a request was made). It fails
+silently, so being offline costs nothing. See [SECURITY.md](SECURITY.md#outbound-update-check).
 
 The relay can run two ways, speaking the same protocol either way:
 
@@ -146,10 +154,16 @@ New rooms start with **Manage → Live editing** on, giving their Markdown notes
 merging. Existing rooms keep their previously saved value, and a manager can turn the setting on or off per
 room. Two people typing in the same note merge deterministically instead of one edit becoming a conflict copy.
 
-- **Markdown only.** Every other file type in the room keeps using normal whole-file sync.
+- **Markdown notes only, and not `.excalidraw.md`.** Every other file type in the room - including
+  `*.excalidraw.md`, which stores a drawing as structured JSON inside a Markdown file - keeps using normal
+  whole-file sync. Merging that JSON character by character could produce a drawing that no longer loads.
 - **Turning it on or off is non-destructive.** Existing notes are seeded from their current content; disabling
   just returns to whole-file sync.
 - **Renames move the note**, keeping its content and history - even with the note open on both devices.
+- **Creating or renaming a note while disconnected is not lost.** The intent is written to disk, survives an
+  Obsidian restart, and is replayed once the connection is back - the note keeps its identity and history, and a
+  dropped acknowledgement can never produce a duplicate. Replay needs the relay to be on 0.2.6 or newer; against
+  an older relay the pending change stays queued and you get one notice saying the server must be upgraded.
 - **Two people creating a note at once get two notes.** Every new Obsidian note starts with the same default
   name, so the first to reach the relay keeps it and the other is filed under a name including its creator, with
   a notice explaining why. Their text is never merged together.
@@ -189,13 +203,17 @@ Vault Rooms never grants permission to run someone else's plugin code.
   sharing a room's folder shouldn't risk shipping a teammate's local secrets file. This is the same rule that
   already excludes the vault's own config folder and `.git`/`node_modules`.
 - Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
-- Character-level co-editing and cursor presence only exist when a room has Live editing enabled, and only for Markdown.
+- Character-level co-editing and cursor presence only exist when a room has Live editing enabled, and only for
+  Markdown notes other than `*.excalidraw.md`.
   Cursor presence is ephemeral: it appears only for authorized teammates who currently have the same note open,
   is not persisted, and does not provide a room-wide participant or online list.
 - CRDT caveats: per-keystroke merging applies only to a note open in your editor; renaming a note that's open on
   another device makes that device lose editor focus, which Obsidian controls; and disabling CRDT for a room stops
   using its history without deleting it.
-- Renames are a real move only for CRDT-enabled Markdown notes. Every other file type re-uploads on rename.
+- Renames are a real move only for CRDT-enabled Markdown notes. Every other file type - including
+  `*.excalidraw.md` - re-uploads on rename.
+- Offline create/rename replay covers CRDT Markdown notes only. Other file types still reconcile the ordinary way
+  on reconnect, which for a rename means a re-upload under the new name.
 - Device tokens are stored unencrypted in Obsidian's plugin data. A lost device can be revoked on its own.
 - Single-host topology: whoever hosts must stay running. If their machine sleeps, sync stops for everyone.
 - No clustering, and not built for load-balancing - one process, one database. Fine for a small team editing
@@ -226,6 +244,14 @@ whether this device's login still works - then names the step that failed.
   Cursor presence is intentionally absent when a note is only synced in the background.
 - **A teammate's edits aren't showing up:** confirm both devices show **In your vault at …**, not
   **Not on this computer**. Only rooms added to the computer hold a live subscription.
+- **"This server must be upgraded before offline Markdown creates or renames can replay safely":** you created or
+  renamed a note while disconnected, and the relay is older than 0.2.6, so it cannot confirm the change exactly
+  once. Nothing is lost - the pending change stays on disk and replays as soon as the host updates. Update the
+  hosting device's plugin, or undo the rename and redo it while connected.
+- **A teammate never sees a file I added (`.docx`, `.mp4`, a file with no extension):** they're on a build older
+  than 0.2.6, which only understood a fixed list of file types. Rather than hand them content they'd write to disk
+  incorrectly, the relay hides those paths from them entirely. Both devices need 0.2.6 or newer. Also check the
+  file isn't a dotfile and isn't over the server's size limit.
 - **Server identity mismatch:** the peer presented a different identity, so Vault Rooms stopped before sending
   credentials. Confirm the address; after a reinstall, get a fresh invite and verify its fingerprint with the
   owner through a channel you trust. There is deliberately no trust-anyway override.
