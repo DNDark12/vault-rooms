@@ -28,23 +28,42 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   keep their persisted choice; there is no silent migration. The toggle shares the room's explicit
   **Save changes** path.
 
+## Shipped in 0.2.6
+
+- **Every file in a room syncs.** The old extension allowlist is gone: known-text extensions travel as UTF-8 and
+  everything else (audio, video, Office documents, extensionless and unrecognized files) as base64 binary, so no
+  file type is silently skipped. Dotfiles and dotfolders remain excluded on purpose. Mixed-version safety is
+  explicit rather than inferred - a peer that has not advertised `extendedBinarySync` never learns those paths
+  exist, instead of receiving content an older build would write to disk incorrectly.
+- **Offline Markdown create/rename survives a restart.** Structural intent is journaled to disk, coalesced to the
+  user's final filesystem state, and replayed after the reconnect snapshot. The relay stores an idempotency
+  receipt in the same transaction as the mutation, so a retry after a lost acknowledgement returns the recorded
+  result instead of creating a duplicate note. Turning live editing off with pending intent converts it to the
+  whole-file lane rather than stranding it. Design: `docs/superpowers/specs/2026-08-03-crdt-offline-operation-journal-design.md`.
+- **Live editing skips `*.excalidraw.md`.** Character-level merging on structured JSON could produce a drawing
+  that no longer loads, so that format stays on the whole-file lane like `.canvas` and `.excalidraw`.
+
 ## Next up
 
-- **Continue CRDT soak.** Live editing is now the default for new rooms and remains the newest, most
+- **Continue CRDT soak.** Live editing is the default for new rooms and remains the newest, most
   integrity-sensitive part of the plugin. Continue broadening the real-machine and mixed-version soak beyond
-  the 0.2.5 release checks. Two of the three known gaps are now closed (an edit typed inside the rename
-  acknowledgement window is re-offered immediately, and an in-flight
-  request is failed rather than stranded when the socket drops). The remaining one is a coexistence trade-off
-  needing a decision: a peer on a build older than the rename protocol applies a rename only after reconnecting.
-  Closing it means also broadcasting the rename as a delete+create to non-CRDT peers, which is more traffic and
-  more edge cases for a case that already self-heals.
+  the 0.2.5 and 0.2.6 release checks; the two new surfaces are journal replay across a full restart and the
+  binary/mixed-version visibility gate. All three of the originally known rename gaps are now closed (an edit
+  typed inside the acknowledgement window is re-offered immediately, an in-flight request is failed rather than
+  stranded when the socket drops, and offline structural intent is durable). The remaining coexistence trade-off
+  still needs a decision: a peer on a build older than the rename protocol applies a rename only after
+  reconnecting. Closing it means also broadcasting the rename as a delete+create to non-CRDT peers, which is more
+  traffic and more edge cases for a case that already self-heals.
 - **Chat v1, after live cursors.** The existing design remains viable: direct, team, and room threads; immutable
   Markdown messages; unread state; realtime delivery over the authenticated `/sync` socket; history isolated in
   a separately-pruned `chat.db`; and a docked desktop UI. Refresh the protocol and threat-model sections before
   implementation because TLS pinning and CRDT traffic have shipped since the design was written. Do not bundle
   chat with cursors: they can share connection lifecycle and identity, but not authorization or presence state.
-- **Binary transport instead of base64.** Images and PDFs currently travel base64-encoded, costing ~33% overhead
-  and lowering the practical size ceiling. Independent of everything else.
+- **Binary transport instead of base64.** Every non-text file now travels base64-encoded, not just images and
+  PDFs, so the ~33% overhead and the lowered practical size ceiling apply much more widely than when this item was
+  written - a video or Office document hits the limit at roughly 3/4 of the server's configured size. Independent
+  of everything else. Related and unaddressed: a room's file history keeps a full copy of every version, so
+  frequently-autosaved binaries grow the relay database quickly; retention/quota belongs with this work.
 
 ## Bigger efforts - each needs its own design pass
 

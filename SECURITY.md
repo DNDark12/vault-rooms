@@ -56,8 +56,9 @@ whose fingerprint they verify with the owner out of band.
 
 ## CRDT sync (per room, on by default for new rooms)
 
-Character-level live editing applies to a room's Markdown notes and is a per-room setting (room **Manage** →
-"Live editing"). **New rooms start enabled**; existing rooms keep whatever value they already had and are never
+Character-level live editing applies to a room's Markdown notes - excluding `*.excalidraw.md`, which holds
+structured JSON and stays on the whole-file lane - and is a per-room setting (room **Manage** → "Live editing").
+**New rooms start enabled**; existing rooms keep whatever value they already had and are never
 silently migrated. It adds no new listener or transport: the messages ride the same authenticated sync
 connection every room already uses, under whatever transport mode the server is in, and are gated by the same
 per-path ACL checks.
@@ -82,6 +83,16 @@ per-path ACL checks.
   reconciled, which is what recovers offline or external edits.
 - **Unmounting a room is one atomic teardown**: inbound traffic gated, subscription dropped, that room's editors
   unbound, and its in-memory and persisted documents disposed before it returns.
+- **Offline create/rename intent is durable, and replay is exactly-once.** A note created or renamed while
+  disconnected is journaled to the client's `data.json` and replayed after reconnect. Each structural operation
+  carries a stable ID; the relay records a receipt (`crdt_operation_receipts`, keyed per room and operation) in the
+  same transaction as the mutation, so a retry after a lost acknowledgement returns the recorded result instead of
+  mutating or broadcasting again. Replay re-runs the full ACL check every time, so access revoked while a device
+  was offline rejects the pending change rather than honouring it. A receipt is only ever returned to the device
+  that created it. Replay requires the relay to advertise support; an older relay leaves the journal untouched
+  rather than accepting an unsafe retry.
+- **A journal entry names files, and is not encrypted at rest.** See "Token storage" below - the same `data.json`
+  caveats apply to the pending paths it records.
 
 This is the newest and least-proven surface in the sync engine, despite extended two-device testing on a real
 LAN. Keep backups for important content; existing rooms retain their saved setting and new rooms can still turn
@@ -93,6 +104,9 @@ Live editing off from **Manage**.
 - The relay only ever stores a **SHA-256 hash** of each token, never the token itself - a stolen database dump cannot be used to reconstruct working tokens.
 - The **client** side is weaker: the plugin stores its own device token in Obsidian's plugin data JSON (`data.json` under the plugin's folder in `.obsidian/plugins/vault-rooms/`), in plaintext, unencrypted at rest. This is standard practice for Obsidian plugin settings generally, but it means anyone with filesystem access to that device (or a backup of it) can read the token and use it to impersonate that device against the relay until it's revoked.
 - A leaked/stolen device should be revoked individually (see "Revocation limitations" below) - this invalidates the specific token immediately, without affecting the same user's other devices.
+- The same `data.json` also holds mounted-room bookkeeping and, when a Markdown note was created or renamed while
+  disconnected, the pending operation journal. Those entries contain **file and folder names** (old and new paths)
+  in plaintext, though never file contents. They are removed once the operation is confirmed by the relay.
 
 ## Server identity-key storage
 
@@ -122,6 +136,35 @@ Vault Rooms does not, and cannot, sandbox other Obsidian community plugins. If a
 The only endpoint that can provision privileged access with no pre-existing credential is the one-time server-owner **bootstrap**, and it is deliberately hardened: a per-process random PIN (never sent over the network unprompted - read in-process by the embedded plugin, printed to console for the standalone CLI) plus a `Host` header check, specifically to defend against a malicious web page attempting a DNS-rebinding attack against your loopback/LAN address. Once an owner exists, bootstrap is closed permanently. The other unauthenticated routes are `POST /api/join` (gated by a single-use invite token), `GET /health` (name/version only), and rate-limited `GET /api/identity/rotations` (public signed continuity records only). The rotation probe response contains no private key, device token, room data, or sync payload.
 
 `POST /api/invites/accept` normally uses the same device bearer-token authentication as other REST and WebSocket traffic. The only alternate form is strict TLS migration: over the freshly pinned HTTPS connection, the client omits `Authorization` and sends an HMAC proof bound to the device ID, stable server ID, exact invite token, and presented identity SPKI. The relay verifies that proof against the stored hash of an active plaintext-era device token and immediately rotates the token on success. A copied public `serverId` or attacker-controlled invite therefore cannot make the client disclose a reusable bearer token, and the proof cannot be replayed against another invite or identity.
+
+## Outbound update check
+
+Vault Rooms makes exactly one request that leaves your local network, and it carries no vault data.
+
+- **What:** a single anonymous `GET https://api.github.com/repos/DNDark12/vault-rooms/releases/latest` when the
+  plugin loads, using Obsidian's own `requestUrl`. If the published version is newer than the installed one, you
+  get a notice; otherwise nothing happens.
+- **What it sends:** no vault content, no room, folder, or file names, no device or server identifier, no account
+  or token, and no analytics event. GitHub sees what it would see from any HTTPS client: your IP address, the
+  standard request headers, and the fact that a request was made.
+- **What it does not do:** it never uploads, never contacts anything other than GitHub's public API, and never
+  reports usage. There is no analytics or telemetry pipeline in this project.
+- **Failure is silent.** An offline machine, a blocked domain, a rate limit, or a malformed response is swallowed,
+  so nothing about the plugin's behaviour depends on it.
+- **Blocking it is safe and supported.** If your environment forbids outbound Internet traffic from the vault
+  machine, block `api.github.com`; sync is unaffected. The check is a convenience only - Obsidian's own Community
+  Plugins updater is the actual update mechanism.
+
+If a request to a third party is unacceptable in your threat model, treat this as the one thing to block, and
+note that it is a *notification* path only: it cannot install anything, and nothing in the sync engine consults it.
+
+## Files never synced
+
+Any path segment starting with `.` is excluded from sync on both sides - the client's watcher never queues it and
+the relay rejects it. That covers the vault's own config folder, `.git/`, `node_modules/`, and ordinary dotfiles
+such as `.env` or a `.secrets/` folder. Sharing a folder therefore does not risk shipping local credentials that
+happen to sit inside it. This is a deliberate default, not a configurable filter: there is currently no way to
+opt a dotfile back into sync.
 
 ## Reporting a vulnerability
 

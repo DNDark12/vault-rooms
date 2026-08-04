@@ -7,5 +7,16 @@ confirmModulesPurge: false
 allowBuilds:
   better-sqlite3: set this to true or false
   esbuild: true
+# 3.1.5 is the fix for the advisory below and was published only days before 0.2.6 was cut, so it has
+# to be excluded here for the same reason 3.1.4 was: the release-age policy would otherwise refuse it.
 minimumReleaseAgeExclude:
   - fast-uri@3.1.4
+  - fast-uri@3.1.5
+
+# fast-uri <3.1.5 is a high-severity host-confusion advisory (GHSA-7p8r-x3mc-p8w7). It reaches this
+# repo only through the standalone relay's fastify -> @fastify/ajv-compiler chain, never the shipped
+# plugin bundle (main.js contains no fastify/ajv), but `pnpm audit --prod` is a release gate.
+# Constrained to the 3.x line on purpose: fast-uri 4.x is a major bump under fastify/ajv and is not
+# something to take while cutting a release.
+overrides:
+  fast-uri: "^3.1.5"
