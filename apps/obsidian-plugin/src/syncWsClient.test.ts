@@ -840,9 +840,175 @@ describe("RoomSyncSocket remote_file_change CRDT session gating", () => {
     expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("materialized snapshot");
     socket.disconnect();
   });
+
+  it("does not overwrite or delete a path protected by the offline CRDT journal", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Vault Rooms/demo/Projects Demo/Board.md", "local offline note");
+    const room = createRoom();
+    const engine = new VaultSyncEngine(vault, new FakeApi());
+    const applyChange = vi.spyOn(engine, "applyRemoteChange");
+    const applyDelete = vi.spyOn(engine, "applyRemoteDelete");
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      syncEngine: engine,
+      isCrdtPathProtected: (_roomId, relativePath) => relativePath === "Board.md"
+    });
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+
+    await handleMessage(remoteFileChangeMessage());
+    await handleMessage(JSON.stringify({
+      type: "remote_file_delete",
+      roomId: "room_1",
+      relativePath: "Board.md",
+      version: 2,
+      deletedBy: { userId: "user_2", displayName: "Teammate" },
+      deletedAt: "2026-01-01"
+    }));
+
+    expect(applyChange).not.toHaveBeenCalled();
+    expect(applyDelete).not.toHaveBeenCalled();
+    expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("local offline note");
+  });
+
+  it("does not apply a peer rename across a journal-protected path", async () => {
+    const handleServerMessage = vi.fn(async () => undefined);
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => createRoom(),
+      isCrdtPathProtected: (_roomId, relativePath) => relativePath === "Board.md",
+      crdt: {
+        handleServerMessage,
+        handleRoomSnapshot: () => undefined,
+        onConnected: () => undefined,
+        onDisconnected: () => undefined,
+        registerKnownEpoch: () => undefined,
+        isSessionOpen: () => false
+      }
+    });
+
+    await (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage(JSON.stringify({
+      type: "remote_crdt_rename",
+      roomId: "room_1",
+      oldRelativePath: "Board.md",
+      relativePath: "Moved.md",
+      epoch: 1,
+      renamedBy: { userId: "user_2", displayName: "Teammate" }
+    }));
+
+    expect(handleServerMessage).not.toHaveBeenCalled();
+  });
 });
 
 describe("RoomSyncSocket.reconcileSnapshot", () => {
+  it("does not apply a reconnect snapshot over an open CRDT session with offline edits", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Vault Rooms/demo/Projects Demo/Board.md", "local offline edit");
+    const room = createRoom();
+    room.files["Board.md"] = {
+      serverVersion: 5,
+      serverSha256: "server-5",
+      localSha256: "server-5",
+      dirty: false,
+      localDeleted: false
+    };
+    const api = new FakeApi();
+    const readFile = vi.spyOn(api, "readFile");
+    const engine = new VaultSyncEngine(vault, api);
+    const applyChange = vi.spyOn(engine, "applyRemoteChange");
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient,
+      syncEngine: engine,
+      crdt: new FakeCrdtBridge(true)
+    });
+
+    await (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage(JSON.stringify({
+      type: "room_snapshot",
+      requestId: "snapshot_reconnect",
+      roomId: "room_1",
+      files: [{ relativePath: "Board.md", version: 6, sha256: "server-6", deleted: false, crdtEpoch: 2 }]
+    }));
+
+    expect(readFile).not.toHaveBeenCalled();
+    expect(applyChange).not.toHaveBeenCalled();
+    expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("local offline edit");
+  });
+
+  it("still applies a reconnect snapshot without a CRDT epoch after live editing was disabled", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Vault Rooms/demo/Projects Demo/Board.md", "stale local text");
+    const room = createRoom();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const applyChange = vi.spyOn(engine, "applyRemoteChange");
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient,
+      syncEngine: engine,
+      crdt: new FakeCrdtBridge(true)
+    });
+
+    await (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage(JSON.stringify({
+      type: "room_snapshot",
+      requestId: "snapshot_crdt_disabled",
+      roomId: "room_1",
+      files: [{ relativePath: "Board.md", version: 6, sha256: "server-6", deleted: false }]
+    }));
+
+    expect(applyChange).toHaveBeenCalledOnce();
+    expect(vault.files.get("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# teammate edit\n");
+  });
+
+  it("protects journal paths and announces receipt-capable snapshot readiness only after reconciliation", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Vault Rooms/demo/Projects Demo/Offline.md", "local offline note");
+    const room = createRoom();
+    const api = new FakeApi();
+    const readFile = vi.spyOn(api, "readFile");
+    const order: string[] = [];
+    const onRoomSnapshotApplied = vi.fn((_roomId: string, receiptsSupported: boolean) => {
+      order.push(`ready:${receiptsSupported}`);
+    });
+    const socket = new RoomSyncSocket(createServer(), {
+      ...createDeps(),
+      getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient,
+      syncEngine: new VaultSyncEngine(vault, api),
+      isCrdtPathProtected: (_roomId, relativePath) => relativePath === "Offline.md",
+      onRoomSnapshotApplied,
+      crdt: {
+        handleServerMessage: async () => undefined,
+        handleRoomSnapshot: () => order.push("epochs"),
+        onConnected: () => undefined,
+        onDisconnected: () => undefined,
+        registerKnownEpoch: () => undefined,
+        isSessionOpen: () => false
+      }
+    });
+    const handleMessage = (socket as unknown as { handleMessage: (raw: string) => Promise<void> }).handleMessage.bind(socket);
+    await handleMessage(JSON.stringify({
+      type: "hello_ok",
+      requestId: "hello_1",
+      userId: "user_1",
+      deviceId: "device_1",
+      capabilities: { crdtOperationReceipts: true }
+    }));
+    await handleMessage(JSON.stringify({
+      type: "room_snapshot",
+      requestId: "snapshot_1",
+      roomId: "room_1",
+      files: [{ relativePath: "Offline.md", version: 9, sha256: "server", deleted: false, crdtEpoch: 2 }]
+    }));
+
+    expect(readFile).not.toHaveBeenCalled();
+    expect(vault.files.get("Vault Rooms/demo/Projects Demo/Offline.md")).toBe("local offline note");
+    expect(order).toEqual(["epochs", "ready:true"]);
+    expect(onRoomSnapshotApplied).toHaveBeenCalledWith("room_1", true);
+  });
+
   it("does not resurrect a remote change over a path with a pending local delete (offline delete, teammate edit, reconnect)", async () => {
     const vault = new FakeVaultAdapter();
     const api = new FakeApi();
@@ -931,7 +1097,10 @@ describe("RoomSyncSocket presence negotiation", () => {
     sockets[0]?.emit("open");
 
     const hello = sockets[0]?.sent.map((raw) => JSON.parse(raw)).find((message) => message.type === "hello");
-    expect(hello?.capabilities).toEqual({ crdt: true, presence: true });
+    // extendedBinarySync (2026-08-03 sync-widening): this build always advertises it too - see
+    // isLegacyEligiblePath's doc comment in @vault-rooms/protocol for why an older build must never
+    // advertise this unconditionally the way crdt/presence are.
+    expect(hello?.capabilities).toEqual({ crdt: true, presence: true, extendedBinarySync: true });
     socket.disconnect();
   });
 

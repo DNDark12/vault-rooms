@@ -14,6 +14,7 @@ export type ErrorCode =
   // --- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 4) ---
   | "CRDT_DISABLED"
   | "CRDT_CAPABILITY_REQUIRED"
+  | "CRDT_OPERATION_DEVICE_MISMATCH"
   | "CRDT_STALE_EPOCH"
   | "CRDT_INVALID_UPDATE"
   // Phase 6, contract 1.4 ("decided-for-now: reject"): a legacy whole-file REST PUT or WS

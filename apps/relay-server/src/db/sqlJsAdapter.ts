@@ -34,6 +34,8 @@ export interface RelayDb {
    * the caller never observes a credential/state transition that only half happened.
    */
   durable<T>(operation: () => T): Promise<T>;
+  /** Serializes a top-level relay request with other request work and any in-flight durable image. */
+  withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T>;
   close(): void | Promise<void>;
 }
 
@@ -146,6 +148,16 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
   }
 
   let flushTimer: FlushTimer | null = null;
+  let accessTail: Promise<void> = Promise.resolve();
+
+  function withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T> {
+    const run = accessTail.catch(() => undefined).then(operation);
+    accessTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
 
   function flush(): void {
     if (isMemory) {
@@ -273,10 +285,12 @@ export async function openSqlJsDb(dbPath: string, locator?: SqlJsLocator): Promi
         throw error;
       }
     },
-    close() {
+    withExclusiveAccess,
+    async close() {
       if (closed) {
         return;
       }
+      await accessTail;
       flush();
       closed = true;
       sqlDb.close();

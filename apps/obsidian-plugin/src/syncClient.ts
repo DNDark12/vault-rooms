@@ -23,7 +23,10 @@ export interface VaultAdapter {
 }
 
 export type RelayFileApi = {
-  readFile(roomId: string, relativePath: string): Promise<{ relativePath: string; version: number; sha256: string; content: string }>;
+  readFile(
+    roomId: string,
+    relativePath: string
+  ): Promise<{ relativePath: string; version: number; sha256: string; content: string; contentEncoding?: "utf8" | "base64" }>;
   writeFile(roomId: string, relativePath: string, baseVersion: number, content: string): Promise<{ ok: true; relativePath: string; version: number; sha256: string }>;
   deleteFile(roomId: string, relativePath: string, baseVersion: number): Promise<{ ok: true; relativePath: string; version: number }>;
 };
@@ -47,6 +50,25 @@ export type MountedFileState = {
    *  push attempt for this path. */
   syncError?: string;
 };
+
+export type PendingCrdtOperation =
+  | {
+      operationId: string;
+      kind: "create";
+      relativePath: string;
+      queuedAt: string;
+      attemptedAt?: string;
+      deleteAfterAck?: true;
+    }
+  | {
+      operationId: string;
+      kind: "rename";
+      oldRelativePath: string;
+      relativePath: string;
+      queuedAt: string;
+      attemptedAt?: string;
+      deleteAfterAck?: true;
+    };
 
 export type MountedRoomState = {
   roomId: string;
@@ -96,6 +118,13 @@ export type MountedRoomState = {
    * persisted opinion (falls through to `false`, the safe default, until the next refresh/mount).
    */
   canPushLocalEdits?: boolean;
+  /** Durable structural intent for CRDT create/rename operations that have not yet received an ACK.
+   *  Optional so settings written before the offline journal load as an empty queue. */
+  pendingCrdtOperations?: PendingCrdtOperation[];
+  /** Existing Markdown files changed before their CRDT session could open (for example, Obsidian
+   *  started while the relay was stopped). Snapshot/materialized-file handling protects these
+   *  paths until the next CRDT handshake has merged the on-disk text. */
+  pendingCrdtTextPaths?: string[];
 };
 
 /**
@@ -196,11 +225,20 @@ export async function createConflictCopyPath(vault: VaultAdapter, path: string, 
   return candidate;
 }
 
+// The trailing `(?:\.[^/]+)?` is optional (2026-08-03 sync-widening fix): createConflictCopyPath
+// above leaves `extension` empty for a path with no dot (e.g. `LICENSE`, now a legitimately synced
+// binary file), so its conflict copy is `LICENSE (conflict ... 2026-...)` with nothing after the
+// closing paren. Requiring an extension here used to make that copy invisible to this function -
+// treated as a brand-new file rather than a conflict copy, so it never appeared in conflict
+// resolution and got pushed upstream like any other create.
 export function isConflictCopyPath(path: string): boolean {
-  return /\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?\.[^/]+$/.test(path);
+  return /\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?(?:\.[^/]+)?$/.test(path);
 }
 
-const CONFLICT_SUFFIX = /\s\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?(?=\.[^/]+$)/;
+// Same optional-extension fix as isConflictCopyPath above, via an alternation in the lookahead
+// instead of a plain anchor: either "an extension runs to the end" (unchanged behavior) or "this is
+// already the end of the string" (the extensionless case).
+const CONFLICT_SUFFIX = /\s\(conflict .+ \d{4}-\d{2}-\d{2}T\d{6}\)(?: \d+)?(?=\.[^/]+$|$)/;
 
 /** Reverses createConflictCopyPath()'s naming: strips the inserted "(conflict ...)" suffix to get
  *  back the canonical path this conflict copy forked from. Returns null for a non-conflict path. */
@@ -236,8 +274,16 @@ export class VaultSyncEngine {
     return this.vault.read(path);
   }
 
-  private async writeContent(path: string, relativePath: string, content: string): Promise<void> {
-    if (isEligibleBinaryPath(relativePath)) {
+  /**
+   * `contentEncoding`, when supplied, is the relay's authoritative classification (2026-08-03) and
+   * is trusted over this device's own local `isEligibleBinaryPath` guess - the whole point is that a
+   * receiver shouldn't have to re-derive it from the path extension at all. Omitted only when
+   * talking to a relay that predates the field, in which case the local guess is the only option
+   * (and, for a build new enough to have this code, agrees with a same-version relay anyway).
+   */
+  private async writeContent(path: string, relativePath: string, content: string, contentEncoding?: "utf8" | "base64"): Promise<void> {
+    const isBinary = contentEncoding ? contentEncoding === "base64" : isEligibleBinaryPath(relativePath);
+    if (isBinary) {
       await this.vault.writeBinary(path, base64ToArrayBuffer(content));
       return;
     }
@@ -246,7 +292,7 @@ export class VaultSyncEngine {
 
   async applyRemoteChange(
     room: MountedRoomState,
-    remote: { relativePath: string; version: number; sha256: string; content: string },
+    remote: { relativePath: string; version: number; sha256: string; content: string; contentEncoding?: "utf8" | "base64" },
     deviceName: string,
     allowSameVersion = false
   ): Promise<void> {
@@ -263,7 +309,7 @@ export class VaultSyncEngine {
       const local = await this.readContent(path, remote.relativePath);
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
-    await this.writeContent(path, remote.relativePath, remote.content);
+    await this.writeContent(path, remote.relativePath, remote.content, remote.contentEncoding);
     room.files[remote.relativePath] = {
       serverVersion: remote.version,
       serverSha256: remote.sha256,
@@ -462,7 +508,9 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
 }
 
 function mountedPath(room: MountedRoomState, relativePath: string): string {
-  return `${stripSlashes(room.mountPath)}/${stripSlashes(relativePath)}`;
+  const mountPath = stripSlashes(room.mountPath);
+  const filePath = stripSlashes(relativePath);
+  return mountPath ? `${mountPath}/${filePath}` : filePath;
 }
 
 function stripSlashes(value: string): string {

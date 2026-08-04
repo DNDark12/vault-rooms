@@ -1,5 +1,24 @@
-import { isCrdtEligiblePath, isEligiblePath } from "@vault-rooms/protocol";
+import { isCrdtEligiblePath } from "@vault-rooms/protocol";
 import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "./syncClient.js";
+
+/** File-sync scope shared by the live watcher and mount-time enumeration. Extension is deliberately
+ * unrestricted; these exclusions are local/private/generated paths that must never enter either
+ * lane. Keeping one predicate prevents initial mount from uploading paths the watcher ignores. */
+export function isSyncableRelativePath(relativePath: string, configDir: string): boolean {
+  if (!relativePath) {
+    return false;
+  }
+  const normalizedConfigDir = configDir.replace(/^\/+|\/+$/g, "");
+  if (
+    (normalizedConfigDir && (relativePath === normalizedConfigDir || relativePath.startsWith(`${normalizedConfigDir}/`))) ||
+    relativePath.endsWith(".tmp") ||
+    isConflictCopyPath(relativePath)
+  ) {
+    return false;
+  }
+  const segments = relativePath.split("/");
+  return !segments.some((segment) => segment.startsWith(".") || segment === "node_modules");
+}
 
 /** Shared by isWatchableChange (single-path events) and classifyRenameEvent (each side of a
  *  rename/move) - one place that decides "is this vault-relative path something we sync at all".
@@ -8,24 +27,13 @@ import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type Vaul
  *  folder, so callers must always pass it explicitly rather than risk silently assuming a
  *  default that may not match. */
 function relativePathIfWatchable(path: string, room: MountedRoomState, configDir: string): string | null {
-  const prefix = `${room.mountPath.replace(/\/+$/g, "")}/`;
-  if (!path.startsWith(prefix)) {
+  const mountPath = room.mountPath.replace(/^\/+|\/+$/g, "");
+  const prefix = mountPath ? `${mountPath}/` : "";
+  if (prefix && !path.startsWith(prefix)) {
     return null;
   }
-  const relativePath = path.slice(prefix.length);
-  if (
-    !relativePath ||
-    relativePath.startsWith(`${configDir}/`) ||
-    relativePath.startsWith(".git/") ||
-    relativePath.startsWith("node_modules/") ||
-    relativePath.endsWith(".tmp") ||
-    relativePath.endsWith(".DS_Store") ||
-    isConflictCopyPath(relativePath) ||
-    // Skip file types we don't sync at all (text/markdown/canvas/json/csv plus common
-    // image formats and PDF) - avoids a doomed round trip to the server on every keystroke/save
-    // for files that were never eligible in the first place.
-    !isEligiblePath(relativePath)
-  ) {
+  const relativePath = prefix ? path.slice(prefix.length) : path;
+  if (!isSyncableRelativePath(relativePath, configDir)) {
     return null;
   }
   return relativePath;

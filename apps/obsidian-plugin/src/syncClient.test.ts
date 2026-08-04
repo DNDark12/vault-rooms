@@ -139,6 +139,29 @@ describe("plugin sync core", () => {
     ).toBe("Vault Rooms/Projects Demo");
   });
 
+  it("syncs a file mounted at the vault root without turning its path absolute", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const room = {
+      roomId: "room_1",
+      mountPath: "",
+      files: {}
+    };
+    await vault.write("Notes/Board.md", "# Root-mounted note\n");
+
+    await engine.pushLocalChange(room, "Notes/Board.md", "Owner laptop");
+
+    expect(api.writes).toEqual([
+      {
+        roomId: "room_1",
+        relativePath: "Notes/Board.md",
+        baseVersion: 0,
+        content: "# Root-mounted note\n"
+      }
+    ]);
+  });
+
   it("creates collision-safe conflict copy paths", async () => {
     const vault = new FakeVaultAdapter();
     await vault.write("Vault Rooms/demo/Board (conflict B 2026-07-06T120000).md", "old");
@@ -276,10 +299,34 @@ describe("plugin sync core", () => {
     expect([...roundTripped]).toEqual([...pngBytes]);
   });
 
+  it("round-trips a previously unlisted attachment extension through the binary lane", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const room = { roomId: "room_1", mountPath: "Vault Rooms/demo/Projects Demo", files: {} };
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff]);
+    await vault.writeBinary("Vault Rooms/demo/Projects Demo/report.docx", bytes.buffer);
+
+    api.nextWrite = { ok: true, relativePath: "report.docx", version: 1, sha256: "docx-1" };
+    await engine.pushLocalChange(room, "report.docx", "B laptop");
+    const encoded = Buffer.from(bytes).toString("base64");
+    expect(api.writes[0]?.content).toBe(encoded);
+
+    await engine.applyRemoteChange(
+      room,
+      { relativePath: "report.docx", version: 2, sha256: "docx-2", content: encoded, contentEncoding: "base64" },
+      "B laptop"
+    );
+    expect([...new Uint8Array(await vault.readBinary("Vault Rooms/demo/Projects Demo/report.docx"))]).toEqual([...bytes]);
+  });
+
   it("derives the canonical path a conflict copy forked from", () => {
     expect(canonicalPathForConflictCopy("Vault Rooms/demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe("Vault Rooms/demo/Board.md");
     expect(canonicalPathForConflictCopy("Vault Rooms/demo/Board (conflict B laptop 2026-07-06T120000) 2.md")).toBe("Vault Rooms/demo/Board.md");
     expect(canonicalPathForConflictCopy("Vault Rooms/demo/Board.md")).toBeNull();
+    expect(canonicalPathForConflictCopy("Vault Rooms/demo/LICENSE (conflict B laptop 2026-07-06T120000)")).toBe(
+      "Vault Rooms/demo/LICENSE"
+    );
   });
 
   it("resolves a conflict by keeping the local conflict copy and re-syncing it", async () => {

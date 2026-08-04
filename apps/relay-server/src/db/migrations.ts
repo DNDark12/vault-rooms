@@ -177,6 +177,22 @@ export function runMigrations(db: RelayDb): void {
       created_at text not null,
       unique(file_id, epoch)
     );
+
+    -- Exactly-once receipts for journal-backed CRDT create/rename operations. The client retries
+    -- one stable operation_id with a fresh request_id after reconnect/restart; storing the normalized
+    -- payload hash prevents an ID from ever being reused for a different mutation.
+    create table if not exists crdt_operation_receipts(
+      room_id text not null,
+      operation_id text not null,
+      device_id text not null,
+      operation_kind text not null,
+      payload_hash text not null,
+      result_json text not null,
+      created_at text not null,
+      primary key(room_id, operation_id)
+    );
+    create index if not exists idx_crdt_operation_receipts_operation_id
+      on crdt_operation_receipts(operation_id);
   `);
 
   rebuildLegacyInvitesTable(db);

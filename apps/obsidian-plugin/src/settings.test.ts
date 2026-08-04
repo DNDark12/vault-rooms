@@ -23,6 +23,99 @@ describe("embedded owner connection identity", () => {
 });
 
 describe("v0.1 plugin settings migration", () => {
+  it("leaves an absent CRDT journal absent", () => {
+    const result = migrateVaultRoomsSettings({
+      servers: [],
+      mountedRooms: {
+        room_1: { roomId: "room_1", serverId: "server_1", mountPath: "Shared", files: {} }
+      }
+    } as never);
+
+    expect(result.settings.mountedRooms.room_1).not.toHaveProperty("pendingCrdtOperations");
+  });
+
+  it("discards a non-array CRDT journal without dropping the rest of the mounted room", () => {
+    const result = migrateVaultRoomsSettings({
+      servers: [],
+      mountedRooms: {
+        room_1: {
+          roomId: "room_1",
+          serverId: "server_1",
+          mountPath: "Shared",
+          files: {
+            "Kept.md": { serverVersion: 3, serverSha256: "sha", localSha256: "sha", dirty: false }
+          },
+          pendingCrdtOperations: { operationId: "not-an-array" }
+        }
+      }
+    } as never);
+
+    expect(result.migratedLegacy).toBe(true);
+    expect(result.settings.mountedRooms.room_1).toMatchObject({
+      roomId: "room_1",
+      mountPath: "Shared",
+      files: { "Kept.md": expect.objectContaining({ serverVersion: 3 }) },
+      pendingCrdtOperations: []
+    });
+  });
+
+  it("retains valid CRDT journal entries and discards malformed persisted operations", () => {
+    const result = migrateVaultRoomsSettings({
+      servers: [],
+      mountedRooms: {
+        room_1: {
+          roomId: "room_1",
+          serverId: "server_1",
+          mountPath: "Shared",
+          files: {},
+          pendingCrdtOperations: [
+            {
+              operationId: "op_valid",
+              kind: "rename",
+              oldRelativePath: "Old.md",
+              relativePath: "New.md",
+              queuedAt: "2026-08-03T00:00:00.000Z",
+              attemptedAt: "2026-08-03T00:00:01.000Z",
+              deleteAfterAck: true
+            },
+            { operationId: "", kind: "create", relativePath: "Bad.md", queuedAt: "today" },
+            { operationId: "op_bad_path", kind: "rename", oldRelativePath: "../escape.md", relativePath: "New.md", queuedAt: "today" },
+            null
+          ]
+        }
+      }
+    } as never);
+
+    expect(result.migratedLegacy).toBe(true);
+    expect(result.settings.mountedRooms.room_1?.pendingCrdtOperations).toEqual([
+      {
+        operationId: "op_valid",
+        kind: "rename",
+        oldRelativePath: "Old.md",
+        relativePath: "New.md",
+        queuedAt: "2026-08-03T00:00:00.000Z",
+        attemptedAt: "2026-08-03T00:00:01.000Z",
+        deleteAfterAck: true
+      }
+    ]);
+  });
+
+  it("sanitizes and deduplicates pending CRDT text paths", () => {
+    const result = migrateVaultRoomsSettings({
+      mountedRooms: {
+        room_1: {
+          roomId: "room_1",
+          mountPath: "Shared",
+          files: {},
+          pendingCrdtTextPaths: ["Board.md", "Board.md", "../escape.md", "image.png", 42]
+        }
+      }
+    } as never);
+
+    expect(result.settings.mountedRooms.room_1?.pendingCrdtTextPaths).toEqual(["Board.md"]);
+    expect(result.migratedLegacy).toBe(true);
+  });
+
   it("quarantines malformed server entries without dropping valid connections", () => {
     const valid = {
       id: "dev_valid",

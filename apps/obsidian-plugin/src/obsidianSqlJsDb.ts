@@ -42,6 +42,7 @@ export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, 
   let pendingDurableOperations = 0;
   let insideDurableOperation = false;
   let durableTail: Promise<void> = Promise.resolve();
+  let accessTail: Promise<void> = Promise.resolve();
 
   function assertOpen(): void {
     if (closed) {
@@ -144,6 +145,18 @@ export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, 
     };
   }
 
+  function withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T> {
+    const run = accessTail.catch(() => undefined).then(async () => {
+      await durableTail;
+      return operation();
+    });
+    accessTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
   return {
     prepare,
     exec(sql: string) {
@@ -201,10 +214,12 @@ export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, 
       );
       return run;
     },
+    withExclusiveAccess,
     async close() {
       if (closed) {
         return;
       }
+      await accessTail;
       await durableTail;
       await flush();
       if (pendingFlush) {

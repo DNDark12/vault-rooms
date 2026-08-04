@@ -22,7 +22,15 @@ export type SyncConnection = {
   // `presence` (live cursors, docs/superpowers/specs/2026-07-28-live-cursors-design.md) is clamped
   // to false unless `crdt` is also true: presence is scoped to live CRDT documents, so there is
   // nothing for a whole-file-lane connection to attach a caret to.
-  capabilities: { crdt: boolean; presence: boolean };
+  //
+  // `extendedBinarySync` (2026-08-03 sync-widening) - defaults to false until a "hello" advertises
+  // it, same as crdt/presence. Gates room_snapshot's file list and remote_file_change's fanout (see
+  // syncServer.ts) so a connection that hasn't advertised it never learns a legacy-ineligible path
+  // (@vault-rooms/protocol's isLegacyEligiblePath) exists in the room at all - the same
+  // invisible-unless-you-opt-in treatment CRDT already gets from older clients, and for the same
+  // reason: a client that doesn't understand the new default-to-binary rule would silently corrupt
+  // such a file on disk rather than merely fail to sync it.
+  capabilities: { crdt: boolean; presence: boolean; extendedBinarySync: boolean };
 };
 
 export class ConnectionRegistry {

@@ -6,8 +6,18 @@ import type { ErrorCode } from "./errors.js";
  *
  *  `presence` (live cursors, docs/superpowers/specs/2026-07-28-live-cursors-design.md) is only
  *  meaningful alongside `crdt: true` - the relay clamps it to false otherwise, since presence is
- *  scoped to live CRDT documents and there is nothing to attach a caret to on the whole-file lane. */
-export type SyncClientCapabilities = { crdt?: boolean; presence?: boolean };
+ *  scoped to live CRDT documents and there is nothing to attach a caret to on the whole-file lane.
+ *
+ *  `extendedBinarySync` (2026-08-03 sync-widening) advertises that this connection understands the
+ *  default-to-binary rule in @vault-rooms/protocol's paths.ts - i.e. it knows any extension outside
+ *  the pre-widening whitelist (isLegacyEligiblePath) is base64, not UTF-8 text. Absent/false is the
+ *  safe default: the relay never lists, sends, or serves content for a legacy-ineligible path to a
+ *  connection/request that hasn't advertised it, exactly the same "invisible unless you speak the
+ *  new lane" treatment CRDT already gets from older clients - see syncServer.ts's room_snapshot
+ *  filtering and connectionFilter on remote_file_change, and file.routes.ts's GET routes. Never
+ *  assume true: a client that mishandles this corrupts the file on disk (writes a raw base64 string
+ *  as if it were the file's real UTF-8 content) rather than merely failing loudly. */
+export type SyncClientCapabilities = { crdt?: boolean; presence?: boolean; extendedBinarySync?: boolean };
 
 /**
  * A cursor as it crosses the wire: two *JSON-serialized* Yjs relative positions
@@ -108,12 +118,25 @@ export type SyncClientMessage =
   | { type: "hello"; requestId: string; token: string; client: { kind: "obsidian-plugin"; version: string; deviceName: string }; capabilities?: SyncClientCapabilities }
   | { type: "subscribe_room"; requestId: string; roomId: string }
   | { type: "unsubscribe_room"; requestId: string; roomId: string }
-  | { type: "file_change"; requestId: string; roomId: string; relativePath: string; baseVersion: number; content: string }
+  | {
+      type: "file_change";
+      requestId: string;
+      roomId: string;
+      relativePath: string;
+      baseVersion: number;
+      content: string;
+      /** Optional, self-reported (2026-08-03). The relay always re-derives the authoritative
+       *  encoding from the path itself (contentTypeForPath) rather than trusting this - it exists so
+       *  a receiver doesn't have to. See remote_file_change's identical field for why. */
+      contentEncoding?: "utf8" | "base64";
+    }
   | { type: "file_delete"; requestId: string; roomId: string; relativePath: string; baseVersion: number }
   // --- CRDT sync (contract 1.3/1.8/1.10) - all scoped by roomId + relativePath + epoch. ---
   | {
       type: "crdt_create";
       requestId: string;
+      /** Stable across reconnect/restart retries. Optional for pre-journal clients. */
+      operationId?: string;
       roomId: string;
       relativePath: string;
       /**
@@ -135,12 +158,19 @@ export type SyncClientMessage =
   // delete-old+create-new translation for a rename inside a CRDT-enabled room: preserves the
   // file's stable id/epoch/history (CrdtDocManager caches by (fileId, epoch), never by path, so a
   // pure path change needs no doc/epoch churn at all - see relayRepository.ts's renameFile). ---
-  | { type: "crdt_rename"; requestId: string; roomId: string; oldRelativePath: string; relativePath: string }
+  | { type: "crdt_rename"; requestId: string; operationId?: string; roomId: string; oldRelativePath: string; relativePath: string }
   // --- Live cursors / note presence (docs/superpowers/specs/2026-07-28-live-cursors-design.md) ---
   | PresenceSet;
 
 export type SyncServerMessage =
-  | { type: "hello_ok"; requestId: string; userId: string; deviceId: string }
+  | {
+      type: "hello_ok";
+      requestId: string;
+      userId: string;
+      deviceId: string;
+      /** Relay-owned capabilities. Optional so older hello_ok frames stay valid. */
+      capabilities?: { crdtOperationReceipts?: boolean };
+    }
   | {
       type: "hello_error";
       requestId?: string;
@@ -164,6 +194,13 @@ export type SyncServerMessage =
       version: number;
       sha256: string;
       content: string;
+      /** Which lane `content` came through - "utf8" (raw text) or "base64" (see paths.ts's
+       *  contentTypeForPath). Added 2026-08-03 alongside the sync-widening so a receiver never has
+       *  to re-derive this from the path extension using its own (possibly stale) copy of that
+       *  logic - it just trusts the sender's/relay's classification. Optional so a relay predating
+       *  this field still parses under this type; a receiver that doesn't see it falls back to its
+       *  own local extension-based guess, same as before this field existed. */
+      contentEncoding?: "utf8" | "base64";
       updatedBy: { userId: string; displayName: string };
       updatedAt: string;
       /** Present when this path is a live CRDT document (creation announce and materialized fanout).

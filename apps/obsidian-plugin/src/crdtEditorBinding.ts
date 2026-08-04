@@ -224,7 +224,12 @@ export class CrdtEditorController {
     const presence = session.presence.attachView(view);
     current.presence = presence;
     try {
+      const editorText = view.state.doc.toString();
+      const sessionText = session.ytext.toString();
       view.dispatch({
+        ...(editorText === sessionText
+          ? {}
+          : { changes: { from: 0, to: editorText.length, insert: sessionText } }),
         effects: this.compartment.reconfigure(buildCrdtEditorExtension(session.ytext, undoManager, presence))
       });
     } catch (error) {

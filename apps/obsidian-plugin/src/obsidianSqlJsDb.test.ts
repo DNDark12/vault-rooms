@@ -519,4 +519,33 @@ describe("openObsidianSqlJsDb - flush serialization (A2)", () => {
     expect(db.prepare("select value from kv where id = 1").get()).toEqual({ value: "stable" });
     await db.close();
   });
+
+  it("queues a relay request behind durable persistence instead of rejecting its write", async () => {
+    const { wasmBinary, SQL } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    db.prepare("insert into kv (id, value) values (1, ?)").run("stable");
+    await db.flush();
+
+    adapter.writeDelaysMs = [0, 100];
+    const durable = db.durable(() => db.prepare("update kv set value = ? where id = 1").run("security-new"));
+    await vi.waitFor(() => expect(db.prepare("select value from kv where id = 1").get()).toEqual({ value: "security-new" }));
+
+    const queuedWrite = db.withExclusiveAccess(() =>
+      db.prepare("update kv set value = ? where id = 1").run("later-request")
+    );
+    await expect(Promise.all([durable, queuedWrite])).resolves.toEqual([{ changes: 1 }, { changes: 1 }]);
+    await db.flush();
+
+    expect(db.prepare("select value from kv where id = 1").get()).toEqual({ value: "later-request" });
+    const persisted = new SQL.Database(new Uint8Array(adapter.store.get(dbPath)!));
+    try {
+      expect(selectValue(persisted)).toEqual({ value: "later-request" });
+    } finally {
+      persisted.close();
+      await db.close();
+    }
+  });
 });

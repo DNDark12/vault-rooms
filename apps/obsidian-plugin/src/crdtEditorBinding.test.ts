@@ -167,6 +167,24 @@ describe("buildCrdtEditorExtension (via a real CrdtSessionManager session)", () 
 });
 
 describe("CrdtEditorController.syncOpenViews", () => {
+  it("aligns a stale cold-start editor with the merged Y.Text before binding it", async () => {
+    const manager = makeManager("merged CRDT text");
+    manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);
+    const controller = new CrdtEditorController({
+      getSessionManager: () => manager,
+      resolveCrdtTarget: (path) => (path === "Rooms/Demo/Board.md" ? { roomId: "room_1", relativePath: "Board.md" } : undefined)
+    });
+    const view = new EditorView({
+      state: EditorState.create({ doc: "stale editor text", extensions: [controller.extension()] })
+    });
+
+    await controller.syncOpenViews([{ vaultPath: "Rooms/Demo/Board.md", view }]);
+
+    expect(view.state.doc.toString()).toBe("merged CRDT text");
+    expect(controller.isBound(view)).toBe(true);
+    view.destroy();
+  });
+
   it("binds a CRDT-eligible file's session to an open view via the shared compartment", async () => {
     const manager = makeManager();
     manager.handleRoomSnapshot("room_1", [{ relativePath: "Board.md", crdtEpoch: 0 }]);

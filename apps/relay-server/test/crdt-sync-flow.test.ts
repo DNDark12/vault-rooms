@@ -165,6 +165,35 @@ function emptyStateVectorBase64(): string {
 }
 
 describe("CRDT sync flow (Phase 4)", () => {
+  it("advertises durable structural-operation receipts in hello_ok", async () => {
+    const { app, owner } = await setupCrdtRoom();
+    const socket = await connect(app);
+    socket.sendJson({
+      type: "hello",
+      requestId: "h-capabilities",
+      token: owner.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "device" },
+      capabilities: { crdt: true }
+    });
+
+    expect(await nextMessage(socket, "hello_ok")).toMatchObject({
+      requestId: "h-capabilities",
+      capabilities: { crdtOperationReceipts: true }
+    });
+
+    socket.sendJson({
+      type: "hello",
+      requestId: "h-capabilities-again",
+      token: owner.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "device" },
+      capabilities: { crdt: true }
+    });
+    expect(await nextMessage(socket, "hello_ok")).toMatchObject({
+      requestId: "h-capabilities-again",
+      capabilities: { crdtOperationReceipts: true }
+    });
+  });
+
   it("crdt_create allocates epoch 0 and acks with the file's id as documentId", async () => {
     const { app, owner, room } = await setupCrdtRoom();
     const socket = await connect(app);
@@ -175,6 +204,203 @@ describe("CRDT sync flow (Phase 4)", () => {
 
     expect(created).toMatchObject({ requestId: "c1", roomId: room.id, relativePath: "note.md", epoch: 0 });
     expect(typeof created.documentId).toBe("string");
+  });
+
+  it("replays a journal-backed crdt_create receipt without creating or broadcasting twice", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const creator = await connect(app);
+    const peer = await connect(app);
+    await helloAndSubscribe(creator, owner.deviceToken, room.id);
+    await helloAndSubscribe(peer, owner.deviceToken, room.id);
+
+    creator.sendJson({
+      type: "crdt_create",
+      requestId: "create-first-attempt",
+      operationId: "op-create-once",
+      roomId: room.id,
+      relativePath: "offline-note.md"
+    });
+    const firstAck = await nextMessage(creator, "crdt_created");
+    await nextMessage(peer, "remote_file_change");
+
+    creator.sendJson({
+      type: "crdt_create",
+      requestId: "create-retry",
+      operationId: "op-create-once",
+      roomId: room.id,
+      relativePath: "offline-note.md"
+    });
+    const retryAck = await nextMessage(creator, "crdt_created");
+
+    expect(retryAck).toMatchObject({
+      requestId: "create-retry",
+      roomId: firstAck.roomId,
+      relativePath: firstAck.relativePath,
+      documentId: firstAck.documentId,
+      epoch: firstAck.epoch,
+      adopted: firstAck.adopted
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(messageQueues.get(peer)?.filter((message) => (message as { type?: string }).type === "remote_file_change")).toHaveLength(0);
+  });
+
+  it("resolves an existing structural receipt after live editing is disabled", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "create-before-disable",
+      operationId: "op-before-disable",
+      roomId: room.id,
+      relativePath: "offline.md"
+    });
+    const first = await nextMessage(socket, "crdt_created");
+    await app.inject({
+      method: "PATCH",
+      url: `/api/rooms/${room.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: {
+        name: room.name,
+        type: room.type,
+        sourcePath: room.sourcePath,
+        mountName: room.mountName,
+        crdtEnabled: false
+      }
+    });
+
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "resolve-after-disable",
+      operationId: "op-before-disable",
+      roomId: room.id,
+      relativePath: "offline.md"
+    });
+    expect(await nextMessage(socket, "crdt_created")).toMatchObject({
+      requestId: "resolve-after-disable",
+      documentId: first.documentId,
+      relativePath: "offline.md"
+    });
+
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "missing-after-disable",
+      operationId: "op-never-committed",
+      roomId: room.id,
+      relativePath: "missing.md"
+    });
+    expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({
+      requestId: "missing-after-disable",
+      code: "CRDT_DISABLED"
+    });
+  });
+
+  it("rejects an operationId reused with a different normalized create payload", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "create-first",
+      operationId: "op-create-payload",
+      roomId: room.id,
+      relativePath: "first.md"
+    });
+    await nextMessage(socket, "crdt_created");
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "create-invalid-reuse",
+      operationId: "op-create-payload",
+      roomId: room.id,
+      relativePath: "different.md"
+    });
+
+    expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({
+      requestId: "create-invalid-reuse",
+      code: "VALIDATION_ERROR"
+    });
+  });
+
+  it("rejects an operationId reused by the same device in a different room", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const secondRoom = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Second", type: "folder", sourcePath: "Second", mountName: "Second", capabilities: [] }
+      })
+    ).json().room;
+    await app.inject({
+      method: "PATCH",
+      url: `/api/rooms/${secondRoom.id}`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: {
+        name: secondRoom.name,
+        type: secondRoom.type,
+        sourcePath: secondRoom.sourcePath,
+        mountName: secondRoom.mountName,
+        crdtEnabled: true
+      }
+    });
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "room-one-create",
+      operationId: "op-global-identity",
+      roomId: room.id,
+      relativePath: "First.md"
+    });
+    await nextMessage(socket, "crdt_created");
+    socket.sendJson({ type: "subscribe_room", requestId: "subscribe-second", roomId: secondRoom.id });
+    await nextMessage(socket, "room_snapshot");
+    socket.sendJson({
+      type: "crdt_create",
+      requestId: "room-two-reuse",
+      operationId: "op-global-identity",
+      roomId: secondRoom.id,
+      relativePath: "Second.md"
+    });
+
+    expect(await nextMessage(socket, "crdt_rejected")).toMatchObject({
+      requestId: "room-two-reuse",
+      code: "VALIDATION_ERROR"
+    });
+  });
+
+  it("rejects another device replaying a structural operation receipt", async () => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const member = await addMember(app, owner, room, "editor");
+    const ownerSocket = await connect(app);
+    const memberSocket = await connect(app);
+    await helloAndSubscribe(ownerSocket, owner.deviceToken, room.id);
+    await helloAndSubscribe(memberSocket, member.deviceToken, room.id);
+
+    ownerSocket.sendJson({
+      type: "crdt_create",
+      requestId: "owner-create",
+      operationId: "op-owned-by-device",
+      roomId: room.id,
+      relativePath: "owned-operation.md"
+    });
+    await nextMessage(ownerSocket, "crdt_created");
+    await nextMessage(memberSocket, "remote_file_change");
+
+    memberSocket.sendJson({
+      type: "crdt_create",
+      requestId: "member-replay",
+      operationId: "op-owned-by-device",
+      roomId: room.id,
+      relativePath: "owned-operation.md"
+    });
+    expect(await nextMessage(memberSocket, "crdt_rejected")).toMatchObject({
+      requestId: "member-replay",
+      code: "CRDT_OPERATION_DEVICE_MISMATCH"
+    });
   });
 
   // Seventh hardware-testing round (2026-07-24): two devices creating a note at the same path are
@@ -807,6 +1033,48 @@ describe("CRDT sync flow (Phase 4)", () => {
   });
 
   describe("[fourth hardware-testing round] crdt_rename - atomic rename replacing delete-old+create-new", () => {
+    it("replays a journal-backed crdt_rename receipt without renaming or broadcasting twice", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const renamer = await connect(app);
+      const peer = await connect(app);
+      await helloAndSubscribe(renamer, owner.deviceToken, room.id);
+      await helloAndSubscribe(peer, owner.deviceToken, room.id);
+      renamer.sendJson({ type: "crdt_create", requestId: "create", roomId: room.id, relativePath: "before.md" });
+      await nextMessage(renamer, "crdt_created");
+      await nextMessage(peer, "remote_file_change");
+
+      renamer.sendJson({
+        type: "crdt_rename",
+        requestId: "rename-first-attempt",
+        operationId: "op-rename-once",
+        roomId: room.id,
+        oldRelativePath: "before.md",
+        relativePath: "after.md"
+      });
+      const firstAck = await nextMessage(renamer, "crdt_renamed");
+      await nextMessage(peer, "remote_crdt_rename");
+
+      renamer.sendJson({
+        type: "crdt_rename",
+        requestId: "rename-retry",
+        operationId: "op-rename-once",
+        roomId: room.id,
+        oldRelativePath: "before.md",
+        relativePath: "after.md"
+      });
+      const retryAck = await nextMessage(renamer, "crdt_renamed");
+
+      expect(retryAck).toMatchObject({
+        requestId: "rename-retry",
+        roomId: firstAck.roomId,
+        oldRelativePath: firstAck.oldRelativePath,
+        relativePath: firstAck.relativePath,
+        epoch: firstAck.epoch
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(messageQueues.get(peer)?.filter((message) => (message as { type?: string }).type === "remote_crdt_rename")).toHaveLength(0);
+    });
+
     it("renames in place, preserving the file's epoch/identity and content (no re-seed, no data loss)", async () => {
       const { app, owner, room } = await setupCrdtRoom();
       const socket = await connect(app);

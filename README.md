@@ -179,9 +179,15 @@ Vault Rooms never grants permission to run someone else's plugin code.
 
 - No end-to-end encryption and no encrypted-at-rest database. The relay and authorized clients see plaintext.
 - No cloud relay, NAT traversal, or mobile support. Desktop, one LAN.
-- Synced file types: Markdown, `.txt`, `.canvas`, `.json`, `.csv`, `.excalidraw`, common images, and `.pdf`.
-  Other binaries (audio, video, Office documents) are not synced. Images and PDFs count against the size limit at
-  roughly 1.33x their real size.
+- Synced file types: every regular file in a room's folder, with one exception (below). Markdown, `.txt`,
+  `.canvas`, `.json`, `.csv`, and `.excalidraw` sync as UTF-8 text; every other extension (images, PDFs, audio,
+  video, Office documents, anything unlisted) syncs as base64-encoded binary by default. Binary content counts
+  against the size limit at roughly 1.33x its real size. A device predating this widening never sees a file
+  outside the old whitelist at all (it simply doesn't learn the path exists), rather than receiving content it
+  would misinterpret - see `extendedBinarySync` in the sync protocol.
+- Dotfiles and dotfolders (any path segment starting with `.`, e.g. `.env`, `.secrets/`) never sync, deliberately -
+  sharing a room's folder shouldn't risk shipping a teammate's local secrets file. This is the same rule that
+  already excludes the vault's own config folder and `.git`/`node_modules`.
 - Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
 - Character-level co-editing and cursor presence only exist when a room has Live editing enabled, and only for Markdown.
   Cursor presence is ephemeral: it appears only for authorized teammates who currently have the same note open,

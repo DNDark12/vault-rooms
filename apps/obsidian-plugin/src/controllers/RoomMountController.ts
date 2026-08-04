@@ -1,6 +1,7 @@
 import { Notice } from "obsidian";
-import { isEligiblePath } from "@vault-rooms/protocol";
+import { isCrdtEligiblePath } from "@vault-rooms/protocol";
 import type { RoomSummary } from "../apiClient.js";
+import { isSyncableRelativePath } from "../fileWatcher.js";
 import {
   canonicalPathForConflictCopy,
   isConflictCopyPath,
@@ -17,6 +18,8 @@ export type RoomMountControllerDeps = Pick<
 > & {
   vaultAdapter: VaultAdapter;
   getSyncEngine(): VaultSyncEngine;
+  /** Opens/seeds a pre-existing local Markdown note through the CRDT lane during initial mount. */
+  ensureCrdtSession(roomId: string, relativePath: string, brandNewNote: boolean): Promise<void>;
   stopWatchingRoom(roomId: string): void;
   watchMountedRoom(roomId: string): void;
   subscribeRoom(roomId: string): void;
@@ -81,10 +84,12 @@ export class RoomMountController {
     // fallback-resolver is needed here - `permissions` is always present.
     const canPushLocalEdits = room.permissions.includes("sync:push");
     state.canPushLocalEdits = canPushLocalEdits;
+    state.crdtEnabled = room.crdtEnabled;
 
     // Capture the engine once for this whole mount, so a mid-mount server switch cannot route the
     // remainder of the operation through the newly-active server's engine.
     const syncEngine = this.deps.getSyncEngine();
+    let failedInitialFileCount = 0;
     // The watcher (which normally marks an edited file dirty - see pushCoordinator.ts) is off
     // while a room is unmounted, so an edit made during that window would otherwise be invisible
     // here: the listing loop below only compares against the server's version and would skip a
@@ -128,12 +133,17 @@ export class RoomMountController {
           continue;
         }
         const relativePath = mountPath ? localPath.slice(mountPath.length + 1) : localPath;
-        if (!relativePath || knownRelativePaths.has(relativePath) || !isEligiblePath(relativePath)) {
+        if (!isSyncableRelativePath(relativePath, configDir) || knownRelativePaths.has(relativePath)) {
           continue;
         }
         try {
-          await syncEngine.pushLocalChange(state, relativePath, server.deviceName);
+          if (room.crdtEnabled && isCrdtEligiblePath(relativePath)) {
+            await this.deps.ensureCrdtSession(room.id, relativePath, true);
+          } else {
+            await syncEngine.pushLocalChange(state, relativePath, server.deviceName);
+          }
         } catch (error) {
+          failedInitialFileCount += 1;
           console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
         }
       }
@@ -143,7 +153,11 @@ export class RoomMountController {
     this.deps.subscribeRoom(room.id);
     await this.deps.saveSettings();
     this.deps.renderOpenRoomsViews();
-    new Notice(`Mounted ${room.name}`);
+    new Notice(
+      failedInitialFileCount === 0
+        ? `Mounted ${room.name}`
+        : `Mounted ${room.name}, but ${failedInitialFileCount} file${failedInitialFileCount === 1 ? "" : "s"} couldn't sync. Check the console for details.`
+    );
   }
 
   /**

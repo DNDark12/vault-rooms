@@ -45,6 +45,11 @@ export type RoomSyncSocketDeps = {
   onSecurityUpgradeAvailable?: () => void;
   onPinnedTransportFailure?: (error: Error) => Promise<"retry" | "normal" | "stop">;
   onHelloOk?: () => void;
+  /** Pending offline CRDT structural/content paths are not owned by snapshot CAS reconciliation. */
+  isCrdtPathProtected?: (roomId: string, relativePath: string) => boolean;
+  /** Fired after epoch registration and CAS reconciliation. Must stay synchronous/non-blocking:
+   *  replay waits for later ACK frames, which this socket can only process after this handler returns. */
+  onRoomSnapshotApplied?: (roomId: string, crdtOperationReceiptsSupported: boolean) => void;
   /** Called when the server pushes a live CRDT room-mode toggle (contract 1.11) for a room. Lets
    *  the caller mirror the new `crdtEnabled` flag onto persisted `MountedRoomState`/`visibleRooms`
    *  immediately, rather than waiting on the follow-up snapshot re-subscribe below to eventually
@@ -84,6 +89,7 @@ export class RoomSyncSocket {
   private state: SyncConnectionState = "offline";
   private handlingPinnedFailure = false;
   private upgradeProbeRequested = false;
+  private crdtOperationReceiptsSupported = false;
 
   constructor(
     private readonly server: ServerConnection,
@@ -129,6 +135,7 @@ export class RoomSyncSocket {
     socket?.close();
     this.helloAcked = false;
     this.upgradeProbeRequested = false;
+    this.crdtOperationReceiptsSupported = false;
     this.setState("offline");
   }
 
@@ -214,8 +221,11 @@ export class RoomSyncSocket {
         // crdtEnabled simply never receives any crdt_*/remote_crdt_update message regardless of
         // what a connection advertises here - advertising true is safe and unconditional.
         // Presence rides the same unconditional advertisement as the CRDT lane: this build always
-      // speaks both, and the relay clamps presence to false if crdt is ever absent.
-      capabilities: { crdt: true, presence: true }
+        // speaks both, and the relay clamps presence to false if crdt is ever absent.
+        // extendedBinarySync (2026-08-03 sync-widening): this build understands the default-to-
+        // binary rule (@vault-rooms/protocol's isEligibleBinaryPath), so it's safe to receive fanout
+        // and room_snapshot entries for any path, not just the pre-widening whitelist.
+        capabilities: { crdt: true, presence: true, extendedBinarySync: true }
       });
       this.clearHelloAckTimer();
       this.helloAckTimer = window.setTimeout(() => {
@@ -242,6 +252,7 @@ export class RoomSyncSocket {
       this.socket = null;
       this.helloAcked = false;
       this.upgradeProbeRequested = false;
+      this.crdtOperationReceiptsSupported = false;
       // Announced here, not only from `setState`, because several paths below leave the state alone: the
       // pinned-transport branch returns early to let its classifier decide, and its `retry`/`normal`
       // decisions reopen the socket without ever leaving `"connected"`. The socket is gone either way, so
@@ -356,6 +367,7 @@ export class RoomSyncSocket {
         this.helloAcked = true;
         this.reconnectDelayMs = MIN_RECONNECT_DELAY_MS;
         this.setState("connected");
+        this.crdtOperationReceiptsSupported = message.capabilities?.crdtOperationReceipts === true;
         this.deps.onHelloOk?.();
         if (this.server.securityMode === "plain" && !this.upgradeProbeRequested) {
           this.upgradeProbeRequested = true;
@@ -395,12 +407,14 @@ export class RoomSyncSocket {
         // session actually opens for it.
         this.deps.crdt?.handleRoomSnapshot(message.roomId, message.files);
         await this.enqueueRemoteApply(() => this.reconcileSnapshot(message.roomId, message.files));
+        this.deps.onRoomSnapshotApplied?.(message.roomId, this.crdtOperationReceiptsSupported);
         return;
       }
       case "remote_file_change": {
         await this.enqueueRemoteApply(async () => {
           const room = this.deps.getMountedRoom(message.roomId);
           if (!room) return;
+          if (this.deps.isCrdtPathProtected?.(message.roomId, message.relativePath)) return;
           // Second-hardware-testing-round item 1: the relay now sends this materialized broadcast
           // to every subscriber with file:read (CRDT-capable or not - see relayCore.ts's
           // createCrdtMaterializedHandler), since a CRDT-capable device with no open session for
@@ -425,7 +439,13 @@ export class RoomSyncSocket {
           }
           await this.deps.syncEngine.applyRemoteChange(
             room,
-            { relativePath: message.relativePath, version: message.version, sha256: message.sha256, content: message.content },
+            {
+              relativePath: message.relativePath,
+              version: message.version,
+              sha256: message.sha256,
+              content: message.content,
+              contentEncoding: message.contentEncoding
+            },
             message.updatedBy.displayName
           );
           this.deps.onApplied();
@@ -436,6 +456,7 @@ export class RoomSyncSocket {
         await this.enqueueRemoteApply(async () => {
           const room = this.deps.getMountedRoom(message.roomId);
           if (!room) return;
+          if (this.deps.isCrdtPathProtected?.(message.roomId, message.relativePath)) return;
           await this.deps.syncEngine.applyRemoteDelete(
             room,
             { relativePath: message.relativePath, version: message.version },
@@ -491,6 +512,13 @@ export class RoomSyncSocket {
         if (!this.deps.getMountedRoom(message.roomId)) {
           return;
         }
+        if (
+          message.type === "remote_crdt_rename" &&
+          (this.deps.isCrdtPathProtected?.(message.roomId, message.oldRelativePath) ||
+            this.deps.isCrdtPathProtected?.(message.roomId, message.relativePath))
+        ) {
+          return;
+        }
         await this.enqueueRemoteApply(() => this.deps.crdt?.handleServerMessage(message) ?? Promise.resolve());
         return;
       }
@@ -518,7 +546,7 @@ export class RoomSyncSocket {
 
   private async reconcileSnapshot(
     roomId: string,
-    files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean }>
+    files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean; crdtEpoch?: number }>
   ): Promise<void> {
     const room = this.deps.getMountedRoom(roomId);
     if (!room) {
@@ -528,6 +556,9 @@ export class RoomSyncSocket {
     let changed = false;
     for (const file of files) {
       try {
+        if (this.deps.isCrdtPathProtected?.(roomId, file.relativePath)) {
+          continue;
+        }
         const local = room.files[file.relativePath];
         if (local?.dirty || local?.localDeleted) {
           // A local edit or delete is pending push; let the normal push/conflict path reconcile
@@ -540,6 +571,12 @@ export class RoomSyncSocket {
             await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync", true);
             changed = true;
           }
+          continue;
+        }
+        // A live CRDT session owns this path. Its reconnect handshake merges the authoritative
+        // Y.Doc state in both directions; applying the coarser materialized snapshot to disk first
+        // can make Obsidian reload the bound editor and erase edits made while disconnected.
+        if (file.crdtEpoch !== undefined && this.deps.crdt?.isSessionOpen(roomId, file.relativePath)) {
           continue;
         }
         if (!local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {

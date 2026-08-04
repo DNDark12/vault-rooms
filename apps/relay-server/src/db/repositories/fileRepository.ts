@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { AppError, contentTypeForPath, createId } from "@vault-rooms/protocol";
-import type { FileRow, FileVersionWithContentRow, RoomRow } from "../schema.js";
+import type { CrdtOperationReceiptRow, FileRow, FileVersionWithContentRow, RoomRow } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
 
 export type FileWriteResult = {
@@ -22,6 +22,39 @@ export type FileRenameResult = {
   oldRelativePath: string;
   relativePath: string;
   epoch: number;
+};
+
+export type CrdtCreateResult = {
+  fileId: string;
+  epoch: number;
+  relativePath: string;
+};
+
+export type IdempotentCrdtCreateResult = {
+  result: CrdtCreateResult;
+  adopted: boolean;
+  replayed: boolean;
+};
+
+export type IdempotentCrdtRenameResult = {
+  result: FileRenameResult;
+  replayed: boolean;
+};
+
+export type CrdtRenameInput = {
+  roomId: string;
+  oldRelativePath: string;
+  relativePath: string;
+  actorUserId: string;
+  actorDisplayName?: string;
+};
+
+export type CrdtCreateInput = {
+  roomId: string;
+  relativePath: string;
+  actorUserId: string;
+  actorDisplayName?: string;
+  adoptIfExists?: boolean;
 };
 
 export type AuditInput = {
@@ -191,14 +224,34 @@ export class RelayFileRepository {
    * cache stays valid across the rename automatically. Does not bump `version`: content is
    * unchanged, only the path is, so no new `file_versions` row is written either.
    */
-  renameFile(input: {
-    roomId: string;
-    oldRelativePath: string;
-    relativePath: string;
-    actorUserId: string;
-    actorDisplayName?: string;
-  }): FileRenameResult {
-    const rename = this.db.transaction(() => {
+  renameFile(input: CrdtRenameInput): FileRenameResult {
+    return this.db.transaction(() => this.renameFileStatements(input))();
+  }
+
+  renameCrdtFileIdempotent(input: CrdtRenameInput & { operationId: string; deviceId: string }): IdempotentCrdtRenameResult {
+    assertValidOperationId(input.operationId);
+    return this.db.transaction(() => {
+      const payloadHash = structuralPayloadHash("rename", [input.oldRelativePath, input.relativePath]);
+      const receipt = this.getCrdtOperationReceipt(input.roomId, input.operationId);
+      if (receipt) {
+        this.assertMatchingReceipt(receipt, input.deviceId, "rename", payloadHash);
+        return { result: JSON.parse(receipt.result_json) as FileRenameResult, replayed: true };
+      }
+      this.assertOperationIdUnusedInOtherRoom(input.roomId, input.operationId);
+      const result = this.renameFileStatements(input);
+      this.insertCrdtOperationReceipt({
+        roomId: input.roomId,
+        operationId: input.operationId,
+        deviceId: input.deviceId,
+        operationKind: "rename",
+        payloadHash,
+        result
+      });
+      return { result, replayed: false };
+    })();
+  }
+
+  private renameFileStatements(input: CrdtRenameInput): FileRenameResult {
       const existing = this.getFile(input.roomId, input.oldRelativePath);
       if (!existing || existing.deleted_at) {
         throw new AppError(existing?.deleted_at ? "FILE_DELETED" : "NOT_FOUND", existing?.deleted_at ? "The file has been deleted." : "File not found.", 404);
@@ -236,8 +289,6 @@ export class RelayFileRepository {
         .run(targetPath, contentTypeForPath(targetPath), input.actorUserId, now, existing.id);
       this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, targetPath, existing.version);
       return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: targetPath, epoch: existing.crdt_epoch };
-    });
-    return rename();
   }
 
   /** First-create flow for the CRDT lane (contract 1.10). Distinct from `writeFile`'s
@@ -251,22 +302,59 @@ export class RelayFileRepository {
    *  bump here would just burn an epoch number on every delete+recreate cycle for no reason, and
    *  would be inconsistent with `writeFile`'s own tombstone-revival path (contract 1.9), which also
    *  does not bump. */
-  createCrdtFile(input: {
+  createCrdtFile(input: CrdtCreateInput): CrdtCreateResult {
+    return this.db.transaction(() => this.createCrdtFileStatements(input))();
+  }
+
+  replayCrdtCreateReceipt(input: {
     roomId: string;
     relativePath: string;
-    actorUserId: string;
-    actorDisplayName?: string;
-    /** See the protocol's `crdt_create.adoptIfExists`: when set and a live document already holds this
-     *  path, return that document instead of filing this request under a disambiguated name. Set by a
-     *  client reopening a note it already has (remount, editor bind, remote update); never set for a
-     *  brand-new note, so two devices creating "Untitled" still get two separate notes. */
     adoptIfExists?: boolean;
-  }): {
-    fileId: string;
-    epoch: number;
-    relativePath: string;
-  } {
-    const create = this.db.transaction(() => {
+    operationId: string;
+    deviceId: string;
+  }): { result: CrdtCreateResult; adopted: boolean } | null {
+    assertValidOperationId(input.operationId);
+    const receipt = this.getCrdtOperationReceipt(input.roomId, input.operationId);
+    if (!receipt) {
+      this.assertOperationIdUnusedInOtherRoom(input.roomId, input.operationId);
+      return null;
+    }
+    this.assertMatchingReceipt(
+      receipt,
+      input.deviceId,
+      "create",
+      structuralPayloadHash("create", [input.relativePath, input.adoptIfExists === true])
+    );
+    return JSON.parse(receipt.result_json) as { result: CrdtCreateResult; adopted: boolean };
+  }
+
+  createCrdtFileIdempotent(input: CrdtCreateInput & { operationId: string; deviceId: string }): IdempotentCrdtCreateResult {
+    assertValidOperationId(input.operationId);
+    return this.db.transaction(() => {
+      const payloadHash = structuralPayloadHash("create", [input.relativePath, input.adoptIfExists === true]);
+      const receipt = this.getCrdtOperationReceipt(input.roomId, input.operationId);
+      if (receipt) {
+        this.assertMatchingReceipt(receipt, input.deviceId, "create", payloadHash);
+        const recorded = JSON.parse(receipt.result_json) as { result: CrdtCreateResult; adopted: boolean };
+        return { ...recorded, replayed: true };
+      }
+      this.assertOperationIdUnusedInOtherRoom(input.roomId, input.operationId);
+      const existingBeforeCreate = this.getFile(input.roomId, input.relativePath);
+      const result = this.createCrdtFileStatements(input);
+      const adopted = Boolean(existingBeforeCreate && !existingBeforeCreate.deleted_at && result.fileId === existingBeforeCreate.id);
+      this.insertCrdtOperationReceipt({
+        roomId: input.roomId,
+        operationId: input.operationId,
+        deviceId: input.deviceId,
+        operationKind: "create",
+        payloadHash,
+        result: { result, adopted }
+      });
+      return { result, adopted, replayed: false };
+    })();
+  }
+
+  private createCrdtFileStatements(input: CrdtCreateInput): CrdtCreateResult {
       // Two devices creating a note at the same path are creating two *different* notes - each has
       // its own identity - not one shared note (seventh hardware-testing round, 2026-07-24). This is
       // the single most ordinary case there is, because Obsidian names every new note with the same
@@ -319,8 +407,94 @@ export class RelayFileRepository {
       this.insertFileVersion({ fileId, version, sha256, sizeBytes, storageKey, content: "", actorUserId: input.actorUserId, now });
       this.auditFileEvent(input.roomId, input.actorUserId, "file.crdt_created", fileId, relativePath, version);
       return { fileId, epoch, relativePath };
-    });
-    return create();
+  }
+
+  replayCrdtRenameReceipt(input: {
+    roomId: string;
+    oldRelativePath: string;
+    relativePath: string;
+    operationId: string;
+    deviceId: string;
+  }): FileRenameResult | null {
+    assertValidOperationId(input.operationId);
+    const receipt = this.getCrdtOperationReceipt(input.roomId, input.operationId);
+    if (!receipt) {
+      this.assertOperationIdUnusedInOtherRoom(input.roomId, input.operationId);
+      return null;
+    }
+    this.assertMatchingReceipt(
+      receipt,
+      input.deviceId,
+      "rename",
+      structuralPayloadHash("rename", [input.oldRelativePath, input.relativePath])
+    );
+    return JSON.parse(receipt.result_json) as FileRenameResult;
+  }
+
+  private getCrdtOperationReceipt(roomId: string, operationId: string): CrdtOperationReceiptRow | null {
+    return (
+      (this.db
+        .prepare("select * from crdt_operation_receipts where room_id = ? and operation_id = ?")
+        .get(roomId, operationId) as CrdtOperationReceiptRow | undefined) ?? null
+    );
+  }
+
+  private assertMatchingReceipt(
+    receipt: CrdtOperationReceiptRow,
+    deviceId: string,
+    operationKind: "create" | "rename",
+    payloadHash: string
+  ): void {
+    if (receipt.device_id !== deviceId) {
+      throw new AppError(
+        "CRDT_OPERATION_DEVICE_MISMATCH",
+        "This CRDT operation receipt belongs to another device.",
+        409
+      );
+    }
+    if (receipt.operation_kind !== operationKind || receipt.payload_hash !== payloadHash) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        "This operation ID was already used for a different CRDT mutation.",
+        422
+      );
+    }
+  }
+
+  private assertOperationIdUnusedInOtherRoom(roomId: string, operationId: string): void {
+    const receipt = this.db
+      .prepare("select room_id from crdt_operation_receipts where operation_id = ? and room_id != ? limit 1")
+      .get(operationId, roomId);
+    if (receipt) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        "This operation ID was already used for a different CRDT mutation.",
+        422
+      );
+    }
+  }
+
+  private insertCrdtOperationReceipt(input: {
+    roomId: string;
+    operationId: string;
+    deviceId: string;
+    operationKind: "create" | "rename";
+    payloadHash: string;
+    result: unknown;
+  }): void {
+    this.db
+      .prepare(
+        "insert into crdt_operation_receipts(room_id, operation_id, device_id, operation_kind, payload_hash, result_json, created_at) values (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(
+        input.roomId,
+        input.operationId,
+        input.deviceId,
+        input.operationKind,
+        input.payloadHash,
+        JSON.stringify(input.result),
+        new Date().toISOString()
+      );
   }
 
   /**
@@ -472,4 +646,14 @@ export class RelayFileRepository {
 
 function sha256Text(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function structuralPayloadHash(operationKind: "create" | "rename", payload: unknown[]): string {
+  return sha256Text(JSON.stringify([operationKind, ...payload]));
+}
+
+function assertValidOperationId(operationId: string): void {
+  if (!operationId || operationId.length > 200) {
+    throw new AppError("VALIDATION_ERROR", "A CRDT operation ID must be between 1 and 200 characters.", 422);
+  }
 }

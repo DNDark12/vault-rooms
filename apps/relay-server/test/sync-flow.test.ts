@@ -63,6 +63,58 @@ async function setupSyncFlow() {
 }
 
 describe("WebSocket sync", () => {
+  it("hides widened binary change and delete fanout from clients that did not advertise support", async () => {
+    const { app, owner, member, room } = await setupSyncFlow();
+    const legacy = await connect(app);
+    const current = await connect(app);
+
+    legacy.sendJson({
+      type: "hello",
+      requestId: "hello-legacy",
+      token: member.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.2.4", deviceName: "Legacy" }
+    });
+    current.sendJson({
+      type: "hello",
+      requestId: "hello-current",
+      token: member.deviceToken,
+      client: { kind: "obsidian-plugin", version: "0.2.5", deviceName: "Current" },
+      capabilities: { extendedBinarySync: true }
+    });
+    await nextMessage(legacy, "hello_ok");
+    await nextMessage(current, "hello_ok");
+    legacy.sendJson({ type: "subscribe_room", requestId: "sub-legacy", roomId: room.id });
+    current.sendJson({ type: "subscribe_room", requestId: "sub-current", roomId: room.id });
+    await nextMessage(legacy, "room_snapshot");
+    await nextMessage(current, "room_snapshot");
+
+    const created = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "attachment.docx", baseVersion: 0, content: "AQID" }
+    });
+    expect(created.statusCode).toBe(200);
+    expect(await nextMessage(current, "remote_file_change")).toMatchObject({
+      relativePath: "attachment.docx",
+      content: "AQID",
+      contentEncoding: "base64"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(messageQueues.get(legacy)).not.toContainEqual(expect.objectContaining({ type: "remote_file_change" }));
+
+    const deleted = await app.inject({
+      method: "POST",
+      url: `/api/rooms/${room.id}/files/delete`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "attachment.docx", baseVersion: 1 }
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(await nextMessage(current, "remote_file_delete")).toMatchObject({ relativePath: "attachment.docx" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(messageQueues.get(legacy)).not.toContainEqual(expect.objectContaining({ type: "remote_file_delete" }));
+  });
+
   it("keeps websocket framing headroom above the application file-size limit", async () => {
     const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787", maxFileBytes: 32 });
     apps.push(app);
@@ -83,6 +135,16 @@ describe("WebSocket sync", () => {
       client: { kind: "obsidian-plugin", version: "0.2.0", deviceName: "A laptop" }
     });
     expect(await nextMessage(socket, "hello_ok")).toMatchObject({ requestId: "hello-small-limit" });
+
+    socket.sendJson({
+      type: "file_change",
+      requestId: "within-limit-binary",
+      roomId: room.id,
+      relativePath: "within-limit.bin",
+      baseVersion: 0,
+      content: Buffer.alloc(32, 1).toString("base64")
+    });
+    expect(await nextMessage(socket, "file_change_ack")).toMatchObject({ requestId: "within-limit-binary" });
 
     socket.sendJson({
       type: "file_change",
@@ -726,6 +788,61 @@ describe("WebSocket sync", () => {
 });
 
 describe("WebSocket admission timeout", () => {
+  it("routes message handling through the database access barrier", async () => {
+    const timers = new FakeSyncTimerHost();
+    const registry = new ConnectionRegistry();
+    const socket = new FakeSyncSocket();
+    const repo = {
+      authenticateDeviceToken: () => ({
+        deviceId: "device_1",
+        deviceDisplayName: "Laptop",
+        deviceRevokedAt: null,
+        userId: "user_1",
+        userDisplayName: "Owner",
+        userRevokedAt: null,
+        isServerOwner: true,
+        tokenSecurity: "plain"
+      }),
+      getSecurityState: () => "plain_legacy",
+      isLegacyPlainToken: () => false,
+      markDeviceTransport: vi.fn(),
+      audit: vi.fn()
+    } as unknown as RelayRepository;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let accessCalls = 0;
+    const withDbAccess = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+      accessCalls += 1;
+      await gate;
+      return operation();
+    };
+    handleSyncSocket(socket, repo, registry, {
+      maxFileBytes: 1024,
+      maxConnections: 5,
+      transport: "http",
+      timerHost: timers,
+      crdtDocManager: {} as unknown as CrdtDocManager,
+      presenceService: { removeConnection: () => undefined } as unknown as PresenceService,
+      withDbAccess
+    });
+
+    socket.emitMessage(JSON.stringify({
+      type: "hello",
+      requestId: "hello-1",
+      token: "token",
+      client: { kind: "obsidian-plugin", version: "0.2.0", deviceName: "Laptop" }
+    }));
+    await Promise.resolve();
+    expect(socket.sent).toEqual([]);
+    expect(accessCalls).toBe(1);
+
+    release();
+    await vi.waitFor(() => expect(socket.sent).toEqual([expect.stringContaining('"type":"hello_ok"')]));
+    socket.emitClose();
+  });
+
   it("closes unauthenticated sockets after 10 seconds and clears the timeout after hello", async () => {
     const timers = new FakeSyncTimerHost();
     const registry = new ConnectionRegistry();

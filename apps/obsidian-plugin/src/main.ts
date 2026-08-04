@@ -14,7 +14,8 @@ import {
 } from "./apiClient.js";
 import { CrdtEditorController } from "./crdtEditorBinding.js";
 import { CrdtDocStore } from "./crdtDocStore.js";
-import { CrdtRejectedError, CrdtSessionManager } from "./crdtSession.js";
+import { CrdtSessionManager } from "./crdtSession.js";
+import { CrdtOperationJournal } from "./crdtOperationJournal.js";
 import { userFacingError } from "./errorMessages.js";
 import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
@@ -35,7 +36,7 @@ import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
-import { isConflictCopyPath, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, VaultSyncEngine, type MountedRoomState } from "./syncClient.js";
+import { isConflictCopyPath, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, VaultSyncEngine, type MountedRoomState, type PendingCrdtOperation } from "./syncClient.js";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
@@ -53,6 +54,7 @@ import {
   type PinnedInviteInfo,
   type PinnedServerInfo
 } from "./pinnedTransport.js";
+import { notifyIfUpdateAvailable } from "./updateNotice.js";
 
 function crdtRenameMarkerKey(roomId: string, oldRelativePath: string, newRelativePath: string): string {
   return `${roomId} ${oldRelativePath} ${newRelativePath}`;
@@ -97,6 +99,7 @@ export default class VaultRoomsPlugin extends Plugin {
    *  own lifecycle - CRDT session state (in-memory Y.Docs, pending handshakes) is meaningless once
    *  detached from a specific server's rooms/epochs. */
   private crdtSessionManager: CrdtSessionManager | null = null;
+  private crdtOperationJournal!: CrdtOperationJournal;
   /** Renames this plugin performed itself (applying another device's rename, or adopting a
    *  server-assigned name for a colliding new note), keyed `"<roomId> <oldPath> <newPath>"`. Obsidian
    *  fires an indistinguishable vault "rename" event for these, and treating one as a user rename
@@ -128,6 +131,17 @@ export default class VaultRoomsPlugin extends Plugin {
       return self.vaultAdapter;
     },
     getSyncEngine: () => self.syncEngine,
+    ensureCrdtSession: async (roomId, relativePath, brandNewNote) => {
+      if (brandNewNote) {
+        await self.crdtOperationJournal.recordCreate(roomId, relativePath);
+        return;
+      }
+      const manager = self.crdtSessionManager;
+      if (!manager) {
+        throw new Error("The CRDT session manager is not available.");
+      }
+      await manager.ensureSession(roomId, relativePath, { brandNewNote });
+    },
     stopWatchingRoom: (roomId) => self.stopWatchingRoom(roomId),
     watchMountedRoom: (roomId) => self.watchMountedRoom(roomId),
     subscribeRoom: (roomId) => {
@@ -150,6 +164,61 @@ export default class VaultRoomsPlugin extends Plugin {
     // rather than per connectSyncSocket() call.
     const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
     this.crdtDocStore = new CrdtDocStore(this.app.vault.adapter, `${pluginDir}/server-data/crdt`);
+    this.crdtOperationJournal = new CrdtOperationJournal({
+      getRoom: (roomId) => this.settings.mountedRooms[roomId],
+      persist: () => this.saveSettings(),
+      canReplay: (room) => {
+        const server = this.getActiveServer();
+        return Boolean(
+          server &&
+          room.serverId === server.id &&
+          !room.unmounted &&
+          room.canPushLocalEdits === true
+        );
+      },
+      pathExists: async (roomId, relativePath) => {
+        const room = this.settings.mountedRooms[roomId];
+        return Boolean(room && await this.vaultAdapter.exists(`${room.mountPath.replace(/\/+$/, "")}/${relativePath}`));
+      },
+      create: async (roomId, relativePath, operationId) => {
+        const manager = this.crdtSessionManager;
+        if (!manager) throw new Error("The CRDT session manager is not available.");
+        const session = await manager.ensureSession(roomId, relativePath, { brandNewNote: true, operationId });
+        return { relativePath: session.relativePath };
+      },
+      rename: async (roomId, oldRelativePath, relativePath, operationId) => {
+        const manager = this.crdtSessionManager;
+        if (!manager) throw new Error("The CRDT session manager is not available.");
+        return manager.renameSession(roomId, oldRelativePath, relativePath, { operationId });
+      },
+      resolveCreate: async (roomId, relativePath, operationId) => {
+        const manager = this.crdtSessionManager;
+        if (!manager) throw new Error("The CRDT session manager is not available.");
+        return manager.resolveCreateOperation(roomId, relativePath, operationId);
+      },
+      resolveRename: async (roomId, oldRelativePath, relativePath, operationId) => {
+        const manager = this.crdtSessionManager;
+        if (!manager) throw new Error("The CRDT session manager is not available.");
+        return manager.resolveRenameOperation(roomId, oldRelativePath, relativePath, operationId);
+      },
+      reconcilePath: async (roomId, relativePath) => {
+        const manager = this.crdtSessionManager;
+        if (!manager) throw new Error("The CRDT session manager is not available.");
+        const session = await manager.ensureSession(roomId, relativePath);
+        await session.initialSync;
+      },
+      queueDelete: (roomId, relativePath) => this.queueJournalResolvedDelete(roomId, relativePath),
+      convertToCas: (roomId, operation, outcome) => this.convertJournalOperationToCas(roomId, operation, outcome),
+      onUnsupported: () => {
+        new Notice("Vault Rooms: this server must be upgraded before offline Markdown creates or renames can replay safely.", 10000);
+      },
+      onReplayError: (_roomId, operation, error) => {
+        console.error(`Vault Rooms: failed to replay CRDT ${operation.kind} operation ${operation.operationId}`, error);
+        if (typeof (error as Error & { code?: unknown }).code === "string") {
+          new Notice(`Vault Rooms: couldn't sync "${operation.relativePath}" - ${userFacingError(error, "the server rejected the change.")}`, 10000);
+        }
+      }
+    });
     this.addSettingTab(new VaultRoomsSettingTab(this));
     this.registerView(VAULT_ROOMS_VIEW_TYPE, (leaf) => new VaultRoomsView(leaf, this));
     this.addRibbonIcon("box", "Vault Rooms", () => this.openRoomsPanel());
@@ -311,22 +380,16 @@ export default class VaultRoomsPlugin extends Plugin {
     // after startup) - it never blocks or double-registers, so this doesn't affect any of
     // connectSyncSocket()'s other call sites (setupServer/joinServer/activateServer/etc.), which
     // already only ever run well after startup in response to user actions.
-    this.app.workspace.onLayoutReady(() => {
-      // If the active connection is this device's own stopped embedded server, there is nothing
-      // listening yet; Start server calls connectSyncSocket() again after the relay is running.
-      if (this.activeServerIsOwnStoppedServer()) {
-        return;
-      }
-      this.connectSyncSocket();
-      // Best-effort, fire-and-forget: gets the network-confirmed visibleRooms (crdtEnabled, etc.)
-      // populated as early as realistically possible after startup, instead of waiting for the user
-      // to open the Rooms panel or trigger some other refresh - previously visibleRooms stayed `[]`
-      // for the rest of the session unless one of those happened to run. resolveRoomCrdtEnabled's
-      // persisted fallback already keeps CRDT-lane routing correct before this resolves (or if it
-      // fails, e.g. the server is unreachable), so this must never block or throw on
-      // connectSyncSocket() above.
-      void this.refreshRooms({ notify: false }).catch(() => undefined);
-    });
+    this.app.workspace.onLayoutReady(() => this.initializeSyncAfterLayoutReady());
+  }
+
+  /** Initializes local watchers/CRDT state even if this device's embedded relay is currently
+   *  stopped. connectSyncSocket() itself suppresses only the network connection in that case; the
+   *  local lifecycle must already exist to capture edits made before the user starts the server. */
+  private initializeSyncAfterLayoutReady(): void {
+    this.connectSyncSocket();
+    void this.refreshRooms({ notify: false }).catch(() => undefined);
+    void notifyIfUpdateAvailable(this.manifest.version);
   }
 
   onunload(): void {
@@ -386,7 +449,10 @@ export default class VaultRoomsPlugin extends Plugin {
     const status = await this.serverConnectionManager.startEmbeddedServer(options);
     const server = this.getActiveServer();
     if (status.running && server && this.isOwnEmbeddedServerConnection(server)) {
-      this.connectSyncSocket();
+      // Pause/Start is a transport interruption, not a server switch. Keep the existing Y.Docs and
+      // editor bindings alive so edits made while hosting was paused ride the normal reconnect
+      // handshake instead of being reconstructed from a potentially stale Obsidian disk save.
+      this.connectSyncSocket({ preserveCrdtSessions: true });
       await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
       this.renderOpenRoomsViews();
     }
@@ -1059,6 +1125,9 @@ export default class VaultRoomsPlugin extends Plugin {
     // unbinds a note whose room just flipped CRDT off. No-ops cleanly when nothing is open or no
     // session manager exists yet (syncOpenViews handles both).
     this.handleActiveEditorChanged();
+    for (const roomId of Object.keys(this.settings.mountedRooms)) {
+      void this.reconcilePendingCrdtText(roomId);
+    }
   }
 
   /**
@@ -1189,6 +1258,7 @@ export default class VaultRoomsPlugin extends Plugin {
   private disconnectSyncSocket(): void {
     this.syncSocket?.disconnect();
     this.syncSocket = null;
+    this.crdtOperationJournal?.markDisconnected();
   }
 
   /**
@@ -1374,6 +1444,54 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.vaultAdapter.read(path);
   }
 
+  private isCrdtTextPending(roomId: string, relativePath: string): boolean {
+    return this.settings.mountedRooms[roomId]?.pendingCrdtTextPaths?.includes(relativePath) ?? false;
+  }
+
+  private queuePendingCrdtText(roomId: string, relativePath: string): void {
+    const room = this.settings.mountedRooms[roomId];
+    if (!room) return;
+    const paths = (room.pendingCrdtTextPaths ??= []);
+    if (paths.includes(relativePath)) return;
+    paths.push(relativePath);
+    void this.saveSettings();
+  }
+
+  private async clearPendingCrdtText(roomId: string, relativePath: string): Promise<void> {
+    const room = this.settings.mountedRooms[roomId];
+    if (!room?.pendingCrdtTextPaths?.includes(relativePath)) return;
+    room.pendingCrdtTextPaths = room.pendingCrdtTextPaths.filter((path) => path !== relativePath);
+    await this.saveSettings();
+  }
+
+  /** Replays cold-start edits only after a snapshot/materialized event has supplied the path's
+   *  current epoch. The socket callback that invokes this stays fire-and-forget because the CRDT
+   *  handshake needs later frames from that same socket. */
+  private async reconcilePendingCrdtText(roomId: string): Promise<void> {
+    const room = this.settings.mountedRooms[roomId];
+    if (!room || room.unmounted || room.canPushLocalEdits !== true) return;
+    for (const relativePath of [...(room.pendingCrdtTextPaths ?? [])]) {
+      const visible = this.visibleRooms.find((candidate) => candidate.id === roomId);
+      if (!resolveRoomCrdtEnabled(visible, room)) {
+        const coordinator = this.roomCoordinators.get(roomId);
+        if (!coordinator) return;
+        coordinator.handleLocalChange("modify", relativePath);
+        await this.clearPendingCrdtText(roomId, relativePath);
+        continue;
+      }
+      const manager = this.crdtSessionManager;
+      if (!manager) return;
+      try {
+        const session = await manager.ensureSession(roomId, relativePath, { brandNewNote: false });
+        await session.initialSync;
+        await this.clearPendingCrdtText(roomId, relativePath);
+        this.handleActiveEditorChanged();
+      } catch (error) {
+        console.error(`Vault Rooms: failed to reconcile offline CRDT edit for "${relativePath}"`, error);
+      }
+    }
+  }
+
   /** Materializes a CRDT doc's text to disk for a room's file that isn't currently bound to an open
    *  editor (coexistence: an unopened CRDT file's on-disk copy still needs to stay current). */
   private async writeCrdtDiskText(roomId: string, relativePath: string, text: string): Promise<void> {
@@ -1403,6 +1521,84 @@ export default class VaultRoomsPlugin extends Plugin {
       this.selfInflictedRenames.delete(crdtRenameMarkerKey(roomId, oldRelativePath, newRelativePath));
       throw error;
     }
+  }
+
+  /** Resolves an attempted structural operation before handing its later local delete back to the
+   *  existing durable CAS coordinator. Refreshing file metadata here gives that coordinator a
+   *  concrete server path/version even when the create ACK assigned a collision name that was not
+   *  present in the reconnect snapshot. */
+  private async queueJournalResolvedDelete(roomId: string, relativePath: string): Promise<void> {
+    const room = this.settings.mountedRooms[roomId];
+    if (!room) return;
+    const server = this.getActiveServer();
+    if (!server || room.serverId !== server.id) {
+      throw new Error("The room's server is not active, so its resolved delete could not be queued.");
+    }
+    const current = await this.apiFor(server).readFile(roomId, relativePath);
+    room.files[relativePath] = {
+      serverVersion: current.version,
+      serverSha256: current.sha256,
+      localSha256: null,
+      dirty: false
+    };
+    await this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath);
+    const coordinator = this.roomCoordinators.get(roomId);
+    if (!coordinator) {
+      throw new Error("The room is not mounted, so its resolved delete could not be queued.");
+    }
+    coordinator.handleLocalChange("delete", relativePath);
+    await this.saveSettings();
+  }
+
+  private async convertJournalOperationToCas(
+    roomId: string,
+    operation: PendingCrdtOperation,
+    outcome: { committed: boolean; relativePath: string }
+  ): Promise<void> {
+    const room = this.settings.mountedRooms[roomId];
+    const server = this.getActiveServer();
+    const coordinator = this.roomCoordinators.get(roomId);
+    if (!room || !server || room.serverId !== server.id || !coordinator) {
+      throw new Error("The room is not active, so its offline operation could not move to normal file sync.");
+    }
+
+    const trackServerFile = async (relativePath: string): Promise<boolean> => {
+      try {
+        const current = await this.apiFor(server).readFile(roomId, relativePath);
+        room.files[relativePath] = {
+          serverVersion: current.version,
+          serverSha256: current.sha256,
+          localSha256: null,
+          dirty: false
+        };
+        return true;
+      } catch (error) {
+        if ((error as { code?: unknown }).code === "NOT_FOUND") return false;
+        throw error;
+      }
+    };
+
+    if (outcome.committed) {
+      if (outcome.relativePath !== operation.relativePath) {
+        await this.renameCrdtDiskFile(roomId, operation.relativePath, outcome.relativePath);
+        new Notice(
+          `Vault Rooms: "${operation.relativePath}" already exists in this room - your note was saved as "${outcome.relativePath}".`
+        );
+      }
+      await trackServerFile(outcome.relativePath);
+      if (operation.kind === "rename") delete room.files[operation.oldRelativePath];
+      coordinator.handleLocalChange(operation.deleteAfterAck ? "delete" : "modify", outcome.relativePath);
+    } else if (operation.deleteAfterAck) {
+      if (operation.kind === "rename" && await trackServerFile(operation.oldRelativePath)) {
+        coordinator.handleLocalChange("delete", operation.oldRelativePath);
+      }
+    } else {
+      if (operation.kind === "rename" && await trackServerFile(operation.oldRelativePath)) {
+        coordinator.handleLocalChange("delete", operation.oldRelativePath);
+      }
+      coordinator.handleLocalChange("create", outcome.relativePath);
+    }
+    await this.saveSettings();
   }
 
   private resetSessionState(): void {
@@ -1539,33 +1735,12 @@ export default class VaultRoomsPlugin extends Plugin {
         ) {
           if (canPushLocalEdits) {
             const newRelativePath = renameHint.renamedToRelativePath;
-            void this.crdtSessionManager?.renameSession(roomId, relativePath, newRelativePath).catch((error) => {
-              const code = error instanceof CrdtRejectedError ? error.code : undefined;
-              // Only create a document at the new path when the old path genuinely wasn't on the
-              // server (so there was nothing to rename and this is really a first create). Doing it
-              // unconditionally is how duplicate files used to appear: a rename rejected because the
-              // *new* path is already taken (FILE_EXISTS) can't be recovered by creating that same
-              // path - crdt_create rejects it too - and a rename rejected for any other reason leaves
-              // the original document alive at the old path, so creating a second one at the new path
-              // forks the note in two (sixth hardware-testing round, 2026-07-24).
-              if (code === "NOT_FOUND" || code === "FILE_DELETED") {
-                console.warn(
-                  `Vault Rooms: nothing to rename at "${relativePath}" (${code}) - creating "${newRelativePath}" as a new note instead`
-                );
-                void this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath).catch(() => undefined);
-                void this.crdtSessionManager?.ensureSession(roomId, newRelativePath).catch((ensureError) => {
-                  console.error(`Vault Rooms: failed to open CRDT session for "${newRelativePath}"`, ensureError);
-                });
-                return;
-              }
-              // Non-recoverable: leave every side's state exactly as it was (the note is still live at
-              // its old path server-side, and still present locally under its new name) rather than
-              // forking a duplicate. The next reconnect's room snapshot reconciles this device.
-              console.error(`Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}"`, error);
-              new Notice(
-                `Vault Rooms: couldn't rename "${relativePath}" to "${newRelativePath}" - ${userFacingError(error, "the server rejected the rename.")}`
-              );
-            });
+            void this.crdtOperationJournal
+              .recordRename(roomId, relativePath, newRelativePath)
+              .then(() => this.clearPendingCrdtText(roomId, relativePath))
+              .catch((error) => {
+                console.error(`Vault Rooms: couldn't journal rename "${relativePath}" to "${newRelativePath}"`, error);
+              });
           }
           return;
         }
@@ -1591,13 +1766,26 @@ export default class VaultRoomsPlugin extends Plugin {
         // resolves true) opens the session then. Same "unknown/stale state must never risk a push"
         // invariant the CAS lane already enforces below (third-hardware-testing-round item 1).
         if (canPushLocalEdits && isCrdtManagedLocalChange({ crdtEnabled }, changeType, relativePath)) {
-          // Only a vault "create" event is a note that did not exist a moment ago and may therefore be
-          // treated as a second, different note if its name is already taken. A "modify" is by
-          // definition an existing note, and must adopt whatever document already holds that path -
-          // otherwise reopening a note (e.g. after a remount) forks a renamed duplicate of it.
-          void this.crdtSessionManager
-            ?.ensureSession(roomId, relativePath, { brandNewNote: changeType === "create" })
-            .then(() => {
+          if (changeType === "create") {
+            void this.crdtOperationJournal.recordCreate(roomId, relativePath).catch((error) => {
+              console.error(`Vault Rooms: couldn't journal CRDT create for "${relativePath}"`, error);
+            });
+            return;
+          }
+          if (this.crdtOperationJournal.isPathProtected(roomId, relativePath)) {
+            return;
+          }
+          const manager = this.crdtSessionManager;
+          if (!manager?.isSessionOpen(roomId, relativePath)) {
+            this.queuePendingCrdtText(roomId, relativePath);
+          }
+          // Create returned above through the durable journal. This remaining modify path is by
+          // definition an existing note and adopts whatever document already holds the path.
+          void manager
+            ?.ensureSession(roomId, relativePath, { brandNewNote: false })
+            .then(async (session) => {
+              await session.initialSync;
+              await this.clearPendingCrdtText(roomId, relativePath);
               // The bind pass deliberately never creates a document (see ensureSessionIfKnown), so a
               // brand-new note's editor cannot bind until this call has established it - and no Obsidian
               // workspace event fires in between. Re-run the pass here, otherwise a note created in an
@@ -1616,9 +1804,15 @@ export default class VaultRoomsPlugin extends Plugin {
         // would bind its editor to the old (pre-delete) document until a round trip to the server
         // eventually notices the epoch moved on.
         if (crdtEnabled && changeType === "delete" && isCrdtEligiblePath(relativePath)) {
-          void this.crdtSessionManager?.forgetLocalDelete(roomId, relativePath).catch((error) => {
-            console.error(`Vault Rooms: failed to forget CRDT session for deleted "${relativePath}"`, error);
+          void this.crdtOperationJournal.recordDelete(roomId, relativePath).then(async (disposition) => {
+            await this.clearPendingCrdtText(roomId, relativePath);
+            if (disposition.handled || !canPushLocalEdits) return;
+            await this.crdtSessionManager?.forgetLocalDelete(roomId, disposition.relativePath);
+            coordinator.handleLocalChange("delete", disposition.relativePath);
+          }).catch((error) => {
+            console.error(`Vault Rooms: failed to journal CRDT delete for "${relativePath}"`, error);
           });
+          return;
         }
         // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate
         // basis to ever treat a local vault change as a real edit worth protecting - the watcher must
@@ -1654,59 +1848,68 @@ export default class VaultRoomsPlugin extends Plugin {
    * another. This also means: mounted rooms only actually sync while their own server is active -
    * switch back to a server to resume syncing whatever's mounted under it.
    */
-  private connectSyncSocket(): void {
+  private connectSyncSocket(options: { preserveCrdtSessions?: boolean } = {}): void {
     this.disconnectSyncSocket();
     this.syncState = "offline";
-    // Every watcher was registered against whichever server was active when it was set up; that
-    // binding is about to go stale (syncEngine below is being replaced), so every watcher must be
-    // torn down and, for the new active server's own rooms, re-registered below - otherwise a
-    // leftover watcher from the old server would push through the new server's client.
-    for (const unsubscribe of this.roomWatchers.values()) {
-      unsubscribe();
-    }
-    this.roomWatchers.clear();
-    // CRDT session state is meaningless once detached from a specific server's rooms/epochs -
-    // tear it down alongside syncEngine below, and unbind every editor view live against it (not
-    // just the focused one - second-hardware-testing-round item 3).
-    this.crdtEditorController.unbindAll();
-    this.crdtSessionManager?.dispose();
-    this.crdtSessionManager = null;
     const server = this.getActiveServer();
-    this.syncEngine = new VaultSyncEngine(this.vaultAdapter, server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787"));
+    const preserveCrdtSessions = options.preserveCrdtSessions === true && server !== undefined && this.crdtSessionManager !== null;
+    if (!preserveCrdtSessions) {
+      // Every watcher was registered against whichever server was active when it was set up; that
+      // binding is about to go stale (syncEngine below is being replaced), so every watcher must be
+      // torn down and, for the new active server's own rooms, re-registered below - otherwise a
+      // leftover watcher from the old server would push through the new server's client.
+      for (const unsubscribe of this.roomWatchers.values()) {
+        unsubscribe();
+      }
+      this.roomWatchers.clear();
+      // CRDT session state is meaningless once detached from a specific server's rooms/epochs -
+      // tear it down alongside syncEngine below, and unbind every editor view live against it (not
+      // just the focused one - second-hardware-testing-round item 3).
+      this.crdtEditorController.unbindAll();
+      this.crdtSessionManager?.dispose();
+      this.crdtSessionManager = null;
+      this.syncEngine = new VaultSyncEngine(
+        this.vaultAdapter,
+        server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787")
+      );
+    }
     if (!server) {
       this.renderOpenRoomsViews();
       return;
     }
-    this.crdtSessionManager = new CrdtSessionManager({
-      send: (message) => this.syncSocket?.sendCrdtMessage(message),
-      docStore: this.crdtDocStore,
-      isRoomCrdtEnabled: (roomId) => {
-        const roomState = this.settings.mountedRooms[roomId];
-        return Boolean(roomState && !roomState.unmounted) && resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), roomState);
-      },
-      readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
-      writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
-      renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath),
-      onSessionRetiring: (roomId, relativePath) => this.crdtEditorController.unbindTarget(roomId, relativePath),
-      onSessionOpened: () => this.handleActiveEditorChanged(),
-      // First creator of a name keeps it; this device's own new note was given a distinct name instead
-      // of being merged into someone else's note or silently failing to sync. Worth telling the user,
-      // since the note they just created visibly changed name in their own vault.
-      onPathReassigned: (_roomId, requestedRelativePath, relativePath) => {
-        new Notice(`Vault Rooms: "${requestedRelativePath}" already exists in this room - your note was saved as "${relativePath}".`);
+    if (!preserveCrdtSessions) {
+      this.crdtSessionManager = new CrdtSessionManager({
+        send: (message) => this.syncSocket?.sendCrdtMessage(message) ?? false,
+        docStore: this.crdtDocStore,
+        isRoomCrdtEnabled: (roomId) => {
+          const roomState = this.settings.mountedRooms[roomId];
+          return Boolean(roomState && !roomState.unmounted) && resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), roomState);
+        },
+        isPathProtectedByJournal: (roomId, relativePath) => this.crdtOperationJournal.isPathProtected(roomId, relativePath),
+        readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
+        writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
+        renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath),
+        onSessionRetiring: (roomId, relativePath) => this.crdtEditorController.unbindTarget(roomId, relativePath),
+        onSessionOpened: () => this.handleActiveEditorChanged(),
+        // First creator of a name keeps it; this device's own new note was given a distinct name instead
+        // of being merged into someone else's note or silently failing to sync. Worth telling the user,
+        // since the note they just created visibly changed name in their own vault.
+        onPathReassigned: (_roomId, requestedRelativePath, relativePath) => {
+          new Notice(`Vault Rooms: "${requestedRelativePath}" already exists in this room - your note was saved as "${relativePath}".`);
+        }
+      });
+      // A session manager didn't exist a moment ago (unbindAll()/dispose() above tore down the
+      // previous one, if any) - retroactively re-run the full open-pane reconcile, so every note that
+      // was already open (e.g. Obsidian auto-restoring several panes on startup before this ran, which
+      // fires active-leaf-change/file-open ahead of onLayoutReady - see CLAUDE.md's post-hardware-
+      // testing audit notes) gets bound to its CRDT session retroactively instead of staying an unbound
+      // plain CM6 editor for the rest of the session - not just whichever pane happens to be focused
+      // (second-hardware-testing-round item 3). No-ops cleanly via syncOpenViews's empty-list handling
+      // when there are no open markdown panes.
+      this.handleActiveEditorChanged();
+      for (const roomId of Object.keys(this.settings.mountedRooms)) {
+        this.watchMountedRoom(roomId);
       }
-    });
-    // A session manager didn't exist a moment ago (unbindAll()/dispose() above tore down the
-    // previous one, if any) - retroactively re-run the full open-pane reconcile, so every note that
-    // was already open (e.g. Obsidian auto-restoring several panes on startup before this ran, which
-    // fires active-leaf-change/file-open ahead of onLayoutReady - see CLAUDE.md's post-hardware-
-    // testing audit notes) gets bound to its CRDT session retroactively instead of staying an unbound
-    // plain CM6 editor for the rest of the session - not just whichever pane happens to be focused
-    // (second-hardware-testing-round item 3). No-ops cleanly via syncOpenViews's empty-list handling
-    // when there are no open markdown panes.
-    this.handleActiveEditorChanged();
-    for (const roomId of Object.keys(this.settings.mountedRooms)) {
-      this.watchMountedRoom(roomId);
     }
     // Opening a WebSocket here would only retry the handshake forever against a closed local port
     // (console spam, panel stuck on "reconnecting"). Keeping this guard inside connectSyncSocket()
@@ -1716,8 +1919,13 @@ export default class VaultRoomsPlugin extends Plugin {
       this.renderOpenRoomsViews();
       return;
     }
+    const crdtSessionManager = this.crdtSessionManager;
+    if (!crdtSessionManager) {
+      this.renderOpenRoomsViews();
+      return;
+    }
     const socket = new RoomSyncSocket(server, {
-      crdt: this.crdtSessionManager,
+      crdt: crdtSessionManager,
       // Unmounted rooms (see unmountRoom()/MountedRoomState.unmounted) keep their tracking so a
       // later remount can detect local edits made in the meantime, but must not receive live
       // remote changes/deletes while unmounted - returning undefined here reuses this class's
@@ -1729,8 +1937,18 @@ export default class VaultRoomsPlugin extends Plugin {
       },
       getApi: () => this.apiFor(server),
       syncEngine: this.syncEngine,
+      isCrdtPathProtected: (roomId, relativePath) =>
+        this.crdtOperationJournal.isPathProtected(roomId, relativePath) || this.isCrdtTextPending(roomId, relativePath),
+      onRoomSnapshotApplied: (roomId, receiptsSupported) => {
+        this.crdtOperationJournal.markSnapshotReady(roomId, receiptsSupported);
+        void this.reconcilePendingCrdtText(roomId);
+        this.handleActiveEditorChanged();
+      },
       onStateChange: (state) => {
         this.syncState = state;
+        if (state !== "connected") {
+          this.crdtOperationJournal.markDisconnected();
+        }
         // A reconnect is exactly when previously-failed/offline pushes are worth retrying - see
         // RoomPushCoordinator.retryPending(). This reuses each room's existing debounce/serialize
         // machinery rather than a second queue, and each coordinator's own isStillMounted guard
@@ -1776,7 +1994,11 @@ export default class VaultRoomsPlugin extends Plugin {
       onRoomDeleted: (roomId) => {
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
-        this.roomMountController.dropRoomTracking(roomId);
+        const state = this.settings.mountedRooms[roomId];
+        if (state) state.unmounted = true;
+        this.stopWatchingRoom(roomId);
+        this.crdtEditorController.unbindRoom(roomId);
+        void this.crdtSessionManager?.disposeRoom(roomId);
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`${room?.name ?? "A room"} was deleted by the owner/admin.`);
@@ -1784,7 +2006,11 @@ export default class VaultRoomsPlugin extends Plugin {
       onAccessRevoked: (roomId) => {
         const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
         this.visibleRooms = this.visibleRooms.filter((candidate) => candidate.id !== roomId);
-        this.roomMountController.dropRoomTracking(roomId);
+        const state = this.settings.mountedRooms[roomId];
+        if (state) state.unmounted = true;
+        this.stopWatchingRoom(roomId);
+        this.crdtEditorController.unbindRoom(roomId);
+        void this.crdtSessionManager?.disposeRoom(roomId);
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`Your access to ${room?.name ?? "a room"} was revoked.`);
@@ -1809,6 +2035,7 @@ export default class VaultRoomsPlugin extends Plugin {
           // pointed at a session the engine no longer maintains.
           this.crdtEditorController.unbindRoom(roomId);
           void this.crdtSessionManager?.disposeRoom(roomId);
+          void this.reconcilePendingCrdtText(roomId);
         }
         // Harmless when enabling, and necessary so open panes rebind once the fresh snapshot this same
         // message triggers has established their epochs.

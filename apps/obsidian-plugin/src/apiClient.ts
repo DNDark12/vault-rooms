@@ -383,12 +383,25 @@ export class RelayApiClient implements RelayFileApi {
     return this.request(`/api/teams/${teamId}`, { method: "DELETE" });
   }
 
+  // Appended to every GET below (2026-08-03 sync-widening): REST has no persistent handshake to
+  // negotiate a capability the way the WS "hello" message does, so this build declares
+  // extendedBinarySync fresh on each request instead - see file.routes.ts's
+  // hasExtendedBinarySyncCapability. Without it the relay hides any path outside the
+  // pre-widening whitelist from this request entirely, the same as it would for an older build
+  // that never sends this at all.
+  private static readonly CAPABILITIES_QUERY = "capabilities=extendedBinarySync";
+
   async listFiles(roomId: string): Promise<{ files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean }> }> {
-    return this.request(`/api/rooms/${roomId}/files`);
+    return this.request(`/api/rooms/${roomId}/files?${RelayApiClient.CAPABILITIES_QUERY}`);
   }
 
-  async readFile(roomId: string, relativePath: string): Promise<{ relativePath: string; version: number; sha256: string; content: string }> {
-    return this.request(`/api/rooms/${roomId}/files/content?path=${encodeURIComponent(relativePath)}`);
+  async readFile(
+    roomId: string,
+    relativePath: string
+  ): Promise<{ relativePath: string; version: number; sha256: string; content: string; contentEncoding?: "utf8" | "base64" }> {
+    return this.request(
+      `/api/rooms/${roomId}/files/content?path=${encodeURIComponent(relativePath)}&${RelayApiClient.CAPABILITIES_QUERY}`
+    );
   }
 
   async writeFile(roomId: string, relativePath: string, baseVersion: number, content: string): Promise<{ ok: true; relativePath: string; version: number; sha256: string }> {

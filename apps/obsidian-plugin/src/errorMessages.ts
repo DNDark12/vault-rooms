@@ -33,6 +33,7 @@ const BY_CODE = {
   TLS_REQUIRED: "This server now requires a secure connection.",
   CRDT_DISABLED: "Live editing is turned off for this room.",
   CRDT_CAPABILITY_REQUIRED: "This connection doesn't support live editing - reconnect, or update the plugin.",
+  CRDT_OPERATION_DEVICE_MISMATCH: "That offline change belongs to another device and was not replayed.",
   CRDT_STALE_EPOCH: "This note was reset on the server - reopen it.",
   CRDT_INVALID_UPDATE: "A live-editing update couldn't be applied.",
   CRDT_WRITE_UNSUPPORTED: "This note uses live editing - update the plugin to edit it."

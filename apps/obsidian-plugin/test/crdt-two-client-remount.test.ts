@@ -28,8 +28,9 @@ import { createApp } from "vault-rooms-relay/app";
 import { RelayApiClient } from "../src/apiClient.js";
 import { CrdtDocStore } from "../src/crdtDocStore.js";
 import { CrdtEditorController } from "../src/crdtEditorBinding.js";
+import { CrdtOperationJournal } from "../src/crdtOperationJournal.js";
 import { CrdtSessionManager } from "../src/crdtSession.js";
-import type { ServerConnection } from "../src/settings.js";
+import { migrateVaultRoomsSettings, type ServerConnection } from "../src/settings.js";
 import { VaultSyncEngine, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "../src/syncClient.js";
 import { RoomSyncSocket } from "../src/syncWsClient.js";
 
@@ -79,6 +80,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, description: str
 /** In-memory vault: `files` doubles as "what the user sees on disk". */
 class FakeVaultAdapter implements VaultAdapter {
   readonly files = new Map<string, string>();
+  onWrite: ((path: string, content: string) => void) | undefined;
   private listener: ((event: VaultChangeEvent) => void) | null = null;
 
   async read(path: string): Promise<string> {
@@ -87,6 +89,7 @@ class FakeVaultAdapter implements VaultAdapter {
   async write(path: string, content: string): Promise<void> {
     const existed = this.files.has(path);
     this.files.set(path, content);
+    this.onWrite?.(path, content);
     this.listener?.({ type: existed ? "modify" : "create", path });
   }
   async readBinary(): Promise<ArrayBuffer> {
@@ -163,7 +166,10 @@ type Device = {
   editorText: () => string;
   /** Types at the end of the note, exactly as a keystroke does in Obsidian. */
   type: (text: string) => void;
+  /** Replaces one editor range, used to model both peers editing the same line while offline. */
+  replace: (from: number, to: number, text: string) => void;
   saveEditor: () => void;
+  reloadEditorOnVaultWrites: () => void;
   openEditor: () => Promise<void>;
   remount: () => Promise<void>;
   crdtMessageCount: () => number;
@@ -172,6 +178,15 @@ type Device = {
   editorBound: () => boolean;
   receivedCrdtTypes: () => string[];
   sessionState: () => { text: string; bound: boolean; epoch: number } | undefined;
+  recordOfflineCreate: (relativePath: string, text: string) => Promise<void>;
+  recordOfflineRename: (oldRelativePath: string, relativePath: string) => Promise<void>;
+  recordOfflineModify: (relativePath: string) => void;
+  connect: () => void;
+  restart: () => Promise<Device>;
+  markFirstOperationAttempted: () => void;
+  pendingOperationIds: () => string[];
+  serverPaths: () => Promise<string[]>;
+  serverTextAt: (relativePath: string) => Promise<string>;
   /** Live cursors. Counted separately from content traffic so an idle window can be asserted without
    *  WebSocket ping/pong or CRDT updates muddying it. */
   presenceSentCount: () => number;
@@ -188,8 +203,16 @@ type Device = {
   closeSecondPane: () => Promise<void>;
 };
 
-function buildDevice(input: { baseUrl: string; deviceToken: string; name: string; roomId: string }): Device {
-  const vault = new FakeVaultAdapter();
+function buildDevice(input: {
+  baseUrl: string;
+  deviceToken: string;
+  name: string;
+  roomId: string;
+  vault?: FakeVaultAdapter;
+  persistedRoom?: MountedRoomState;
+  docAdapter?: FakeDataAdapter;
+}): Device {
+  const vault = input.vault ?? new FakeVaultAdapter();
   const server: ServerConnection = {
     id: "server_1",
     baseUrl: input.baseUrl,
@@ -204,7 +227,14 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
   };
   const api = new RelayApiClient(input.baseUrl, input.deviceToken);
   const syncEngine = new VaultSyncEngine(vault, api);
-  const room: MountedRoomState = { roomId: input.roomId, mountPath: MOUNT, files: {}, crdtEnabled: true, canPushLocalEdits: true };
+  const room: MountedRoomState = input.persistedRoom ?? {
+    roomId: input.roomId,
+    serverId: server.id,
+    mountPath: MOUNT,
+    files: {},
+    crdtEnabled: true,
+    canPushLocalEdits: true
+  };
   const sentCrdtMessages: SyncClientMessage[] = [];
   const receivedCrdtMessages: SyncServerMessage[] = [];
   const presenceSent: SyncClientMessage[] = [];
@@ -215,7 +245,9 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
   let onSessionRetiring = (_roomId: string, _relativePath: string): void => undefined;
 
   let socket: RoomSyncSocket;
-  const docStore = new CrdtDocStore(new FakeDataAdapter() as unknown as DataAdapter, `crdt-${input.name}`);
+  const docAdapter = input.docAdapter ?? new FakeDataAdapter();
+  const docStore = new CrdtDocStore(docAdapter as unknown as DataAdapter, `crdt-${input.name}`);
+  let journal: CrdtOperationJournal;
   const crdt = new CrdtSessionManager({
     send: (message) => {
       sentCrdtMessages.push(message);
@@ -231,9 +263,39 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
     renameDiskFile: async (_roomId, oldRelativePath, newRelativePath) => {
       await vault.rename(`${MOUNT}/${oldRelativePath}`, `${MOUNT}/${newRelativePath}`);
     },
+    isPathProtectedByJournal: (roomId, relativePath) => journal?.isPathProtected(roomId, relativePath) ?? false,
     onSessionOpened: () => onSessionOpened(),
     onSessionRetiring: (roomId, relativePath) => onSessionRetiring(roomId, relativePath)
   });
+  const buildJournal = (): CrdtOperationJournal => new CrdtOperationJournal({
+    getRoom: (roomId) => roomId === room.roomId ? room : undefined,
+    persist: async () => undefined,
+    canReplay: (candidate) => !candidate.unmounted && candidate.crdtEnabled === true && candidate.canPushLocalEdits === true,
+    pathExists: async (_roomId, relativePath) => vault.files.has(`${MOUNT}/${relativePath}`),
+    create: async (roomId, relativePath, operationId) => {
+      const session = await crdt.ensureSession(roomId, relativePath, { brandNewNote: true, operationId });
+      return { relativePath: session.relativePath };
+    },
+    rename: (roomId, oldRelativePath, relativePath, operationId) =>
+      crdt.renameSession(roomId, oldRelativePath, relativePath, { operationId }),
+    resolveCreate: (roomId, relativePath, operationId) =>
+      crdt.resolveCreateOperation(roomId, relativePath, operationId),
+    resolveRename: (roomId, oldRelativePath, relativePath, operationId) =>
+      crdt.resolveRenameOperation(roomId, oldRelativePath, relativePath, operationId),
+    reconcilePath: async (roomId, relativePath) => {
+      const session = await crdt.ensureSession(roomId, relativePath);
+      await session.initialSync;
+    },
+    queueDelete: async () => undefined,
+    convertToCas: async () => undefined,
+    onUnsupported: () => {
+      throw new Error("The test relay did not advertise CRDT operation receipts.");
+    },
+    onReplayError: (_roomId, operation, error) => {
+      throw new Error(`Failed to replay ${operation.operationId}: ${error.message}`);
+    }
+  });
+  journal = buildJournal();
   const controller = new CrdtEditorController({
     getSessionManager: () => crdt,
     resolveCrdtTarget: (path) => (path === vaultPath ? { roomId: input.roomId, relativePath: NOTE } : undefined)
@@ -258,7 +320,22 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
     onRevoked: () => undefined,
     onRoomDeleted: () => undefined,
     onAccessRevoked: () => undefined,
-    onStateChange: () => undefined
+    onStateChange: (state) => {
+      if (state !== "connected") journal.markDisconnected();
+    },
+    isCrdtPathProtected: (roomId, relativePath) =>
+      journal.isPathProtected(roomId, relativePath) || (room.pendingCrdtTextPaths?.includes(relativePath) ?? false),
+    onRoomSnapshotApplied: (roomId, receiptsSupported) => {
+      journal.markSnapshotReady(roomId, receiptsSupported);
+      if (editorOpen) void controller.syncOpenViews([{ vaultPath, view }]);
+      for (const relativePath of [...(room.pendingCrdtTextPaths ?? [])]) {
+        void crdt.ensureSession(roomId, relativePath, { brandNewNote: false }).then(async (session) => {
+          await session.initialSync;
+          room.pendingCrdtTextPaths = room.pendingCrdtTextPaths?.filter((path) => path !== relativePath);
+          if (editorOpen) await controller.syncOpenViews([{ vaultPath, view }]);
+        });
+      }
+    }
   });
   sockets.push(socket);
 
@@ -290,8 +367,20 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
       const at = view.state.doc.length;
       view.dispatch({ changes: { from: at, to: at, insert: text } });
     },
+    replace: (from, to, text) => {
+      view.dispatch({ changes: { from, to, insert: text } });
+    },
     saveEditor: () => {
       vault.files.set(vaultPath, view.state.doc.toString());
+    },
+    reloadEditorOnVaultWrites: () => {
+      vault.onWrite = (path, content) => {
+        if (path !== vaultPath || !controller.isBound(view)) return;
+        const current = view.state.doc.toString();
+        if (current !== content) {
+          view.dispatch({ changes: { from: 0, to: current.length, insert: content } });
+        }
+      };
     },
     openEditor: async () => {
       editorOpen = true;
@@ -362,7 +451,50 @@ function buildDevice(input: { baseUrl: string; deviceToken: string; name: string
       const sessions = (crdt as unknown as { sessions: Map<string, { ytext: Y.Text; boundToEditor: boolean; epoch: number }> }).sessions;
       const session = [...sessions.values()].find((candidate) => candidate.epoch >= 0);
       return session ? { text: session.ytext.toString(), bound: session.boundToEditor, epoch: session.epoch } : undefined;
-    }
+    },
+    recordOfflineCreate: async (relativePath, text) => {
+      vault.files.set(`${MOUNT}/${relativePath}`, text);
+      await journal.recordCreate(room.roomId, relativePath);
+    },
+    recordOfflineRename: async (oldRelativePath, relativePath) => {
+      await vault.rename(`${MOUNT}/${oldRelativePath}`, `${MOUNT}/${relativePath}`);
+      await journal.recordRename(room.roomId, oldRelativePath, relativePath);
+    },
+    recordOfflineModify: (relativePath) => {
+      const paths = (room.pendingCrdtTextPaths ??= []);
+      if (!paths.includes(relativePath)) paths.push(relativePath);
+    },
+    connect: () => {
+      socket.connect();
+      socket.subscribe(room.roomId);
+    },
+    restart: async () => {
+      socket.disconnect();
+      controller.unbindAll();
+      crdt.dispose();
+      view.destroy();
+      const viewIndex = views.indexOf(view);
+      if (viewIndex >= 0) views.splice(viewIndex, 1);
+      const persisted = JSON.parse(JSON.stringify({
+        servers: [server],
+        activeServerId: server.id,
+        mountedRooms: { [room.roomId]: room },
+        roomMountPaths: { [room.roomId]: room.mountPath }
+      }));
+      const restartedRoom = migrateVaultRoomsSettings(persisted).settings.mountedRooms[room.roomId];
+      if (!restartedRoom) throw new Error("The persisted room was lost during settings migration.");
+      return buildDevice({ ...input, vault, persistedRoom: restartedRoom, docAdapter });
+    },
+    markFirstOperationAttempted: () => {
+      const operation = room.pendingCrdtOperations?.[0];
+      if (!operation) throw new Error("Expected a pending CRDT operation.");
+      operation.attemptedAt = "2026-08-03T00:00:01.000Z";
+    },
+    pendingOperationIds: () => (room.pendingCrdtOperations ?? []).map((operation) => operation.operationId),
+    serverPaths: async () => (await api.listFiles(room.roomId)).files
+      .filter((file) => !file.deleted)
+      .map((file) => file.relativePath),
+    serverTextAt: async (relativePath) => (await api.readFile(room.roomId, relativePath)).content
   };
 }
 
@@ -417,6 +549,244 @@ async function setupCrdtRoomWithTwoDevices() {
   await waitFor(() => a.socket.getState() === "connected" && b.socket.getState() === "connected", "both devices to connect");
   return { app, room, a, b };
 }
+
+describe("CRDT two-client: paused transport with concurrent same-line edits", () => {
+  it("keeps a one-sided edit made after cold restart and before the first connection", { timeout: 30_000 }, async () => {
+    const fixture = await setupCrdtRoomWithTwoDevices();
+    let { a, b } = fixture;
+
+    a.vault.files.set(vaultPath, "");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await a.openEditor();
+    a.type("shared line");
+    await waitFor(async () => (await a.serverText()) === "shared line", "relay to materialize the initial line");
+    await b.openEditor();
+    await waitFor(() => b.editorBound() && b.editorText() === "shared line", "B to converge before restart");
+    a.saveEditor();
+    b.saveEditor();
+
+    a = await a.restart();
+    b = await b.restart();
+    await a.openEditor();
+    await b.openEditor();
+    a.replace(0, "shared line".length, "A only offline edit");
+    a.saveEditor();
+    a.recordOfflineModify(NOTE);
+
+    a.connect();
+    b.connect();
+    await waitFor(() => a.socket.getState() === "connected" && b.socket.getState() === "connected", "both cold devices to connect");
+    await waitFor(() => a.editorText() === b.editorText(), "the one-sided cold edit to converge");
+    await waitFor(async () => (await a.serverText()) === "A only offline edit", "relay to retain the one-sided cold edit");
+
+    expect(a.editorText()).toBe("A only offline edit");
+    expect(b.editorText()).toBe("A only offline edit");
+    expect(a.room.pendingCrdtTextPaths).toEqual([]);
+  });
+
+  it("keeps edits made after a cold restart but before either device's first connection", { timeout: 30_000 }, async () => {
+    const fixture = await setupCrdtRoomWithTwoDevices();
+    let { a, b } = fixture;
+
+    a.vault.files.set(vaultPath, "");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await a.openEditor();
+    a.type("shared line");
+    await waitFor(async () => (await a.serverText()) === "shared line", "relay to materialize the initial line");
+    await b.openEditor();
+    await waitFor(() => b.editorBound() && b.editorText() === "shared line", "B to converge before restart");
+    a.saveEditor();
+    b.saveEditor();
+
+    a = await a.restart();
+    b = await b.restart();
+    await a.openEditor();
+    await b.openEditor();
+    a.replace("shared line".length, "shared line".length, " + A offline");
+    b.replace("shared line".length, "shared line".length, " + B offline");
+    a.saveEditor();
+    b.saveEditor();
+    a.recordOfflineModify(NOTE);
+    b.recordOfflineModify(NOTE);
+
+    a.connect();
+    b.connect();
+    await waitFor(() => a.socket.getState() === "connected" && b.socket.getState() === "connected", "both cold devices to connect");
+    await waitFor(() => a.editorBound() && b.editorBound(), "both cold editors to bind after epoch discovery");
+    await waitFor(() => a.editorText() === b.editorText(), "cold-start edits to converge");
+    await waitFor(async () => (await a.serverText()) === a.editorText(), "relay to materialize both cold-start edits");
+
+    expect(a.editorText()).toContain("A offline");
+    expect(a.editorText()).toContain("B offline");
+    expect(a.room.pendingCrdtTextPaths).toEqual([]);
+    expect(b.room.pendingCrdtTextPaths).toEqual([]);
+  });
+
+  it("keeps a single device's offline edit when both clients reconnect", { timeout: 30_000 }, async () => {
+    const { a, b } = await setupCrdtRoomWithTwoDevices();
+
+    a.vault.files.set(vaultPath, "");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await a.openEditor();
+    a.type("shared line");
+    await waitFor(async () => (await a.serverText()) === "shared line", "relay to materialize the initial line");
+    await b.openEditor();
+    await waitFor(() => b.editorBound() && b.editorText() === "shared line", "B to converge before the pause");
+    a.saveEditor();
+    b.saveEditor();
+    a.reloadEditorOnVaultWrites();
+    b.reloadEditorOnVaultWrites();
+
+    a.socket.disconnect();
+    b.socket.disconnect();
+    a.replace(0, "shared line".length, "A offline edit");
+
+    a.socket.connect();
+    b.socket.connect();
+    await waitFor(() => a.socket.getState() === "connected" && b.socket.getState() === "connected", "both devices to reconnect");
+    await waitFor(() => a.editorText() === b.editorText(), "both editors to converge after A's offline edit");
+    await waitFor(async () => (await a.serverText()) === "A offline edit", "relay to retain A's offline edit");
+
+    expect(a.editorText()).toBe("A offline edit");
+    expect(b.editorText()).toBe("A offline edit");
+  });
+
+  it("keeps both offline edits when the preserved sessions reconnect", { timeout: 30_000 }, async () => {
+    const { a, b } = await setupCrdtRoomWithTwoDevices();
+
+    a.vault.files.set(vaultPath, "");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await a.openEditor();
+    a.type("shared line");
+    await waitFor(async () => (await a.serverText()) === "shared line", "relay to materialize the initial line");
+    await b.openEditor();
+    await waitFor(() => b.editorBound() && b.editorText() === "shared line", "B to converge before the pause");
+    a.saveEditor();
+    b.saveEditor();
+    a.reloadEditorOnVaultWrites();
+    b.reloadEditorOnVaultWrites();
+
+    // Pause only the transport. The production Pause/Start fix keeps these exact managers and
+    // editor bindings alive, then replaces the sockets around them.
+    a.socket.disconnect();
+    b.socket.disconnect();
+    a.replace(0, "shared line".length, "A offline edit");
+    b.replace(0, "shared line".length, "B offline edit");
+    expect(a.editorText()).toBe("A offline edit");
+    expect(b.editorText()).toBe("B offline edit");
+
+    a.socket.connect();
+    b.socket.connect();
+    await waitFor(() => a.socket.getState() === "connected" && b.socket.getState() === "connected", "both devices to reconnect");
+    await waitFor(() => a.editorText() === b.editorText(), "both editors to merge the offline replacements");
+    await waitFor(async () => (await a.serverText()) === a.editorText(), "relay to materialize the merged text");
+
+    expect(a.editorText()).toContain("A offline edit");
+    expect(a.editorText()).toContain("B offline edit");
+
+    const idleSent = [a.crdtMessageCount(), b.crdtMessageCount()];
+    const idleReceived = [a.receivedCrdtTypes(), b.receivedCrdtTypes()];
+    await new Promise((resolve) => setTimeout(resolve, 1_750));
+    expect([a.crdtMessageCount(), b.crdtMessageCount()]).toEqual(idleSent);
+    expect([a.receivedCrdtTypes(), b.receivedCrdtTypes()]).toEqual(idleReceived);
+  });
+});
+
+describe("CRDT two-client: offline structural journal", () => {
+  it("does not resurrect an open session's old path after an offline rename reconnects", { timeout: 30_000 }, async () => {
+    const { app, room, a } = await setupCrdtRoomWithTwoDevices();
+    const repo = (app as unknown as {
+      testRepo: { getFile: (roomId: string, relativePath: string) => { id: string; crdt_epoch: number } | null };
+    }).testRepo;
+
+    a.vault.files.set(vaultPath, "existing note");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await waitFor(() => repo.getFile(room.id, NOTE) !== null, "the existing note to be created");
+
+    a.socket.disconnect();
+    await a.recordOfflineRename(NOTE, "renamed.md");
+    a.socket.connect();
+
+    await waitFor(() => a.pendingOperationIds().length === 0, "the offline rename receipt to clear the journal");
+    expect(repo.getFile(room.id, "renamed.md")).not.toBeNull();
+    expect(repo.getFile(room.id, NOTE)).toBeNull();
+  });
+
+  it("preserves an existing note's document identity and epoch across offline rename and restart", { timeout: 30_000 }, async () => {
+    const { app, room, a: originalA } = await setupCrdtRoomWithTwoDevices();
+    let a = originalA;
+    const repo = (app as unknown as {
+      testRepo: { getFile: (roomId: string, relativePath: string) => { id: string; crdt_epoch: number } | null };
+    }).testRepo;
+
+    a.vault.files.set(vaultPath, "existing note");
+    await a.crdt.ensureSession(a.room.roomId, NOTE, { brandNewNote: true });
+    await waitFor(() => repo.getFile(room.id, NOTE) !== null, "the existing note to be created");
+    const before = repo.getFile(room.id, NOTE)!;
+
+    a.socket.disconnect();
+    await a.recordOfflineRename(NOTE, "renamed.md");
+    a = await a.restart();
+    a.socket.connect();
+    a.socket.subscribe(room.id);
+
+    await waitFor(() => a.pendingOperationIds().length === 0, "the offline rename receipt to clear the journal");
+    const after = repo.getFile(room.id, "renamed.md");
+    expect(after).toMatchObject({ id: before.id, crdt_epoch: before.crdt_epoch });
+    expect(repo.getFile(room.id, NOTE)).toBeNull();
+  });
+
+  it("replays an offline create/rename once after a full client restart", { timeout: 30_000 }, async () => {
+    const { a: originalA, b } = await setupCrdtRoomWithTwoDevices();
+    let a = originalA;
+
+    a.socket.disconnect();
+    await a.recordOfflineCreate("draft.md", "created while offline");
+    await a.recordOfflineRename("draft.md", "final.md");
+    const [persistedOperationId] = a.pendingOperationIds();
+    expect(persistedOperationId).toBeTruthy();
+
+    a = await a.restart();
+    expect(a.pendingOperationIds()).toEqual([persistedOperationId]);
+    a.socket.connect();
+    a.socket.subscribe(a.room.roomId);
+
+    await waitFor(() => a.socket.getState() === "connected", "A to reconnect");
+    await waitFor(() => a.pendingOperationIds().length === 0, "the persisted operation receipt to clear the journal");
+    await waitFor(async () => (await a.serverPaths()).includes("final.md"), "the relay to create the final path");
+    await waitFor(async () => (await a.serverTextAt("final.md")) === "created while offline", "the relay to materialize the offline text");
+
+    expect(await a.serverPaths()).toEqual(["final.md"]);
+
+    const idleSent = [a.crdtMessageCount(), b.crdtMessageCount()];
+    const idleReceived = [a.receivedCrdtTypes(), b.receivedCrdtTypes()];
+    await new Promise((resolve) => setTimeout(resolve, 1_750));
+    expect([a.crdtMessageCount(), b.crdtMessageCount()]).toEqual(idleSent);
+    expect([a.receivedCrdtTypes(), b.receivedCrdtTypes()]).toEqual(idleReceived);
+  });
+
+  it("preserves final disk text when a create became ambiguous before an offline rename", { timeout: 30_000 }, async () => {
+    const { a: originalA } = await setupCrdtRoomWithTwoDevices();
+    let a = originalA;
+
+    a.socket.disconnect();
+    await a.recordOfflineCreate("draft.md", "content after an ambiguous create");
+    a.markFirstOperationAttempted();
+    await a.recordOfflineRename("draft.md", "final.md");
+    expect(a.pendingOperationIds()).toHaveLength(2);
+
+    a = await a.restart();
+    a.socket.connect();
+    a.socket.subscribe(a.room.roomId);
+
+    await waitFor(() => a.pendingOperationIds().length === 0, "both persisted structural operations to receive ACKs");
+    await waitFor(
+      async () => (await a.serverTextAt("final.md")) === "content after an ambiguous create",
+      "the final path to reconcile its local disk text"
+    );
+    expect(await a.serverPaths()).toEqual(["final.md"]);
+  });
+});
 
 describe("CRDT two-client: unmount/remount then type", () => {
   it("does not duplicate content across a remount, and a keystroke lands exactly once", { timeout: 30_000 }, async () => {

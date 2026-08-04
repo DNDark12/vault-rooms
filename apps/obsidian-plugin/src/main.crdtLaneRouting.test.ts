@@ -94,6 +94,12 @@ type WatchMountedRoomInternals = {
   vaultAdapter: VaultAdapter;
   syncEngine: VaultSyncEngine;
   crdtSessionManager: CrdtSessionManager;
+  crdtOperationJournal: {
+    recordCreate: ReturnType<typeof vi.fn>;
+    recordRename: ReturnType<typeof vi.fn>;
+    recordDelete: ReturnType<typeof vi.fn>;
+    isPathProtected: ReturnType<typeof vi.fn>;
+  };
   roomWatchers: Map<string, () => void>;
   roomCoordinators: Map<string, unknown>;
   saveSettings: () => Promise<void>;
@@ -118,6 +124,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     visibleRoomCrdtEnabled?: boolean;
     persistedCrdtEnabled: boolean;
     renameSession?: ReturnType<typeof vi.fn>;
+    ensureSessionError?: Error;
     // Fifth hardware-testing round (2026-07-24): lets a test simulate the startup window where this
     // device can't (yet) push - visibleRooms empty, so canPushLocalEdits falls back to this persisted
     // value. Defaults true so every pre-existing test keeps its can-push behavior unchanged.
@@ -161,9 +168,21 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
               crdtEnabled: options.visibleRoomCrdtEnabled
             }
           ];
-    const ensureSession = vi.fn().mockResolvedValue({ roomId: "room_1", relativePath: "Board.md", epoch: 0, boundToEditor: false });
+    const ensureSession = options.ensureSessionError
+      ? vi.fn().mockRejectedValue(options.ensureSessionError)
+      : vi.fn().mockResolvedValue({
+          roomId: "room_1",
+          relativePath: "Board.md",
+          epoch: 0,
+          boundToEditor: false,
+          initialSync: Promise.resolve()
+        });
     const forgetLocalDelete = vi.fn().mockResolvedValue(undefined);
     const renameSession = options.renameSession ?? vi.fn().mockResolvedValue(undefined);
+    const recordCreate = vi.fn().mockResolvedValue(undefined);
+    const recordRename = vi.fn((roomId: string, oldRelativePath: string, relativePath: string) =>
+      renameSession(roomId, oldRelativePath, relativePath)
+    );
     // A rejecting writeFile makes it loudly obvious (unhandled rejection / thrown assertion) if the
     // legacy CAS lane's debounced push were ever to actually run - though the primary assertions
     // below are synchronous and don't require the debounce timer to fire at all.
@@ -177,13 +196,24 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     internals.selfInflictedRenames = new Set<string>();
     internals.vaultAdapter = vaultAdapter;
     internals.syncEngine = new VaultSyncEngine(vaultAdapter, api);
-    internals.crdtSessionManager = { ensureSession, forgetLocalDelete, renameSession } as unknown as CrdtSessionManager;
+    internals.crdtSessionManager = {
+      ensureSession,
+      forgetLocalDelete,
+      renameSession,
+      isSessionOpen: vi.fn().mockReturnValue(false)
+    } as unknown as CrdtSessionManager;
+    internals.crdtOperationJournal = {
+      recordCreate,
+      recordRename,
+      recordDelete: vi.fn().mockResolvedValue({ handled: false, relativePath: "Board.md" }),
+      isPathProtected: vi.fn().mockReturnValue(false)
+    };
     internals.roomWatchers = new Map();
     internals.roomCoordinators = new Map();
     internals.saveSettings = vi.fn().mockResolvedValue(undefined);
     internals.getActiveServer = () => server;
 
-    return { plugin, internals, roomState, vaultAdapter, ensureSession, forgetLocalDelete, renameSession };
+    return { plugin, internals, roomState, vaultAdapter, ensureSession, forgetLocalDelete, renameSession, recordCreate, recordRename };
   }
 
   it("routes a local .md modify to the CRDT lane using the persisted crdtEnabled flag when visibleRooms is still empty at startup", () => {
@@ -201,6 +231,21 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     expect(roomState.files["Board.md"]).toBeUndefined();
   });
 
+  it("durably queues a cold-start Markdown edit when the relay is unavailable before the first session opens", async () => {
+    const { internals, roomState, vaultAdapter, ensureSession } = setUp({
+      persistedCrdtEnabled: true,
+      ensureSessionError: new Error("socket closed")
+    });
+
+    internals.watchMountedRoom("room_1");
+    vaultAdapter.emit({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" });
+
+    await vi.waitFor(() => expect(ensureSession).toHaveBeenCalled());
+    expect(roomState.pendingCrdtTextPaths).toEqual(["Board.md"]);
+    expect(internals.saveSettings).toHaveBeenCalled();
+    expect(roomState.files["Board.md"]).toBeUndefined();
+  });
+
   it("still routes to the CRDT lane once visibleRooms is populated and agrees with the persisted flag", () => {
     const { internals, roomState, vaultAdapter, ensureSession } = setUp({ visibleRoomCrdtEnabled: true, persistedCrdtEnabled: true });
 
@@ -212,6 +257,16 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     // duplicate (fifteenth hardware-testing round).
     expect(ensureSession).toHaveBeenCalledWith("room_1", "Board.md", { brandNewNote: false });
     expect(roomState.files["Board.md"]).toBeUndefined();
+  });
+
+  it("records a brand-new Markdown note in the durable journal instead of sending crdt_create directly", () => {
+    const { internals, vaultAdapter, ensureSession, recordCreate } = setUp({ persistedCrdtEnabled: true });
+
+    internals.watchMountedRoom("room_1");
+    vaultAdapter.emit({ type: "create", path: "Vault Rooms/demo/Projects Demo/Offline.md" });
+
+    expect(recordCreate).toHaveBeenCalledWith("room_1", "Offline.md");
+    expect(ensureSession).not.toHaveBeenCalled();
   });
 
   it("routes to the legacy CAS lane for a non-CRDT room (visibleRooms confirms crdtEnabled: false even though a stale persisted flag says true)", () => {
@@ -228,7 +283,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
 
   describe("[fourth hardware-testing round] rename short-circuit", () => {
     it("routes an in-room rename to renameSession instead of forgetLocalDelete+ensureSession, and no-ops the paired create", () => {
-      const { internals, ensureSession, forgetLocalDelete, renameSession } = setUp({ persistedCrdtEnabled: true });
+      const { internals, ensureSession, forgetLocalDelete, renameSession, recordRename } = setUp({ persistedCrdtEnabled: true });
 
       internals.watchMountedRoom("room_1");
       // FakeVaultAdapter's emit() drives the real (unmocked) fileWatcher.ts, which for an in-room
@@ -239,6 +294,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
         oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
       });
 
+      expect(recordRename).toHaveBeenCalledWith("room_1", "Old.md", "New.md");
       expect(renameSession).toHaveBeenCalledWith("room_1", "Old.md", "New.md");
       expect(forgetLocalDelete).not.toHaveBeenCalled();
       expect(ensureSession).not.toHaveBeenCalled();
@@ -323,7 +379,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
       expect(forgetLocalDelete).not.toHaveBeenCalled();
     });
 
-    it("DOES create at the new path when the old path genuinely wasn't on the server (NOT_FOUND)", async () => {
+    it("does not create a second document when a journal replay rename reports NOT_FOUND", async () => {
       const rejecting = vi.fn().mockRejectedValue(new CrdtRejectedError("NOT_FOUND", "File not found."));
       const { internals, ensureSession, forgetLocalDelete } = setUp({ persistedCrdtEnabled: true, renameSession: rejecting });
 
@@ -334,9 +390,9 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
         oldPath: "Vault Rooms/demo/Projects Demo/Old.md"
       });
 
-      // There was nothing to rename, so this really is a first create - the note must still sync.
-      await vi.waitFor(() => expect(ensureSession).toHaveBeenCalledWith("room_1", "New.md"));
-      expect(forgetLocalDelete).toHaveBeenCalledWith("room_1", "Old.md");
+      await vi.waitFor(() => expect(rejecting).toHaveBeenCalledWith("room_1", "Old.md", "New.md"));
+      expect(ensureSession).not.toHaveBeenCalled();
+      expect(forgetLocalDelete).not.toHaveBeenCalled();
     });
 
     // Ninth hardware-testing round (2026-07-24): a rename the *plugin itself* performed (applying a

@@ -89,6 +89,17 @@ describe("CRDT persistence (Phase 2)", () => {
     expect(repo.getFile(room.id, "note.md")).toMatchObject({ id: file.id, version: 1 });
   });
 
+  it("indexes cross-room operation ID checks without changing receipt uniqueness", async () => {
+    const { db } = await createTestRepo();
+    const indexes = db.prepare("pragma index_list(crdt_operation_receipts)").all() as Array<{ name: string; unique: number }>;
+
+    expect(indexes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "idx_crdt_operation_receipts_operation_id", unique: 0 })
+    ]));
+    const columns = db.prepare("pragma index_info(idx_crdt_operation_receipts_operation_id)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual(["operation_id"]);
+  });
+
   it("appends CRDT updates with an atomic per-(file,epoch) sequence and lists them in order", async () => {
     const { repo } = await createTestRepo();
     const { file } = makeRoomAndFile(repo);

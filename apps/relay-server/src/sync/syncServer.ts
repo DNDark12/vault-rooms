@@ -1,5 +1,13 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, isCrdtEligiblePath, isEligiblePath, normalizeRelativePath, type SyncClientMessage } from "@vault-rooms/protocol";
+import {
+  AppError,
+  contentTypeForPath,
+  isCrdtEligiblePath,
+  isLegacyEligiblePath,
+  isValidBase64,
+  normalizeRelativePath,
+  type SyncClientMessage
+} from "@vault-rooms/protocol";
 import { createId } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
 import type { RoomRow } from "../db/schema.js";
@@ -7,6 +15,7 @@ import { requestTransport, type RequestTransport } from "../routes/security.rout
 import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
 import { formatFileLimit } from "../services/userFacingMessages.js";
+import { fileContentByteLength } from "../services/fileContentSize.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 import type { CrdtDocManager } from "./crdtDocManager.js";
 import type { PresenceService } from "./presenceService.js";
@@ -28,6 +37,7 @@ export function registerSyncRoutes(
     timerHost: SyncTimerHost;
     crdtDocManager: CrdtDocManager;
     presenceService: PresenceService;
+    withDbAccess?: <T>(operation: () => T | Promise<T>) => Promise<T>;
   }
 ): void {
   app.get("/sync", { websocket: true }, (socket, request) => {
@@ -49,6 +59,7 @@ export function handleSyncSocket(
     timerHost: SyncTimerHost;
     crdtDocManager: CrdtDocManager;
     presenceService: PresenceService;
+    withDbAccess?: <T>(operation: () => T | Promise<T>) => Promise<T>;
   }
 ): void {
   if (registry.size() >= options.maxConnections) {
@@ -61,7 +72,7 @@ export function handleSyncSocket(
     socket,
     principal: null,
     subscriptions: new Set(),
-    capabilities: { crdt: false, presence: false }
+    capabilities: { crdt: false, presence: false, extendedBinarySync: false }
   };
   registry.add(connection);
 
@@ -91,7 +102,9 @@ export function handleSyncSocket(
     // plugin's own process, risks taking down more than just this one connection. Every
     // message-type branch below also has its own try/catch for a clean client-facing
     // rejection; this is the last-resort backstop for anything that slips past those.
-    handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString()).catch((error) => {
+    const handle = () => handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString());
+    const pending = options.withDbAccess ? options.withDbAccess(handle) : handle();
+    pending.catch((error) => {
       console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
       try {
         connection.socket.close();
@@ -189,7 +202,8 @@ async function handleMessage(
           type: "hello_ok",
           requestId: message.requestId,
           userId: current.userId,
-          deviceId: current.deviceId
+          deviceId: current.deviceId,
+          capabilities: { crdtOperationReceipts: true }
         });
         return;
       }
@@ -200,7 +214,8 @@ async function handleMessage(
       // `presence` is gated on `crdt` because presence only exists for live CRDT documents.
       connection.capabilities = {
         crdt: Boolean(message.capabilities?.crdt),
-        presence: Boolean(message.capabilities?.crdt && message.capabilities?.presence)
+        presence: Boolean(message.capabilities?.crdt && message.capabilities?.presence),
+        extendedBinarySync: Boolean(message.capabilities?.extendedBinarySync)
       };
       options.onAuthenticated();
       repo.audit({
@@ -216,7 +231,8 @@ async function handleMessage(
         type: "hello_ok",
         requestId: message.requestId,
         userId: principal.userId,
-        deviceId: principal.deviceId
+        deviceId: principal.deviceId,
+        capabilities: { crdtOperationReceipts: true }
       });
     } catch {
       // A malformed/missing token, or any other unexpected failure - treat it the same as an
@@ -341,6 +357,13 @@ async function handleMessage(
               aclRules: snapshotAclRules
             })
           )
+          // Mixed-version compatibility (2026-08-03 sync-widening): a connection that hasn't
+          // advertised extendedBinarySync never learns a legacy-ineligible path exists in this room
+          // at all - the same "invisible unless you opt in" treatment CRDT already gets from older
+          // clients. Filtering it out of the snapshot (rather than sending it and letting the client
+          // choke) is what keeps an old build from ever attempting to materialize content it would
+          // misinterpret as UTF-8 text.
+          .filter((file) => connection.capabilities.extendedBinarySync || isLegacyEligiblePath(file.relative_path))
           .map((file) => ({
             relativePath: file.relative_path,
             version: file.version,
@@ -362,9 +385,8 @@ async function handleMessage(
     try {
       const room = requireRoom(repo, message.roomId);
       const relativePath = normalizeRelativePath(message.relativePath);
-      if (!isEligiblePath(relativePath)) {
-        throw new AppError("INVALID_PATH", "This file type isn't supported for sync yet (supported: Markdown/text/canvas/JSON/CSV, common image formats, and PDF).", 422);
-      }
+      // Every path that normalizes cleanly syncs now (2026-08-03: file-type sync widened to match
+      // Obsidian's own vault surface - see isEligiblePath in @vault-rooms/protocol).
       // Legacy write policy (contract 1.4, decided as "reject"): a room that has opted into CRDT
       // sync for this path no longer accepts whole-file writes through the CAS lane - the client
       // must use the crdt_* message types (or upgrade to a build that speaks them) instead. Reads
@@ -377,7 +399,11 @@ async function handleMessage(
           409
         );
       }
-      if (Buffer.byteLength(message.content, "utf8") > options.maxFileBytes) {
+      const contentEncoding = contentTypeForPath(relativePath) === "binary" ? "base64" : "utf8";
+      if (contentEncoding === "base64" && !isValidBase64(message.content)) {
+        throw new AppError("VALIDATION_ERROR", "This file's contents were not valid for its type.", 422);
+      }
+      if (fileContentByteLength(message.content, contentEncoding) > options.maxFileBytes) {
         throw new AppError(
           "FILE_TOO_LARGE",
           `This file is larger than this server accepts (limit ${formatFileLimit(options.maxFileBytes)}).`,
@@ -417,13 +443,18 @@ async function handleMessage(
           version: result.version,
           sha256: result.sha256,
           content: message.content,
+          contentEncoding,
           updatedBy: { userId: connection.principal.userId, displayName: connection.principal.userDisplayName },
           updatedAt: new Date().toISOString()
         },
         {
           exclude: connection,
           canReceive: (principal) =>
-            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath, aclRules: fileChangeAclRules })
+            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath, aclRules: fileChangeAclRules }),
+          // Mixed-version compatibility (2026-08-03 sync-widening) - see isLegacyEligiblePath's doc
+          // comment: a connection that hasn't advertised extendedBinarySync never receives fanout
+          // for a path it wouldn't have understood before the widening.
+          connectionFilter: (recipient) => recipient.capabilities.extendedBinarySync || isLegacyEligiblePath(relativePath)
         }
       );
     } catch (error) {
@@ -481,7 +512,8 @@ async function handleMessage(
         {
           exclude: connection,
           canReceive: (principal) =>
-            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath, aclRules: fileDeleteAclRules })
+            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath, aclRules: fileDeleteAclRules }),
+          connectionFilter: (recipient) => recipient.capabilities.extendedBinarySync || isLegacyEligiblePath(relativePath)
         }
       );
     } catch (error) {
@@ -499,23 +531,67 @@ async function handleMessage(
     const relativePath = message.relativePath;
     try {
       const room = requireRoom(repo, roomId);
-      const normalizedPath = requireCrdtTarget(room, relativePath);
+      const normalizedPath = requireCrdtEligiblePath(relativePath);
       requireCrdtCapability(connection);
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath: normalizedPath });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:create", relativePath: normalizedPath });
+      if (!room.crdt_enabled) {
+        const recorded = message.operationId
+          ? repo.replayCrdtCreateReceipt({
+              roomId: room.id,
+              relativePath: normalizedPath,
+              adoptIfExists: message.adoptIfExists === true,
+              operationId: message.operationId,
+              deviceId: connection.principal.deviceId
+            })
+          : null;
+        if (!recorded) {
+          throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
+        }
+        sendJson(connection.socket, {
+          type: "crdt_created",
+          requestId: message.requestId,
+          roomId: room.id,
+          relativePath: recorded.result.relativePath,
+          documentId: recorded.result.fileId,
+          epoch: recorded.result.epoch,
+          adopted: recorded.adopted
+        });
+        return;
+      }
       const createdBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
-      const existingBeforeCreate = repo.getFile(room.id, normalizedPath);
-      const created = repo.createCrdtFile({
-        roomId: room.id,
-        relativePath: normalizedPath,
-        actorUserId: connection.principal.userId,
-        actorDisplayName: connection.principal.userDisplayName,
-        adoptIfExists: message.adoptIfExists === true
-      });
+      let created: { fileId: string; epoch: number; relativePath: string };
+      let adopted: boolean;
+      let replayed = false;
+      if (message.operationId) {
+        const applied = await repo.durable(() =>
+          repo.createCrdtFileIdempotent({
+            roomId: room.id,
+            relativePath: normalizedPath,
+            actorUserId: connection.principal!.userId,
+            actorDisplayName: connection.principal!.userDisplayName,
+            adoptIfExists: message.adoptIfExists === true,
+            operationId: message.operationId!,
+            deviceId: connection.principal!.deviceId
+          })
+        );
+        created = applied.result;
+        adopted = applied.adopted;
+        replayed = applied.replayed;
+      } else {
+        const existingBeforeCreate = repo.getFile(room.id, normalizedPath);
+        created = repo.createCrdtFile({
+          roomId: room.id,
+          relativePath: normalizedPath,
+          actorUserId: connection.principal.userId,
+          actorDisplayName: connection.principal.userDisplayName,
+          adoptIfExists: message.adoptIfExists === true
+        });
+        adopted = Boolean(existingBeforeCreate && !existingBeforeCreate.deleted_at && created.fileId === existingBeforeCreate.id);
+      }
       // Seeding replaces the document's snapshot with a fresh empty Y.Doc, so it must never run for a
       // document that was *adopted* rather than created - that would wipe the note's content.
-      const adopted = Boolean(existingBeforeCreate && !existingBeforeCreate.deleted_at && created.fileId === existingBeforeCreate.id);
-      if (!adopted) {
+      if (!replayed && !adopted) {
         options.crdtDocManager.createDocument(created.fileId, created.epoch, createdBy);
       }
       // `created.relativePath` may differ from what was asked for: first creator keeps the name, and a
@@ -542,7 +618,7 @@ async function handleMessage(
       // 2026-07-24). Sent as an ordinary empty `remote_file_change` so CRDT-capable and legacy peers
       // alike just create the file; a CRDT peer that later opens it handshakes into the real document.
       const createdFile = repo.getFile(room.id, created.relativePath);
-      if (createdFile && !createdFile.deleted_at) {
+      if (!replayed && createdFile && !createdFile.deleted_at) {
         const createAclRules = repo.listAclRulesForRoom(room.id);
         registry.broadcastToRoom(
           room.id,
@@ -584,30 +660,64 @@ async function handleMessage(
     const relativePath = message.relativePath;
     try {
       const room = requireRoom(repo, roomId);
-      const normalizedOldPath = requireCrdtTarget(room, message.oldRelativePath);
-      const normalizedNewPath = requireCrdtTarget(room, relativePath);
+      const normalizedOldPath = requireCrdtEligiblePath(message.oldRelativePath);
+      const normalizedNewPath = requireCrdtEligiblePath(relativePath);
       requireCrdtCapability(connection);
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath: normalizedOldPath });
       // Mirrors exactly the two permissions the old delete+create translation required - a rename
       // grants no capability beyond what was already achievable via that slower path.
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:delete", relativePath: normalizedOldPath });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:create", relativePath: normalizedNewPath });
+      if (!room.crdt_enabled) {
+        const recorded = message.operationId
+          ? repo.replayCrdtRenameReceipt({
+              roomId: room.id,
+              oldRelativePath: normalizedOldPath,
+              relativePath: normalizedNewPath,
+              operationId: message.operationId,
+              deviceId: connection.principal.deviceId
+            })
+          : null;
+        if (!recorded) {
+          throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
+        }
+        sendJson(connection.socket, {
+          type: "crdt_renamed",
+          requestId: message.requestId,
+          roomId: room.id,
+          oldRelativePath: recorded.oldRelativePath,
+          relativePath: recorded.relativePath,
+          epoch: recorded.epoch
+        });
+        return;
+      }
       const renamedBy = { userId: connection.principal.userId, displayName: connection.principal.userDisplayName };
-      const result = repo.renameFile({
+      const renameInput = {
         roomId: room.id,
         oldRelativePath: normalizedOldPath,
         relativePath: normalizedNewPath,
         actorUserId: connection.principal.userId,
-        // Used only when the requested name is already held by another live document: the rename then
-        // lands on a disambiguated path (same policy as a colliding create) and the ack below reports
-        // whichever path it actually landed on, rather than rejecting with no way forward.
         actorDisplayName: connection.principal.userDisplayName
-      });
+      };
+      let replayed = false;
+      const result = message.operationId
+        ? await repo.durable(() => {
+            const applied = repo.renameCrdtFileIdempotent({
+              ...renameInput,
+              operationId: message.operationId!,
+              deviceId: connection.principal!.deviceId
+            });
+            replayed = applied.replayed;
+            return applied.result;
+          })
+        : repo.renameFile(renameInput);
       // A rename is path-only and deliberately leaves crdt_epoch untouched, so presence keyed by
       // (roomId, relativePath, epoch) does *not* follow the document - it would orphan at the old
       // path and render a second caret for the same person. Clear the old path before either side
       // learns about the rename; each client re-announces at the new path after its own handshake.
-      options.presenceService.removeDocument(room.id, result.oldRelativePath, result.epoch);
+      if (!replayed) {
+        options.presenceService.removeDocument(room.id, result.oldRelativePath, result.epoch);
+      }
       sendJson(connection.socket, {
         type: "crdt_renamed",
         requestId: message.requestId,
@@ -616,23 +726,25 @@ async function handleMessage(
         relativePath: result.relativePath,
         epoch: result.epoch
       });
-      const renameAclRules = repo.listAclRulesForRoom(room.id);
-      registry.broadcastToRoom(
-        room.id,
-        {
-          type: "remote_crdt_rename",
-          roomId: room.id,
-          oldRelativePath: result.oldRelativePath,
-          relativePath: result.relativePath,
-          epoch: result.epoch,
-          renamedBy
-        },
-        {
-          exclude: connection,
-          canReceive: (principal) =>
-            hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: normalizedNewPath, aclRules: renameAclRules })
-        }
-      );
+      if (!replayed) {
+        const renameAclRules = repo.listAclRulesForRoom(room.id);
+        registry.broadcastToRoom(
+          room.id,
+          {
+            type: "remote_crdt_rename",
+            roomId: room.id,
+            oldRelativePath: result.oldRelativePath,
+            relativePath: result.relativePath,
+            epoch: result.epoch,
+            renamedBy
+          },
+          {
+            exclude: connection,
+            canReceive: (principal) =>
+              hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: normalizedNewPath, aclRules: renameAclRules })
+          }
+        );
+      }
     } catch (error) {
       sendCrdtRejection(connection.socket, message.requestId, roomId, relativePath, error);
     }
@@ -740,12 +852,17 @@ async function handleMessage(
  *  (`.md` only) - every CRDT message type is rejected outright otherwise. Returns the normalized
  *  path on success so callers don't have to normalize twice. */
 function requireCrdtTarget(room: RoomRow, relativePath: string): string {
-  const normalized = normalizeRelativePath(relativePath);
+  const normalized = requireCrdtEligiblePath(relativePath);
   if (!room.crdt_enabled) {
     // Same wording as the presence path's CRDT_DISABLED - one code must not read two different ways
     // depending on which lane produced it.
     throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
   }
+  return normalized;
+}
+
+function requireCrdtEligiblePath(relativePath: string): string {
+  const normalized = normalizeRelativePath(relativePath);
   if (!isCrdtEligiblePath(normalized)) {
     throw new AppError("INVALID_PATH", "Live editing is available only in Markdown notes.", 422);
   }

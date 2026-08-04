@@ -29,7 +29,16 @@ import type {
   UserRow
 } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
-import { RelayFileRepository, type FileDeleteResult, type FileRenameResult, type FileWriteResult } from "./fileRepository.js";
+import {
+  RelayFileRepository,
+  type CrdtCreateInput,
+  type CrdtRenameInput,
+  type FileDeleteResult,
+  type FileRenameResult,
+  type FileWriteResult,
+  type IdempotentCrdtCreateResult,
+  type IdempotentCrdtRenameResult
+} from "./fileRepository.js";
 import { RelayCrdtRepository, type CrdtSnapshot } from "./crdtRepository.js";
 
 export type { FileDeleteResult, FileWriteResult } from "./fileRepository.js";
@@ -94,6 +103,10 @@ export class RelayRepository {
 
   durable<T>(operation: () => T): Promise<T> {
     return this.db.durable(operation);
+  }
+
+  withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T> {
+    return this.db.withExclusiveAccess(operation);
   }
 
   getServerOwnerId(): string | null {
@@ -910,6 +923,7 @@ export class RelayRepository {
         this.db.prepare("delete from file_versions where file_id = ?").run(fileId);
       }
       this.db.prepare("delete from files where room_id = ?").run(input.roomId);
+      this.db.prepare("delete from crdt_operation_receipts where room_id = ?").run(input.roomId);
       this.db.prepare("delete from room_capabilities where room_id = ?").run(input.roomId);
       this.db.prepare("delete from acl_rules where room_id = ?").run(input.roomId);
       this.db.prepare("delete from invites where room_id = ?").run(input.roomId);
@@ -1116,6 +1130,12 @@ export class RelayRepository {
     return this.files.renameFile(input);
   }
 
+  renameCrdtFileIdempotent(
+    input: CrdtRenameInput & { operationId: string; deviceId: string }
+  ): IdempotentCrdtRenameResult {
+    return this.files.renameCrdtFileIdempotent(input);
+  }
+
   latestFileVersion(fileId: string): FileVersionWithContentRow | null {
     return this.files.latestFileVersion(fileId);
   }
@@ -1165,6 +1185,20 @@ export class RelayRepository {
     relativePath: string;
   } {
     return this.files.createCrdtFile(input);
+  }
+
+  createCrdtFileIdempotent(
+    input: CrdtCreateInput & { operationId: string; deviceId: string }
+  ): IdempotentCrdtCreateResult {
+    return this.files.createCrdtFileIdempotent(input);
+  }
+
+  replayCrdtCreateReceipt(input: Parameters<RelayFileRepository["replayCrdtCreateReceipt"]>[0]) {
+    return this.files.replayCrdtCreateReceipt(input);
+  }
+
+  replayCrdtRenameReceipt(input: Parameters<RelayFileRepository["replayCrdtRenameReceipt"]>[0]) {
+    return this.files.replayCrdtRenameReceipt(input);
   }
 
   materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string }): { version: number; sha256: string } | null {

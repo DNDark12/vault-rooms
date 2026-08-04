@@ -111,6 +111,7 @@ export class RoomSettingsModal extends Modal {
     this.renderAccess(scroll);
     this.renderAdvanced(scroll);
     this.renderDangerZone(scroll);
+    this.renderSaveActions(contentEl);
     // Children exist by now, so scrollHeight is final and this lands on the same content as before.
     scroll.scrollTop = previousScrollTop;
   }
@@ -149,8 +150,13 @@ export class RoomSettingsModal extends Modal {
         })
       );
 
-    new Setting(parent).addButton((button) =>
-      button.setCta().setButtonText("Save changes").onClick(async () => {
+  }
+
+  private renderSaveActions(parent: HTMLElement): void {
+    const actions = new Setting(parent);
+    actions.settingEl.addClass("vault-rooms-settings-actions");
+    actions.addButton((button) =>
+      button.setCta().setButtonText("Save room settings").onClick(async () => {
         await this.saveChanges();
       })
     );
@@ -434,8 +440,8 @@ export class RoomSettingsModal extends Modal {
         );
     }
     new Setting(advanced)
-      .setName("If two people save at once")
-      .setDesc("Keep both never loses a write.")
+      .setName("If two people save a non-live file at once")
+      .setDesc("Applies to files without Live editing. Markdown notes using Live editing merge through CRDT instead.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("keep_both", "Keep both copies")
@@ -455,10 +461,6 @@ export class RoomSettingsModal extends Modal {
           this.render();
         })
       );
-    advanced.createDiv({
-      cls: "vault-rooms-setting-hint",
-      text: "Use Save changes above to apply these room settings."
-    });
   }
 
   private renderCapabilities(parent: HTMLElement): void {

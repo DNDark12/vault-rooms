@@ -87,7 +87,8 @@ export class CrdtDocManager {
     private readonly repo: CrdtRepositoryPort,
     private readonly timerHost: SyncTimerHost,
     private readonly onMaterialized: (event: CrdtMaterializedEvent) => void,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    private readonly withDbAccess?: <T>(operation: () => T | Promise<T>) => Promise<T>
   ) {
     this.idleSweepHandle = timerHost.setInterval(() => this.evictIdle(), IDLE_EVICTION_MS);
   }
@@ -346,7 +347,13 @@ export class CrdtDocManager {
     }
     cached.materializeTimer = this.timerHost.setTimeout(() => {
       cached.materializeTimer = undefined;
-      this.materialize(cached);
+      if (this.withDbAccess) {
+        void this.withDbAccess(() => this.materialize(cached)).catch((error) => {
+          console.error("Vault Rooms relay: CRDT materialization could not enter the database queue", error);
+        });
+      } else {
+        this.materialize(cached);
+      }
     }, MATERIALIZE_DEBOUNCE_MS);
   }
 

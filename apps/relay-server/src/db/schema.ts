@@ -138,6 +138,16 @@ export type CrdtSnapshotRow = {
   created_at: string;
 };
 
+export type CrdtOperationReceiptRow = {
+  room_id: string;
+  operation_id: string;
+  device_id: string;
+  operation_kind: "create" | "rename";
+  payload_hash: string;
+  result_json: string;
+  created_at: string;
+};
+
 export type FileVersionWithContentRow = {
   id: string;
   file_id: string;

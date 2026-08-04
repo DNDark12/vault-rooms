@@ -43,6 +43,76 @@ async function setupFileFlow() {
 }
 
 describe("file REST API", () => {
+  it("applies the file-size limit to decoded binary bytes instead of base64 transport bytes", async () => {
+    const { app, owner, room } = await setupFileFlow();
+    const withinLimit = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "within-limit.bin", baseVersion: 0, content: Buffer.alloc(32, 1).toString("base64") }
+    });
+    expect(withinLimit.statusCode).toBe(200);
+
+    const overLimit = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "over-limit.bin", baseVersion: 0, content: Buffer.alloc(33, 1).toString("base64") }
+    });
+    expect(overLimit.statusCode).toBe(413);
+    expect(overLimit.json().error.code).toBe("FILE_TOO_LARGE");
+    await app.close();
+  });
+
+  it("round-trips widened binary files only for clients that advertise support", async () => {
+    const { app, owner, room } = await setupFileFlow();
+    const created = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "attachment.docx", baseVersion: 0, content: "AQID" }
+    });
+    expect(created.statusCode).toBe(200);
+
+    const legacyList = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(legacyList.json().files).not.toContainEqual(expect.objectContaining({ relativePath: "attachment.docx" }));
+
+    const currentList = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files?capabilities=extendedBinarySync`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(currentList.json().files).toContainEqual(expect.objectContaining({ relativePath: "attachment.docx" }));
+
+    const legacyRead = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=attachment.docx`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(legacyRead.statusCode).toBe(404);
+
+    const currentRead = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=attachment.docx&capabilities=extendedBinarySync`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(currentRead.json()).toMatchObject({ content: "AQID", contentEncoding: "base64" });
+
+    const malformed = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "broken.docx", baseVersion: 0, content: "not base64!" }
+    });
+    expect(malformed.statusCode).toBe(422);
+    expect(malformed.json().error.code).toBe("VALIDATION_ERROR");
+    await app.close();
+  });
+
   it("requires sync:push for REST writes and deletes in addition to file permissions", async () => {
     const { app, owner, member, room } = await setupFileFlow();
     const created = await app.inject({

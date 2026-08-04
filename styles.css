@@ -222,6 +222,22 @@
   scrollbar-gutter: stable;
 }
 
+.vault-rooms-settings-actions {
+  border-top: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+  padding-bottom: 0;
+}
+
+.vault-rooms-settings-actions .setting-item-info {
+  display: none;
+}
+
+.vault-rooms-settings-actions .setting-item-control {
+  justify-content: flex-end;
+  margin-left: 0;
+  width: 100%;
+}
+
 .vault-rooms-settings-scroll .setting-item,
 .vault-rooms-settings-scroll .setting-item-info {
   min-width: 0;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { runMigrations } from "../src/db/migrations.js";
 import { RelayRepository } from "../src/db/repositories/relayRepository.js";
@@ -310,6 +310,36 @@ describe("CrdtDocManager (Phase 4)", () => {
     expect(events[0]).toMatchObject({ fileId, roomId: room.id, relativePath: "note.md", content: "materialize me" });
     const { content } = repo.readFileContent(room.id, "note.md");
     expect(content).toBe("materialize me");
+    manager.dispose();
+  });
+
+  it("waits for the embedded database access queue before materializing", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    const events: CrdtMaterializedEvent[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let accessCalls = 0;
+    const withDbAccess = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+      accessCalls += 1;
+      await gate;
+      return operation();
+    };
+    const manager = new CrdtDocManager(repo, timers, (event) => events.push(event), Date.now, withDbAccess);
+    manager.createDocument(fileId, 0, { userId: "usr_owner", displayName: "Owner" });
+    manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("queued materialize"), { userId: "usr_owner", displayName: "Owner" });
+
+    timers.runAllTimeouts();
+    await Promise.resolve();
+    expect(accessCalls).toBe(1);
+    expect(events).toEqual([]);
+
+    release();
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    expect(repo.readFileContent(room.id, "note.md").content).toBe("queued materialize");
     manager.dispose();
   });
 

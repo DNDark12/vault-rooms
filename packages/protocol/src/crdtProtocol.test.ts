@@ -35,6 +35,25 @@ describe("CRDT protocol messages", () => {
     expect(roundTrip(withoutCapability).capabilities).toBeUndefined();
   });
 
+  it("hello_ok advertises durable CRDT operation receipts additively", () => {
+    const current: SyncServerMessage = {
+      type: "hello_ok",
+      requestId: "req_current",
+      userId: "usr_1",
+      deviceId: "dev_1",
+      capabilities: { crdtOperationReceipts: true }
+    };
+    const legacy: SyncServerMessage = {
+      type: "hello_ok",
+      requestId: "req_legacy",
+      userId: "usr_1",
+      deviceId: "dev_1"
+    };
+
+    expect(roundTrip(current).capabilities).toEqual({ crdtOperationReceipts: true });
+    expect(roundTrip(legacy).capabilities).toBeUndefined();
+  });
+
   // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
   // `hello_error` used to carry a code and nothing else, so the plugin had no wording to show and fell
   // back to a generic notice. `message` is optional so a relay that predates this still parses.
@@ -53,7 +72,13 @@ describe("CRDT protocol messages", () => {
   });
 
   it("round-trips crdt_create / crdt_created (first-create flow, contract 1.10)", () => {
-    const create: SyncClientMessage = { type: "crdt_create", requestId: "req_1", roomId: "room_1", relativePath: "note.md" };
+    const create: SyncClientMessage = {
+      type: "crdt_create",
+      requestId: "req_1",
+      operationId: "op_create_1",
+      roomId: "room_1",
+      relativePath: "note.md"
+    };
     const created: SyncServerMessage = {
       type: "crdt_created",
       requestId: "req_1",
@@ -162,6 +187,7 @@ describe("CRDT protocol messages", () => {
     const rename: SyncClientMessage = {
       type: "crdt_rename",
       requestId: "req_1",
+      operationId: "op_rename_1",
       roomId: "room_1",
       oldRelativePath: "old-title.md",
       relativePath: "new-title.md"

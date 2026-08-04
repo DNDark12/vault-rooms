@@ -236,6 +236,21 @@ function button(parent: HTMLElement, label: string): HTMLButtonElement {
 }
 
 describe("RoomSettingsModal low-tech access contract", () => {
+  it("keeps the room-settings save action visible outside the scroll area", async () => {
+    const { modal } = harness();
+    await open(modal);
+
+    const scroll = modal.contentEl.querySelector(".vault-rooms-settings-scroll");
+    const save = Array.from(modal.contentEl.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent === "Save room settings"
+    );
+
+    expect(scroll).not.toBeNull();
+    expect(save).toBeDefined();
+    expect(scroll?.contains(save ?? null)).toBe(false);
+    expect(save?.closest(".vault-rooms-settings-actions")?.parentElement).toBe(modal.contentEl);
+  });
+
   it("uses the exact editor preset label and keeps destructive access removal behind Manage", async () => {
     const { modal } = harness();
     await open(modal);
@@ -310,7 +325,7 @@ describe("RoomSettingsModal low-tech access contract", () => {
     liveToggle.dispatchEvent(new Event("change", { bubbles: true }));
     expect(updateRoomSettings).not.toHaveBeenCalled();
 
-    button(modal.contentEl, "Save changes").click();
+    button(modal.contentEl, "Save room settings").click();
     await Promise.resolve();
     expect(updateRoomSettings).toHaveBeenCalledWith(
       "daily",

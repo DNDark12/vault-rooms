@@ -108,7 +108,9 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
   const crdtDocManager = new CrdtDocManager(
     repo,
     options.crdtTimerHost ?? windowSyncTimerHost,
-    createCrdtMaterializedHandler(repo, connectionRegistry)
+    createCrdtMaterializedHandler(repo, connectionRegistry),
+    Date.now,
+    (operation) => repo.withExclusiveAccess(operation)
   );
   const app = new EmbeddedRelayApp(db, maxFileBytes, bootstrapPin, (socket, transport) => {
     handleSyncSocket(socket, repo, connectionRegistry, {
@@ -117,7 +119,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
       transport,
       timerHost: windowSyncTimerHost,
       crdtDocManager,
-      presenceService
+      presenceService,
+      withDbAccess: (operation) => repo.withExclusiveAccess(operation)
     });
   }, crdtDocManager, options.publicUrl ?? "http://127.0.0.1:8787");
 
@@ -198,19 +201,21 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     getMigrationMode: () => repo.getMigrationMode(),
     plainDeviceCount: () => repo.countActiveDevicesOnPlainTransport(),
     enableTlsMigration: async (mode, serverId) => {
-      await repo.durable(() => {
-        repo.setMigrationMode(mode);
-        repo.setSecurityState("tls_migrating");
-        repo.audit({
-          teamId: null,
-          actorType: "system",
-          actorId: serverId,
-          action: "security.migration_enabled",
-          resourceType: "server",
-          resourceId: serverId,
-          metadata: { mode }
-        });
-      });
+      await repo.withExclusiveAccess(() =>
+        repo.durable(() => {
+          repo.setMigrationMode(mode);
+          repo.setSecurityState("tls_migrating");
+          repo.audit({
+            teamId: null,
+            actorType: "system",
+            actorId: serverId,
+            action: "security.migration_enabled",
+            resourceType: "server",
+            resourceId: serverId,
+            metadata: { mode }
+          });
+        })
+      );
     },
     broadcastUpgrade: (info) => {
       connectionRegistry.broadcastAuthenticated({
@@ -220,43 +225,48 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
       });
     },
     enforceTls: async (serverId) => {
-      await repo.durable(() => {
-        repo.setSecurityState("tls_enforced");
-        repo.audit({
-          teamId: null,
-          actorType: "system",
-          actorId: serverId,
-          action: "security.tls_enforced",
-          resourceType: "server",
-          resourceId: serverId,
-          metadata: {}
-        });
-      });
+      await repo.withExclusiveAccess(() =>
+        repo.durable(() => {
+          repo.setSecurityState("tls_enforced");
+          repo.audit({
+            teamId: null,
+            actorType: "system",
+            actorId: serverId,
+            action: "security.tls_enforced",
+            resourceType: "server",
+            resourceId: serverId,
+            metadata: {}
+          });
+        })
+      );
       connectionRegistry.closeLegacyPlainTokenConnections();
     },
     recordIdentityRotation: async (serverId, record) => {
-      await repo.durable(() => {
-        repo.audit({
-          teamId: null,
-          actorType: "system",
-          actorId: serverId,
-          action: "identity.rotated",
-          resourceType: "server",
-          resourceId: serverId,
-          metadata: {
-            rotationId: record.rotationId,
-            oldIdentitySpkiSha256: record.oldIdentitySpkiSha256,
-            newIdentitySpkiSha256: record.newIdentitySpkiSha256
-          }
-        });
-      });
+      await repo.withExclusiveAccess(() =>
+        repo.durable(() => {
+          repo.audit({
+            teamId: null,
+            actorType: "system",
+            actorId: serverId,
+            action: "identity.rotated",
+            resourceType: "server",
+            resourceId: serverId,
+            metadata: {
+              rotationId: record.rotationId,
+              oldIdentitySpkiSha256: record.oldIdentitySpkiSha256,
+              newIdentitySpkiSha256: record.newIdentitySpkiSha256
+            }
+          });
+        })
+      );
     }
   };
   app.ownerAdmin = {
     isBootstrapped: () => repo.getServerOwnerId() !== null,
     recoverOwnerDevice: (deviceName, tokenSecurity) =>
-      repo.durable(() => repo.recoverServerOwnerDevice({ deviceName, tokenSecurity })),
-    revokeRecoveredOwnerDevice: (deviceId) => repo.durable(() => repo.revokeRecoveredOwnerDevice(deviceId))
+      repo.withExclusiveAccess(() => repo.durable(() => repo.recoverServerOwnerDevice({ deviceName, tokenSecurity }))),
+    revokeRecoveredOwnerDevice: (deviceId) =>
+      repo.withExclusiveAccess(() => repo.durable(() => repo.revokeRecoveredOwnerDevice(deviceId)))
   };
 
   return app;
@@ -445,14 +455,16 @@ export class EmbeddedRelayApp {
         ip: request.socket.remoteAddress ?? "",
         transport
       };
-      for (const hook of this.beforeRouteHooks) {
-        hook(baseRequest);
-      }
+      await this.db.withExclusiveAccess(() => {
+        for (const hook of this.beforeRouteHooks) {
+          hook(baseRequest);
+        }
+      });
       const embeddedRequest: EmbeddedRequest = {
         ...baseRequest,
         body: await readJsonBody(request, this.maxFileBytes)
       };
-      sendJson(response, 200, await match.route.handler(embeddedRequest));
+      sendJson(response, 200, await this.db.withExclusiveAccess(() => match.route.handler(embeddedRequest)));
     } catch (error) {
       sendError(response, error);
     }

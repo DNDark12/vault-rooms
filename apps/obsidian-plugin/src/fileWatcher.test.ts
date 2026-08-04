@@ -77,10 +77,10 @@ describe("classifyRenameEvent", () => {
     });
   });
 
-  it("ignores an ineligible file type renamed within the room", () => {
+  it("classifies a rename of a non-text/image extension within the room the same as any other file (2026-08-03: file-type sync widened, no extension is ineligible anymore)", () => {
     expect(
       classifyRenameEvent("Vault Rooms/demo/Projects Demo/Old.exe", "Vault Rooms/demo/Projects Demo/New.exe", room, CONFIG_DIR)
-    ).toEqual({ kind: "ignore" });
+    ).toEqual({ kind: "rename", oldRelativePath: "Old.exe", relativePath: "New.exe" });
   });
 });
 
@@ -204,6 +204,31 @@ describe("isWatchableChange (unchanged behavior)", () => {
     const room = createRoom();
     expect(isWatchableChange({ type: "modify", path: "Vault Rooms/demo/Projects Demo/Board.md" }, room, CONFIG_DIR)).toBe("Board.md");
   });
+
+  it("ignores hidden, dependency, temporary, and conflict-copy paths at any depth", () => {
+    const room = createRoom();
+    const base = "Vault Rooms/demo/Projects Demo/";
+    for (const relativePath of [
+      ".env",
+      "Notes/.secrets/key.bin",
+      "node_modules/root/index.js",
+      "Notes/node_modules/nested/index.js",
+      "Notes/draft.tmp",
+      "Notes/A (conflict B laptop 2026-08-03T120000).md"
+    ]) {
+      expect(isWatchableChange({ type: "modify", path: `${base}${relativePath}` }, room, CONFIG_DIR)).toBeNull();
+    }
+    expect(isWatchableChange({ type: "modify", path: `${base}Notes/diagram.docx` }, room, CONFIG_DIR)).toBe(
+      "Notes/diagram.docx"
+    );
+  });
+
+  it("watches ordinary files when the room is mounted at the vault root", () => {
+    const room = { ...createRoom(), mountPath: "" };
+
+    expect(isWatchableChange({ type: "modify", path: "Notes/Board.md" }, room, CONFIG_DIR)).toBe("Notes/Board.md");
+    expect(isWatchableChange({ type: "modify", path: ".obsidian/plugins/example/data.json" }, room, CONFIG_DIR)).toBeNull();
+  });
 });
 
 describe("isCrdtManagedLocalChange", () => {
@@ -219,6 +244,7 @@ describe("isCrdtManagedLocalChange", () => {
   it("keeps non-CRDT-eligible paths (e.g. images, .canvas) on the CAS lane even in a CRDT-enabled room", () => {
     expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "modify", "image.png")).toBe(false);
     expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "modify", "board.canvas")).toBe(false);
+    expect(isCrdtManagedLocalChange({ crdtEnabled: true }, "modify", "drawing.excalidraw.md")).toBe(false);
   });
 
   it("keeps .md files on the CAS lane unchanged in a room that has not enabled CRDT (non-CRDT regression)", () => {

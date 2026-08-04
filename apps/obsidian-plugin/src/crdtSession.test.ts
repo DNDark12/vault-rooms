@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import type { SyncClientMessage, SyncServerMessage } from "@vault-rooms/protocol";
 import { CRDT_TEXT_KEY } from "vault-rooms-relay/embedded-core";
 import { CrdtDocStore } from "./crdtDocStore.js";
-import { CrdtSessionManager, type CrdtSessionManagerDeps } from "./crdtSession.js";
+import { CrdtRejectedError, CrdtSessionManager, type CrdtSessionManagerDeps } from "./crdtSession.js";
 
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
 
@@ -129,6 +129,30 @@ async function openFreshlyCreatedSession(harness: Harness, roomId: string, relat
 }
 
 describe("CrdtSessionManager - first create", () => {
+  it("forces a receipt-backed create with its stable operationId even when reconnect snapshot knows that path", async () => {
+    const harness = createHarness({ isPathProtectedByJournal: (_roomId, relativePath) => relativePath === "Offline.md" });
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Offline.md", crdtEpoch: 3 }]);
+    await expect(harness.manager.ensureSessionIfKnown("room_1", "Offline.md")).resolves.toBeUndefined();
+
+    const opening = harness.manager.ensureSession("room_1", "Offline.md", {
+      brandNewNote: true,
+      operationId: "op_offline_create"
+    });
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+    const createMessage = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+    expect(createMessage.operationId).toBe("op_offline_create");
+    await ack(harness, {
+      type: "crdt_created",
+      requestId: createMessage.requestId,
+      roomId: "room_1",
+      relativePath: "Offline.md",
+      documentId: "file_1",
+      epoch: 3,
+      adopted: false
+    });
+    await opening;
+  });
+
   it("sends crdt_create when no epoch is known yet, and resolves ensureSession once crdt_created arrives", async () => {
     const harness = createHarness();
     const sessionPromise = harness.manager.ensureSession("room_1", "Board.md");
@@ -139,6 +163,68 @@ describe("CrdtSessionManager - first create", () => {
 
     const session = await sessionPromise;
     expect(session.epoch).toBe(0);
+  });
+
+  it("rejects a receipt-backed create with the server code intact", async () => {
+    const harness = createHarness();
+    const opening = harness.manager.ensureSession("room_1", "Taken.md", {
+      brandNewNote: true,
+      operationId: "op_taken"
+    });
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+    const createMessage = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+
+    await ack(harness, {
+      type: "crdt_rejected",
+      requestId: createMessage.requestId,
+      roomId: "room_1",
+      relativePath: "Taken.md",
+      code: "FILE_EXISTS",
+      message: "A file already exists at this path."
+    });
+
+    await expect(opening).rejects.toEqual(expect.objectContaining<CrdtRejectedError>({
+      name: "CrdtRejectedError",
+      code: "FILE_EXISTS",
+      message: "A file already exists at this path."
+    }));
+  });
+
+  it("resolves structural receipts without opening a CRDT session after room mode changed", async () => {
+    const harness = createHarness({ isRoomCrdtEnabled: () => false });
+    const resolver = harness.manager as unknown as {
+      resolveCreateOperation: (roomId: string, relativePath: string, operationId: string) => Promise<{ relativePath: string }>;
+      resolveRenameOperation: (roomId: string, oldRelativePath: string, relativePath: string, operationId: string) => Promise<{ relativePath: string }>;
+    };
+
+    const create = resolver.resolveCreateOperation("room_1", "Created.md", "op_create");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_create")).toBe(true));
+    const createMessage = harness.sent.find((message) => message.type === "crdt_create") as Extract<SyncClientMessage, { type: "crdt_create" }>;
+    await ack(harness, {
+      type: "crdt_created",
+      requestId: createMessage.requestId,
+      roomId: "room_1",
+      relativePath: "Created.md",
+      documentId: "file_1",
+      epoch: 0,
+      adopted: false
+    });
+    await expect(create).resolves.toEqual({ relativePath: "Created.md" });
+
+    const rename = resolver.resolveRenameOperation("room_1", "Created.md", "Renamed.md", "op_rename");
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "Created.md",
+      relativePath: "Renamed.md",
+      epoch: 0
+    });
+    await expect(rename).resolves.toEqual({ relativePath: "Renamed.md" });
+    expect(harness.manager.isSessionOpen("room_1", "Created.md")).toBe(false);
+    expect(harness.manager.isSessionOpen("room_1", "Renamed.md")).toBe(false);
   });
 
   it("throws for a path/room that is not CRDT-eligible", async () => {
@@ -345,6 +431,21 @@ describe("CrdtSessionManager - bidirectional handshake and outbound recovery", (
     harness.manager.onConnected();
 
     expect(harness.sent.some((message) => message.type === "crdt_sync_step1")).toBe(true);
+  });
+
+  it("does not reconnect-handshake a live session whose old path is protected by the operation journal", async () => {
+    let protectedByJournal = false;
+    const harness = createHarness({
+      isPathProtectedByJournal: (_roomId, relativePath) => protectedByJournal && relativePath === "Old.md"
+    });
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "Old.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "Old.md");
+    harness.sent.length = 0;
+    protectedByJournal = true;
+
+    harness.manager.onConnected();
+
+    expect(harness.sent.some((message) => message.type === "crdt_sync_step1")).toBe(false);
   });
 
   it("applies the server's step2 answer to our own step1 and merges it into the doc", async () => {
@@ -643,6 +744,26 @@ describe("CrdtSessionManager - reconcile vs. concurrent remote update race", () 
 });
 
 describe("CrdtSessionManager - atomic rename (fourth hardware-testing round, 2026-07-23)", () => {
+  it("includes the journal operationId on a receipt-backed rename", async () => {
+    const harness = createHarness();
+    harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "old.md", crdtEpoch: 0 }]);
+    await harness.manager.ensureSession("room_1", "old.md");
+
+    const renamePromise = harness.manager.renameSession("room_1", "old.md", "new.md", { operationId: "op_offline_rename" });
+    await vi.waitFor(() => expect(harness.sent.some((message) => message.type === "crdt_rename")).toBe(true));
+    const renameMessage = harness.sent.find((message) => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    expect(renameMessage.operationId).toBe("op_offline_rename");
+    await ack(harness, {
+      type: "crdt_renamed",
+      requestId: renameMessage.requestId,
+      roomId: "room_1",
+      oldRelativePath: "old.md",
+      relativePath: "new.md",
+      epoch: 0
+    });
+    await renamePromise;
+  });
+
   it("renameSession sends crdt_rename, then rekeys the session in place - same Y.Doc, no re-seed, epoch preserved", async () => {
     const harness = createHarness();
     harness.manager.handleRoomSnapshot("room_1", [{ relativePath: "old-title.md", crdtEpoch: 0 }]);

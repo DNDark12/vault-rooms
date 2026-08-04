@@ -1,5 +1,5 @@
-import type { SecurityMode } from "@vault-rooms/protocol";
-import type { MountedRoomState } from "./syncClient.js";
+import { isCrdtEligiblePath, normalizeRelativePath, type SecurityMode } from "@vault-rooms/protocol";
+import type { MountedRoomState, PendingCrdtOperation } from "./syncClient.js";
 
 /** One entry per SERVER (a device identity on that relay), not per team - a user can belong to many teams on the same server. */
 export type ServerConnection = {
@@ -126,15 +126,53 @@ export function migrateVaultRoomsSettings(
   // room to the wrong relay and push local changes into an unrelated room ID. Preserve ambiguous
   // tracking without serverId so current sync code pauses it until the user re-mounts deliberately.
   const inferredMountServerId = servers.length === 1 ? servers[0]?.id : undefined;
+  let journalMigrated = false;
   const mountedRooms = Object.fromEntries(
-    Object.entries(loaded?.mountedRooms ?? {}).map(([roomId, room]) => [
-      roomId,
-      room.serverId || !inferredMountServerId ? room : { ...room, serverId: inferredMountServerId }
-    ])
+    Object.entries(loaded?.mountedRooms ?? {}).map(([roomId, room]) => {
+      const rawOperations = (room as MountedRoomState & { pendingCrdtOperations?: unknown }).pendingCrdtOperations;
+      const sanitizedOperations = Array.isArray(rawOperations)
+        ? rawOperations.flatMap((operation) => {
+            const sanitized = sanitizePendingCrdtOperation(operation);
+            if (!sanitized) journalMigrated = true;
+            return sanitized ? [sanitized] : [];
+          })
+        : rawOperations === undefined
+          ? undefined
+          : [];
+      if (rawOperations !== undefined && !Array.isArray(rawOperations)) {
+        journalMigrated = true;
+      }
+      const rawTextPaths = (room as MountedRoomState & { pendingCrdtTextPaths?: unknown }).pendingCrdtTextPaths;
+      const sanitizedTextPaths = Array.isArray(rawTextPaths)
+        ? Array.from(new Set(rawTextPaths.flatMap((path) => {
+            if (typeof path !== "string") return [];
+            const normalized = sanitizedJournalPath(path);
+            return normalized && isCrdtEligiblePath(normalized) ? [normalized] : [];
+          })))
+        : rawTextPaths === undefined
+          ? undefined
+          : [];
+      if (
+        rawTextPaths !== undefined &&
+        (!Array.isArray(rawTextPaths) || sanitizedTextPaths?.length !== rawTextPaths.length)
+      ) {
+        journalMigrated = true;
+      }
+      const withServer = room.serverId || !inferredMountServerId ? room : { ...room, serverId: inferredMountServerId };
+      const withJournal = sanitizedOperations === undefined
+        ? withServer
+        : { ...withServer, pendingCrdtOperations: sanitizedOperations };
+      return [
+        roomId,
+        sanitizedTextPaths === undefined
+          ? withJournal
+          : { ...withJournal, pendingCrdtTextPaths: sanitizedTextPaths }
+      ];
+    })
   );
 
   return {
-    migratedLegacy,
+    migratedLegacy: migratedLegacy || journalMigrated,
     settings: {
       ...DEFAULT_SETTINGS,
       ...loaded,
@@ -146,6 +184,48 @@ export function migrateVaultRoomsSettings(
       server: { ...DEFAULT_SERVER_SETTINGS, ...(loaded?.server ?? {}) }
     }
   };
+}
+
+function sanitizePendingCrdtOperation(value: unknown): PendingCrdtOperation | null {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.operationId !== "string" ||
+    value.operationId.length === 0 ||
+    value.operationId.length > 200 ||
+    typeof value.queuedAt !== "string" ||
+    value.queuedAt.length === 0 ||
+    (value.attemptedAt !== undefined && typeof value.attemptedAt !== "string") ||
+    (value.deleteAfterAck !== undefined && value.deleteAfterAck !== true)
+  ) {
+    return null;
+  }
+  const relativePath = sanitizedJournalPath(value.relativePath);
+  if (!relativePath) return null;
+  const common = {
+    operationId: value.operationId,
+    relativePath,
+    queuedAt: value.queuedAt,
+    ...(typeof value.attemptedAt === "string" ? { attemptedAt: value.attemptedAt } : {}),
+    ...(value.deleteAfterAck === true ? { deleteAfterAck: true as const } : {})
+  };
+  if (value.kind === "create") {
+    return { ...common, kind: "create" };
+  }
+  if (value.kind === "rename") {
+    const oldRelativePath = sanitizedJournalPath(value.oldRelativePath);
+    return oldRelativePath ? { ...common, kind: "rename", oldRelativePath } : null;
+  }
+  return null;
+}
+
+function sanitizedJournalPath(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const normalized = normalizeRelativePath(value);
+    return normalized === value ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 type LegacyServerConnection = Record<string, unknown> & {

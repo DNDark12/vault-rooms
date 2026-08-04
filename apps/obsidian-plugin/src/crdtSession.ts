@@ -91,6 +91,9 @@ export type CrdtSessionManagerDeps = {
   send: (message: SyncClientMessage) => boolean | void;
   docStore: CrdtDocStore;
   isRoomCrdtEnabled: (roomId: string) => boolean;
+  /** Pending structural journal paths must not adopt a reconnect snapshot before their receipt is
+   *  resolved, or an unrelated server document can overwrite the offline local note. */
+  isPathProtectedByJournal?: (roomId: string, relativePath: string) => boolean;
   /** Reads the current on-disk text for reconciliation. Returns null if the file doesn't exist
    *  locally (nothing to reconcile against yet - e.g. a brand-new remote document not yet
    *  downloaded). */
@@ -208,7 +211,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    *  info for a document this device hasn't created itself in this session. */
   handleRoomSnapshot(roomId: string, files: Array<{ relativePath: string; crdtEpoch?: number }>): void {
     for (const file of files) {
-      if (file.crdtEpoch !== undefined) {
+      if (file.crdtEpoch !== undefined && !this.deps.isPathProtectedByJournal?.(roomId, file.relativePath)) {
         this.knownEpoch.set(sessionKey(roomId, file.relativePath), file.crdtEpoch);
       }
     }
@@ -218,6 +221,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    *  of a local edit made while offline). */
   onConnected(): void {
     for (const session of this.sessions.values()) {
+      if (this.deps.isPathProtectedByJournal?.(session.roomId, session.relativePath)) continue;
       this.startHandshake(session);
     }
   }
@@ -305,7 +309,11 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * document - rather than racing it.
    */
   async ensureSessionIfKnown(roomId: string, relativePath: string): Promise<CrdtSession | undefined> {
-    if (!this.deps.isRoomCrdtEnabled(roomId) || !isCrdtEligiblePath(relativePath)) {
+    if (
+      !this.deps.isRoomCrdtEnabled(roomId) ||
+      !isCrdtEligiblePath(relativePath) ||
+      this.deps.isPathProtectedByJournal?.(roomId, relativePath)
+    ) {
       return undefined;
     }
     const key = sessionKey(roomId, relativePath);
@@ -335,7 +343,11 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * wires update forwarding, and kicks off the handshake. Safe to call repeatedly - returns the
    * existing live session unless its epoch has been superseded.
    */
-  async ensureSession(roomId: string, relativePath: string, options: { brandNewNote?: boolean } = {}): Promise<CrdtSession> {
+  async ensureSession(
+    roomId: string,
+    relativePath: string,
+    options: { brandNewNote?: boolean; operationId?: string } = {}
+  ): Promise<CrdtSession> {
     if (!this.deps.isRoomCrdtEnabled(roomId) || !isCrdtEligiblePath(relativePath)) {
       throw new Error(`ensureSession called for a non-CRDT target: ${roomId}/${relativePath}`);
     }
@@ -358,11 +370,32 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (inFlight) {
       return inFlight;
     }
-    const opening = this.openSession(roomId, relativePath, key, options.brandNewNote === true).finally(() => {
+    const opening = this.openSession(roomId, relativePath, key, options.brandNewNote === true, options.operationId).finally(() => {
       this.pendingSessionOpen.delete(key);
     });
     this.pendingSessionOpen.set(key, opening);
     return opening;
+  }
+
+  /** Resolves a durable create receipt without opening or handshaking a live Y.Doc session. */
+  async resolveCreateOperation(
+    roomId: string,
+    relativePath: string,
+    operationId: string
+  ): Promise<{ relativePath: string }> {
+    const resolved = await this.ensureEpoch(roomId, relativePath, true, operationId);
+    return { relativePath: resolved.relativePath };
+  }
+
+  /** Resolves a durable rename receipt without rekeying local CRDT state after live editing was disabled. */
+  async resolveRenameOperation(
+    roomId: string,
+    oldRelativePath: string,
+    relativePath: string,
+    operationId: string
+  ): Promise<{ relativePath: string }> {
+    const resolved = await this.requestRename(roomId, oldRelativePath, relativePath, operationId);
+    return { relativePath: resolved.relativePath };
   }
 
   /**
@@ -375,7 +408,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * after Obsidian has already renamed the file itself; see `renameDiskFile` for the other device's
    * side of this, which does need to move the file.
    */
-  async renameSession(roomId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+  async renameSession(
+    roomId: string,
+    oldRelativePath: string,
+    newRelativePath: string,
+    options: { operationId?: string } = {}
+  ): Promise<{ relativePath: string }> {
     // Serialized per room, because Obsidian emits one rename event per *commit* of an inline title
     // edit - retitling a note in several steps ("Untitled" -> "a" -> "ab" -> "abc") fires a chain of
     // renames in quick succession, and the caller (main.ts's watcher) fires each one without
@@ -396,7 +434,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     const previous = this.renameChains.get(roomId) ?? Promise.resolve();
     const run = previous
       .catch(() => undefined)
-      .then(() => this.performRename(roomId, oldRelativePath, newRelativePath))
+      .then(() => this.performRename(roomId, oldRelativePath, newRelativePath, options.operationId))
       .finally(() => {
         this.pendingRenameTargets.delete(destinationKey);
       });
@@ -407,7 +445,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
     return run;
   }
 
-  private async performRename(roomId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+  private async performRename(
+    roomId: string,
+    oldRelativePath: string,
+    newRelativePath: string,
+    operationId?: string
+  ): Promise<{ relativePath: string }> {
     // A brand-new note renamed immediately ("Untitled" created, then retitled a keystroke later) has
     // its `crdt_create` for the OLD path still in flight at this point. Renaming ahead of it made the
     // server 404 the rename (the old path didn't exist server-side *yet*) and then honour the
@@ -419,16 +462,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (opening) {
       await opening.catch(() => undefined);
     }
-    const requestId = this.createRequestId();
-    const acked = await new Promise<{ epoch: number; relativePath: string }>((resolve, reject) => {
-      this.pendingRename.set(requestId, { resolve, reject });
-      // A dropped send never produces a reply, so waiting on one would hang this promise - and with it the
-      // room's rename chain and every later ensureSession for the destination path.
-      if (this.deps.send({ type: "crdt_rename", requestId, roomId, oldRelativePath, relativePath: newRelativePath }) === false) {
-        this.pendingRename.delete(requestId);
-        reject(new Error("Not connected to the server, so the rename was not sent."));
-      }
-    });
+    const acked = await this.requestRename(roomId, oldRelativePath, newRelativePath, operationId);
     await this.rekeyLocalState(roomId, oldRelativePath, acked.relativePath, acked.epoch);
     if (acked.relativePath !== newRelativePath) {
       // The requested name was already held by another live document, so the server filed this one
@@ -438,6 +472,25 @@ export class CrdtSessionManager implements CrdtWsBridge {
       await this.deps.renameDiskFile(roomId, newRelativePath, acked.relativePath);
       this.deps.onPathReassigned?.(roomId, newRelativePath, acked.relativePath);
     }
+    return { relativePath: acked.relativePath };
+  }
+
+  private requestRename(
+    roomId: string,
+    oldRelativePath: string,
+    relativePath: string,
+    operationId?: string
+  ): Promise<{ epoch: number; relativePath: string }> {
+    const requestId = this.createRequestId();
+    return new Promise((resolve, reject) => {
+      this.pendingRename.set(requestId, { resolve, reject });
+      // A dropped send never produces a reply, so waiting on one would hang this promise - and with it the
+      // room's rename chain and every later ensureSession for the destination path.
+      if (this.deps.send({ type: "crdt_rename", requestId, operationId, roomId, oldRelativePath, relativePath }) === false) {
+        this.pendingRename.delete(requestId);
+        reject(new Error("Not connected to the server, so the rename was not sent."));
+      }
+    });
   }
 
   /**
@@ -514,8 +567,14 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
   }
 
-  private async openSession(roomId: string, requestedPath: string, requestedKey: string, brandNewNote: boolean): Promise<CrdtSession> {
-    const created = await this.ensureEpoch(roomId, requestedPath, brandNewNote);
+  private async openSession(
+    roomId: string,
+    requestedPath: string,
+    requestedKey: string,
+    brandNewNote: boolean,
+    operationId?: string
+  ): Promise<CrdtSession> {
+    const created = await this.ensureEpoch(roomId, requestedPath, brandNewNote, operationId);
     const epoch = created.epoch;
     let relativePath = requestedPath;
     let key = requestedKey;
@@ -783,7 +842,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
         const pendingCreateEntry = message.requestId ? this.pendingCreate.get(message.requestId) : undefined;
         if (pendingCreateEntry && message.requestId) {
           this.pendingCreate.delete(message.requestId);
-          pendingCreateEntry.reject(new Error(message.message));
+          pendingCreateEntry.reject(new CrdtRejectedError(message.code, message.message));
         }
         // A crdt_rename can be rejected too (FILE_EXISTS at the new path, NOT_FOUND at the old one,
         // PERMISSION_DENIED) - renameSession's caller (main.ts) is expected to fall back to the old
@@ -926,11 +985,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
   private async ensureEpoch(
     roomId: string,
     relativePath: string,
-    brandNewNote: boolean
+    brandNewNote: boolean,
+    operationId?: string
   ): Promise<{ epoch: number; relativePath: string; documentCreatedNow: boolean }> {
     const key = sessionKey(roomId, relativePath);
     const known = this.knownEpoch.get(key);
-    if (known !== undefined) {
+    if (known !== undefined && !operationId) {
       // An epoch we already knew (room snapshot, announce, earlier open) always describes a document
       // that exists server-side, so its content comes from the handshake - never from seeding.
       return { epoch: known, relativePath, documentCreatedNow: false };
@@ -947,7 +1007,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
       // `adoptIfExists` unless this is a note the user *just created*. Reopening something we already
       // have (remount, editor bind, remote update, recovery) must attach to the existing document; only
       // a genuinely new note may be treated as a second, different note and disambiguated.
-      if (this.deps.send({ type: "crdt_create", requestId, roomId, relativePath, adoptIfExists: !brandNewNote }) === false) {
+      if (this.deps.send({ type: "crdt_create", requestId, operationId, roomId, relativePath, adoptIfExists: !brandNewNote }) === false) {
         this.pendingCreate.delete(requestId);
         reject(new Error("Not connected to the server, so the document could not be created."));
       }

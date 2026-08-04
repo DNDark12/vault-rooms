@@ -4,6 +4,15 @@ import type { RoomSummary } from "../apiClient.js";
 import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "../syncClient.js";
 import { RoomMountController, type RoomMountControllerDeps } from "./RoomMountController.js";
 
+const notices = vi.hoisted(() => [] as string[]);
+vi.mock("obsidian", () => ({
+  Notice: class Notice {
+    constructor(message: string) {
+      notices.push(message);
+    }
+  }
+}));
+
 /** Full VaultAdapter fake (unlike the Pick<> stub above) - the CRDT re-mount test below exercises
  *  the real VaultSyncEngine end-to-end, which needs every method on the interface. */
 class FakeVaultAdapter implements VaultAdapter {
@@ -56,7 +65,7 @@ class FakeVaultAdapter implements VaultAdapter {
 describe("RoomMountController", () => {
   it("keeps root-mounted relative paths intact and skips the Obsidian config folder", async () => {
     const pushes: string[] = [];
-    const settings = {
+    const settings: { mountedRooms: Record<string, MountedRoomState>; roomMountPaths: Record<string, string>; mountRoot: string } = {
       mountedRooms: {},
       roomMountPaths: {},
       mountRoot: "Vault Rooms"
@@ -76,7 +85,17 @@ describe("RoomMountController", () => {
     const vaultAdapter: Pick<VaultAdapter, "list"> = {
       async list(prefix: string): Promise<string[]> {
         expect(prefix).toBe("");
-        return ["Notes/A.md", ".obsidian/plugins/vault-rooms/data.json"];
+        return [
+          "Notes/A.md",
+          "Notes/diagram.docx",
+          ".obsidian/plugins/vault-rooms/data.json",
+          ".env",
+          "Notes/.secrets/key.bin",
+          "node_modules/root-package/index.js",
+          "Notes/node_modules/nested-package/index.js",
+          "Notes/draft.tmp",
+          "Notes/A (conflict B laptop 2026-08-03T120000).md"
+        ];
       }
     };
     const syncEngine: Pick<VaultSyncEngine, "reconcileLocalEdits" | "pushLocalChange"> = {
@@ -91,6 +110,7 @@ describe("RoomMountController", () => {
       visibleRooms: [room],
       vaultAdapter: vaultAdapter as VaultAdapter,
       getSyncEngine: () => syncEngine as VaultSyncEngine,
+      ensureCrdtSession: vi.fn(async () => undefined),
       apiFor: () =>
         ({
           async listFiles() {
@@ -112,7 +132,130 @@ describe("RoomMountController", () => {
 
     await new RoomMountController(deps).mountRoom(room);
 
-    expect(pushes).toEqual(["Notes/A.md"]);
+    expect(pushes).toEqual(["Notes/A.md", "Notes/diagram.docx"]);
+  });
+
+  it("routes pre-existing Markdown through CRDT while attachments use whole-file sync", async () => {
+    const crdtPaths: string[] = [];
+    const pushedPaths: string[] = [];
+    const settings: { mountedRooms: Record<string, MountedRoomState>; roomMountPaths: Record<string, string>; mountRoot: string } = {
+      mountedRooms: {},
+      roomMountPaths: {},
+      mountRoot: "Vault Rooms"
+    };
+    const room: RoomSummary = {
+      id: "room_1",
+      name: "Live room",
+      type: "folder",
+      sourcePath: "Notes",
+      mountName: "Live room",
+      ownerUserId: "user_1",
+      conflictPolicy: "keep_both",
+      permissions: ["sync:push"],
+      capabilities: [],
+      crdtEnabled: true
+    };
+    const deps: RoomMountControllerDeps = {
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: settings as RoomMountControllerDeps["settings"],
+      visibleRooms: [room],
+      vaultAdapter: {
+        async list() {
+          return ["Notes/Board.md", "Notes/diagram.docx"];
+        }
+      } as unknown as VaultAdapter,
+      getSyncEngine: () =>
+        ({
+          async reconcileLocalEdits() {},
+          async pushLocalChange(_state: MountedRoomState, relativePath: string) {
+            pushedPaths.push(relativePath);
+          }
+        }) as unknown as VaultSyncEngine,
+      ensureCrdtSession: async (_roomId, relativePath) => {
+        crdtPaths.push(relativePath);
+      },
+      apiFor: () =>
+        ({
+          async listFiles() {
+            return { files: [] };
+          }
+        }) as unknown as ReturnType<RoomMountControllerDeps["apiFor"]>,
+      requireActiveServer: () => ({ id: "server_1", userId: "user_1", deviceName: "Owner" }) as ReturnType<RoomMountControllerDeps["requireActiveServer"]>,
+      saveSettings: vi.fn(async () => undefined),
+      renderOpenRoomsViews: vi.fn(),
+      stopWatchingRoom: vi.fn(),
+      watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: vi.fn(),
+      unbindCrdtRoom: vi.fn()
+    };
+
+    await new RoomMountController(deps).mountRoom(room);
+
+    expect(crdtPaths).toEqual(["Board.md"]);
+    expect(pushedPaths).toEqual(["diagram.docx"]);
+    expect(settings.mountedRooms["room_1"]?.crdtEnabled).toBe(true);
+  });
+
+  it("shows a mount summary when one or more pre-existing files fail to sync", async () => {
+    notices.length = 0;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const settings: { mountedRooms: Record<string, MountedRoomState>; roomMountPaths: Record<string, string>; mountRoot: string } = {
+      mountedRooms: {},
+      roomMountPaths: {},
+      mountRoot: "Vault Rooms"
+    };
+    const room: RoomSummary = {
+      id: "room_1",
+      name: "Attachments",
+      type: "folder",
+      sourcePath: "Notes",
+      mountName: "Attachments",
+      ownerUserId: "user_1",
+      conflictPolicy: "keep_both",
+      permissions: ["sync:push"],
+      capabilities: [],
+      crdtEnabled: false
+    };
+    const deps: RoomMountControllerDeps = {
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: settings as RoomMountControllerDeps["settings"],
+      visibleRooms: [room],
+      vaultAdapter: {
+        async list() {
+          return ["Notes/ok.csv", "Notes/fail.docx"];
+        }
+      } as unknown as VaultAdapter,
+      getSyncEngine: () =>
+        ({
+          async reconcileLocalEdits() {},
+          async pushLocalChange(_state: MountedRoomState, relativePath: string) {
+            if (relativePath === "fail.docx") {
+              throw new Error("simulated upload failure");
+            }
+          }
+        }) as unknown as VaultSyncEngine,
+      ensureCrdtSession: vi.fn(async () => undefined),
+      apiFor: () =>
+        ({
+          async listFiles() {
+            return { files: [] };
+          }
+        }) as unknown as ReturnType<RoomMountControllerDeps["apiFor"]>,
+      requireActiveServer: () => ({ id: "server_1", userId: "user_1", deviceName: "Owner" }) as ReturnType<RoomMountControllerDeps["requireActiveServer"]>,
+      saveSettings: vi.fn(async () => undefined),
+      renderOpenRoomsViews: vi.fn(),
+      stopWatchingRoom: vi.fn(),
+      watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: vi.fn(),
+      unbindCrdtRoom: vi.fn()
+    };
+
+    await new RoomMountController(deps).mountRoom(room);
+
+    expect(notices.at(-1)).toBe("Mounted Attachments, but 1 file couldn't sync. Check the console for details.");
+    consoleError.mockRestore();
   });
 
   it("[third-hardware-testing-round item 1] does not attempt pushLocalChange for an untracked pre-existing local file when the room can't push (no sync:push permission)", async () => {
@@ -154,6 +297,7 @@ describe("RoomMountController", () => {
       visibleRooms: [room],
       vaultAdapter: vaultAdapter as VaultAdapter,
       getSyncEngine: () => syncEngine as VaultSyncEngine,
+      ensureCrdtSession: vi.fn(async () => undefined),
       apiFor: () =>
         ({
           async listFiles() {
@@ -261,6 +405,7 @@ describe("RoomMountController", () => {
       visibleRooms: [room],
       vaultAdapter,
       getSyncEngine: () => syncEngine,
+      ensureCrdtSession: vi.fn(async () => undefined),
       apiFor: () => ({ listFiles: async () => ({ files: [{ relativePath: "Board.md", version: 3, sha256: "server-3", deleted: false }] }), ...api }) as unknown as ReturnType<RoomMountControllerDeps["apiFor"]>,
       requireActiveServer: () => ({ id: "server_1", userId: "user_owner", deviceName: "Owner" }) as ReturnType<RoomMountControllerDeps["requireActiveServer"]>,
       saveSettings: vi.fn(async () => undefined),
@@ -318,6 +463,7 @@ describe("RoomMountController", () => {
       visibleRooms: [room],
       vaultAdapter: new FakeVaultAdapter(),
       getSyncEngine: () => ({}) as VaultSyncEngine,
+      ensureCrdtSession: vi.fn(async () => undefined),
       apiFor: vi.fn() as unknown as RoomMountControllerDeps["apiFor"],
       requireActiveServer: vi.fn() as unknown as RoomMountControllerDeps["requireActiveServer"],
       saveSettings,

@@ -32,7 +32,7 @@ function connection(): SyncConnection {
     socket: socket(),
     principal: null,
     subscriptions: new Set(["room_1"]),
-    capabilities: { crdt: true, presence: true }
+    capabilities: { crdt: true, presence: true, extendedBinarySync: false }
   };
 }
 

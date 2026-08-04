@@ -455,6 +455,9 @@ async function createMemoryDb(): Promise<RelayDb> {
     async durable<T>(operation: () => T): Promise<T> {
       return operation();
     },
+    async withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T> {
+      return operation();
+    },
     close() {
       if (closed) {
         return;
