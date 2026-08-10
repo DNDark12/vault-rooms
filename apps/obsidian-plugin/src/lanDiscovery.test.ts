@@ -169,7 +169,7 @@ function deps(socket: FakeSocket): LanDiscoveryDependencies {
     createSocket: () => socket as LanDiscoverySocket,
     randomBytes: () => Buffer.alloc(16, 1),
     setTimeout: (callback, delay) => setTimeout(callback, delay),
-    clearTimeout: (handle) => clearTimeout(handle),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     getBroadcastAddress: () => undefined
   };
 }

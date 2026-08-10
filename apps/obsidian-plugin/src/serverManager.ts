@@ -30,9 +30,9 @@ import { isRestrictedPort } from "./restrictedPorts.js";
 import sqlWasmBinary from "sql.js/dist/sql-wasm-browser.wasm";
 
 // Plugin-only file (rule 2): call window.setTimeout/clearTimeout directly rather than a bare global.
-const windowStorageTimerHost: StorageMaintenanceTimerHost = {
+const windowStorageTimerHost: StorageMaintenanceTimerHost<number> = {
   setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
-  clearTimeout: (handle) => window.clearTimeout(handle as number)
+  clearTimeout: (handle) => window.clearTimeout(handle)
 };
 
 export type EmbeddedServerStatus =

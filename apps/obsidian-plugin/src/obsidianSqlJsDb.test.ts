@@ -796,10 +796,10 @@ function seedLegacyFileForBackfill(db: RelayDb, roomId: string, relativePath: st
   ).run(versionId, fileId, sha, Buffer.byteLength(content, "utf8"), storageKey, now);
 }
 
-function realTimerHost(): StorageMaintenanceTimerHost {
+function realTimerHost(): StorageMaintenanceTimerHost<number> {
   return {
     setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
-    clearTimeout: (handle) => window.clearTimeout(handle as number)
+    clearTimeout: (handle) => window.clearTimeout(handle)
   };
 }
 

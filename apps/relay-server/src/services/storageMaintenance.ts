@@ -8,9 +8,9 @@ const BACKFILL_BATCH_SIZE = 200;
 const BACKFILL_BATCH_DELAY_MS = 50;
 
 /** Runtime-neutral timer used by standalone and embedded relays. */
-export type StorageMaintenanceTimerHost = {
-  setTimeout: (callback: () => void, delayMs: number) => unknown;
-  clearTimeout: (handle: unknown) => void;
+export type StorageMaintenanceTimerHost<TimerHandle = unknown> = {
+  setTimeout: (callback: () => void, delayMs: number) => TimerHandle;
+  clearTimeout: (handle: TimerHandle) => void;
 };
 
 /** Cancels pending storage maintenance. */
@@ -19,13 +19,13 @@ export type StorageBackfillHandle = {
 };
 
 /** Runs resumable backfill, migration, and both orphan sweeps. */
-export function scheduleStorageBackfill(
+export function scheduleStorageBackfill<TimerHandle>(
   repo: RelayRepository,
-  timerHost: StorageMaintenanceTimerHost,
+  timerHost: StorageMaintenanceTimerHost<TimerHandle>,
   contentWriteService?: ContentWriteService
 ): StorageBackfillHandle {
   let cancelled = false;
-  let pendingTimer: unknown = null;
+  let pendingTimer: TimerHandle | null = null;
   let phase: "backfill" | "migration" | "sweep" | "blobStoreSweep" = "backfill";
 
   const nextPhaseAfter = (current: typeof phase): typeof phase | null => {

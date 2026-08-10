@@ -156,7 +156,7 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         text
           .setValue(
             String(
-              (this.plugin.settings.server.maxStoredContentBytes ?? DEFAULT_SERVER_SETTINGS.maxStoredContentBytes!) /
+              (this.plugin.settings.server.maxStoredContentBytes ?? DEFAULT_SERVER_SETTINGS.maxStoredContentBytes) /
                 (1024 * 1024)
             )
           )

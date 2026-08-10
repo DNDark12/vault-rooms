@@ -11,7 +11,7 @@ import {
 } from "./lanDiscoveryProtocol.js";
 
 type RemoteInfo = { address: string; port: number };
-type TimerHandle = ReturnType<typeof setTimeout>;
+type TimerHandle = unknown;
 
 export type LanDiscoverySocket = {
   on(event: "listening", callback: () => void): LanDiscoverySocket;
@@ -276,10 +276,10 @@ async function resolveRouteInterface(target: string): Promise<string | undefined
 
 function resolvedDependencies(dependencies: LanDiscoveryDependencies): Required<LanDiscoveryDependencies> {
   return {
-    createSocket: dependencies.createSocket ?? (() => nodeCreateSocket({ type: "udp4", reuseAddr: true }) as LanDiscoverySocket),
+    createSocket: dependencies.createSocket ?? (() => nodeCreateSocket({ type: "udp4", reuseAddr: true })),
     randomBytes: dependencies.randomBytes ?? (() => nodeRandomBytes(16)),
-    setTimeout: dependencies.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs)),
-    clearTimeout: dependencies.clearTimeout ?? ((handle) => clearTimeout(handle)),
+    setTimeout: dependencies.setTimeout ?? ((callback, delayMs) => window.setTimeout(callback, delayMs)),
+    clearTimeout: dependencies.clearTimeout ?? ((handle) => window.clearTimeout(handle as number)),
     now: dependencies.now ?? Date.now,
     getBroadcastAddress: dependencies.getBroadcastAddress ?? findDirectedBroadcastAddress
   };

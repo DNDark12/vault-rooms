@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { clearTimeout as nodeClearTimeout, setTimeout as nodeSetTimeout } from "node:timers";
 import { PRODUCT_NAME, PRODUCT_VERSION, type ServerSecurityState } from "@vault-rooms/protocol";
 import { createAppWithDb } from "./appCore.js";
 import { detectLanIp, resolveRuntimeConfig } from "./config.js";
@@ -11,9 +12,9 @@ import { tlsCertificateChainPem } from "./security/identity.js";
 import { scheduleStorageBackfill, type StorageMaintenanceTimerHost } from "./services/storageMaintenance.js";
 
 // Standalone timer host.
-const nodeStorageTimerHost: StorageMaintenanceTimerHost = {
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout)
+const nodeStorageTimerHost: StorageMaintenanceTimerHost<ReturnType<typeof nodeSetTimeout>> = {
+  setTimeout: nodeSetTimeout,
+  clearTimeout: nodeClearTimeout
 };
 
 export function serverIdentity(): string {

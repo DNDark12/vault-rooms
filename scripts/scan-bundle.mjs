@@ -1,5 +1,5 @@
 // Strict-zero tokens are always rejected. Dependency-owned runtime tokens use approved baselines.
-// Baselines include ws/sql.js timers, lib0 globals, CRDT/storage timers, and bounded LAN discovery timers.
+// Baselines include dependency, CRDT, storage, and LAN discovery timers.
 // Any increase requires source inspection before updating these numbers.
 
 import { readFileSync } from "node:fs";
@@ -15,7 +15,7 @@ export const TIER3_APPROVED_BASELINE = {
   "clearInterval(": 3,
   "globalThis": 10,
   "fetch(": 2,
-  "window.setTimeout": 14
+  "window.setTimeout": 15
 };
 
 export const REQUIRED_PRESENT = ["noServer", "maxPayload"];
