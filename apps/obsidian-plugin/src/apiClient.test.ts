@@ -60,4 +60,38 @@ describe("RelayApiClient.request", () => {
     await expect(requestUrlWithTimeout({ url: "https://relay.example/health", throw: false }, 3_000)).rejects.toThrow("network failed");
     await expect(requestUrlWithTimeout({ url: "https://relay.example/health", throw: false }, 3_000)).rejects.toBeInstanceOf(Error);
   });
+
+  it("reads raw bytes without requiring a JSON response", async () => {
+    const bytes = new Uint8Array([0, 1, 2, 255]);
+    vi.mocked(requestUrl).mockResolvedValue({
+      status: 200,
+      arrayBuffer: bytes.buffer,
+      get json() {
+        throw new SyntaxError("not JSON");
+      }
+    } as Awaited<ReturnType<typeof requestUrl>>);
+    const client = new RelayApiClient("https://relay.example", "token");
+
+    await expect(client.readFileRaw("room 1", "image a.bin")).resolves.toEqual(bytes);
+  });
+
+  it("uploads the exact ArrayBuffer with the raw content type", async () => {
+    vi.mocked(requestUrl).mockResolvedValue({
+      status: 200,
+      arrayBuffer: new ArrayBuffer(0),
+      json: { ok: true, relativePath: "image.bin", version: 1, sha256: "hash" }
+    } as Awaited<ReturnType<typeof requestUrl>>);
+    const client = new RelayApiClient("https://relay.example", "token");
+    const bytes = new Uint8Array([7, 8, 9]);
+
+    await client.writeFileRaw("room", "image.bin", 0, bytes);
+
+    expect(requestUrl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "PUT",
+        headers: expect.objectContaining({ "content-type": "application/octet-stream" }),
+        body: bytes.buffer
+      })
+    );
+  });
 });

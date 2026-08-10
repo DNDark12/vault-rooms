@@ -7,23 +7,27 @@ import { FixedWindowRateLimiter } from "./security/rateLimiter.js";
 import { ConnectionRegistry } from "./sync/connectionRegistry.js";
 import { PresenceRegistry } from "./sync/presenceRegistry.js";
 import { PresenceService } from "./sync/presenceService.js";
-import type { CrdtMaterializedEvent } from "./sync/crdtDocManager.js";
+import type { CrdtMaterializedEvent, CrdtRepositoryPort } from "./sync/crdtDocManager.js";
 import type { SecurityRuntime } from "./routes/security.routes.js";
+import { createInMemoryBlobStore, type BlobStore } from "./storage/blobStore.js";
+import { createContentWriteService, type ContentWriteService } from "./storage/contentWriteService.js";
 
 export type RelayCoreOptions = {
   maxFileBytes?: number;
+  /** Stored-content limit enforced atomically by the repository. */
+  maxStoredContentBytes?: number;
   maxConnections?: number;
+  /** Raw content store. Production callers inject a durable adapter. */
+  blobStore?: BlobStore;
   rateLimit?: {
     bootstrapMax?: number;
     bootstrapWindowMs?: number;
     rotationProbeMax?: number;
     rotationProbeWindowMs?: number;
-    /** Presence cursor updates per window, per connection. Only non-null updates consume budget -
-     *  a retraction is cleanup, not noise, and always goes through. */
+    /** Presence cursor updates per window and connection. */
     presenceMax?: number;
     presenceWindowMs?: number;
-    /** Test seam for the fixed-window clock. `SyncTimerHost` deliberately stays a scheduler contract
-     *  with no clock, so the limiter's own injectable `now` is threaded here instead. */
+    /** Test clock for the presence limiter. */
     presenceNow?: () => number;
   };
   security?: {
@@ -36,8 +40,11 @@ export function createRelayCore(db: RelayDb, options: RelayCoreOptions = {}) {
   runMigrations(db);
 
   const maxFileBytes = options.maxFileBytes ?? 5 * 1024 * 1024;
+  const maxStoredContentBytes = options.maxStoredContentBytes ?? 256 * 1024 * 1024;
   const maxConnections = options.maxConnections ?? 100;
-  const repo = new RelayRepository(db);
+  const repo = new RelayRepository(db, maxStoredContentBytes);
+  const blobStore = options.blobStore ?? createInMemoryBlobStore();
+  const contentWriteService = createContentWriteService(repo, blobStore);
   const connectionRegistry = new ConnectionRegistry();
   const bootstrapPin = generateBootstrapPin();
   const bootstrapRateLimiter = new FixedWindowRateLimiter(options.rateLimit?.bootstrapMax ?? 5, options.rateLimit?.bootstrapWindowMs ?? 60_000);
@@ -59,6 +66,8 @@ export function createRelayCore(db: RelayDb, options: RelayCoreOptions = {}) {
 
   return {
     repo,
+    blobStore,
+    contentWriteService,
     connectionRegistry,
     bootstrapPin,
     bootstrapRateLimiter,
@@ -67,18 +76,25 @@ export function createRelayCore(db: RelayDb, options: RelayCoreOptions = {}) {
     presenceRateLimiter,
     presenceService,
     maxFileBytes,
+    maxStoredContentBytes,
     maxConnections,
     security: options.security
   };
 }
 
-/** Builds the `CrdtDocManager` materialize callback (contract 1.2/1.6): when the CRDT lane
- *  debounce-materializes a document's text into `files`/`file_versions`, legacy/non-CRDT-capable
- *  room subscribers need to learn about it the same way they always have - a `remote_file_change`
- *  broadcast - since they never receive `remote_crdt_update`. Shared between both runtimes (unlike
- *  `CrdtDocManager` itself, which needs a runtime-specific timer host and so is constructed in
- *  `appCore.ts`/`embeddedRelayApp.ts` instead) because this closure only touches `repo` and
- *  `connectionRegistry`, neither of which differs between runtimes. */
+/** Routes CRDT materialization through the external content store. */
+export function createCrdtRepositoryPort(repo: RelayRepository, contentWriteService: ContentWriteService): CrdtRepositoryPort {
+  return {
+    writeCrdtSnapshot: (...args) => repo.writeCrdtSnapshot(...args),
+    getLatestCrdtSnapshot: (...args) => repo.getLatestCrdtSnapshot(...args),
+    listCrdtUpdatesSince: (...args) => repo.listCrdtUpdatesSince(...args),
+    appendCrdtUpdate: (...args) => repo.appendCrdtUpdate(...args),
+    materializeCrdtContent: (input) => contentWriteService.materializeCrdtContent(input),
+    getFileById: (fileId) => repo.getFileById(fileId)
+  };
+}
+
+/** Broadcasts materialized CRDT content through the whole-file lane. */
 export function createCrdtMaterializedHandler(
   repo: RelayRepository,
   connectionRegistry: ConnectionRegistry
@@ -98,27 +114,12 @@ export function createCrdtMaterializedHandler(
         sha256: event.sha256,
         content: event.content,
         updatedBy: event.updatedBy,
-        // This path *is* a CRDT document - tell CRDT-capable receivers its epoch so the vault-watcher
-        // "create"/"modify" event caused by writing this content to disk adopts the existing document
-        // rather than issuing a colliding `crdt_create` for it (ninth hardware-testing round).
+        // Lets receivers adopt the existing CRDT document.
         ...(materializedFile ? { crdtEpoch: materializedFile.crdt_epoch } : {}),
         updatedAt: new Date().toISOString()
       },
       {
-        // Every room subscriber with file:read on this path receives this broadcast, CRDT-capable
-        // or not (second-hardware-testing-round item 1, 2026-07-21): the earlier `connectionFilter`
-        // here excluded every CRDT-capable connection on the assumption "the CRDT-capable half of
-        // the room already learned about this content in real time via remote_crdt_update on every
-        // accepted crdt_update" - that assumption only holds if the receiving *client* has an open
-        // session for this exact path (see crdtSession.ts's handleServerMessage, which silently
-        // drops remote_crdt_update when no local session exists). A device that is CRDT-capable
-        // (every current build - syncWsClient.ts always advertises capabilities.crdt: true) but
-        // never opened this file locally has no session either way, so excluding it here left it
-        // with nothing - it's indistinguishable from a legacy connection until it opens the file.
-        // The client, not this connection-level filter, is the correct place to decide whether to
-        // apply this coarser snapshot (see syncWsClient.ts's remote_file_change handler, which now
-        // skips applying it only when a CRDT session is already open for this path). canReceive's
-        // per-path file:read check is therefore the only gate this broadcast needs.
+        // All authorized subscribers receive materialized snapshots.
         canReceive: (principal) =>
           hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: event.relativePath, aclRules })
       }

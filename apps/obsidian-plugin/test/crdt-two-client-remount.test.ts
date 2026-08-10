@@ -868,7 +868,6 @@ describe("CRDT two-client: unmount/remount then type", () => {
   });
 });
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // The same seam argument as the rest of this file: presence spans the relay, two sockets, two session
 // managers, and two real CM6 views, and the interesting failures (ghost carets, duplicated content,
 // idle chatter) only appear when all of those are real at once.

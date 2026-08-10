@@ -137,7 +137,6 @@ describe("server bootstrap and invite flow", () => {
     await app.close();
   });
 
-  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
   // This is the very first request a new device makes, so "something was missing" would leave someone
   // staring at a join form with no idea which box is empty - the per-field detail has to survive the
   // rewrite, just phrased as the thing the user fills in rather than the wire field name.

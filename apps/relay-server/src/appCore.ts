@@ -16,10 +16,11 @@ import type { InviteSecurityContext } from "./routes/inviteResponse.js";
 import { registerRoomRoutes } from "./routes/room.routes.js";
 import { assertTransportAllowed, registerSecurityRoutes, type RequestTransport } from "./routes/security.routes.js";
 import { registerTeamRoutes } from "./routes/team.routes.js";
-import { createCrdtMaterializedHandler, createRelayCore, type RelayCoreOptions } from "./relayCore.js";
+import { createCrdtMaterializedHandler, createCrdtRepositoryPort, createRelayCore, type RelayCoreOptions } from "./relayCore.js";
 import { certPemToDerBase64Url } from "./security/identity.js";
 import { CrdtDocManager } from "./sync/crdtDocManager.js";
 import { registerSyncRoutes, type SyncTimerHost } from "./sync/syncServer.js";
+import { isRawHttpResponse } from "./services/rawHttpResponse.js";
 
 const nodeSyncTimerHost: SyncTimerHost = {
   setInterval: (callback, delayMs) => setNodeInterval(callback, delayMs),
@@ -48,17 +49,19 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
   const core = options.core ?? createRelayCore(db, options);
   const {
     repo,
+    contentWriteService,
     connectionRegistry,
     bootstrapPin,
     bootstrapRateLimiter,
     rotationProbeRateLimiter,
     presenceService,
     maxFileBytes,
-    maxConnections
+    maxConnections,
+    maxStoredContentBytes
   } = core;
   const security = options.security ?? core.security;
   const crdtDocManager = new CrdtDocManager(
-    repo,
+    createCrdtRepositoryPort(repo, contentWriteService),
     options.crdtTimerHost ?? nodeSyncTimerHost,
     createCrdtMaterializedHandler(repo, connectionRegistry)
   );
@@ -70,6 +73,19 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     logger: false,
     bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024),
     ...(options.https ? { https: options.https } : {})
+  });
+  app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_request, body, done) => done(null, body));
+  app.addHook("preSerialization", (_request, reply, payload, done) => {
+    if (!isRawHttpResponse(payload)) {
+      done(null, payload);
+      return;
+    }
+    reply.type(payload.contentType);
+    for (const [name, value] of Object.entries(payload.headers ?? {})) {
+      reply.header(name, value);
+    }
+    reply.serializer(((value: unknown) => (Buffer.isBuffer(value) ? value : JSON.stringify(value))) as never);
+    done(null, Buffer.from(payload.body));
   });
   // Bootstrap PIN (see security/bootstrapPin.ts): required by POST /api/bootstrap in addition to
   // the existing localhost-only check, so a DNS-rebound "local-looking" request from a malicious
@@ -131,7 +147,12 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
 
   const currentInviteSecurity = () => inviteSecurityContext(repo.getSecurityState(), security?.runtime.getIdentity() ?? null);
   const inviteSecurity = currentInviteSecurity();
-  registerAuthRoutes(app, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity, publicUrl: options.publicUrl });
+  registerAuthRoutes(app, repo, {
+    connectionRegistry,
+    inviteSecurity: currentInviteSecurity,
+    publicUrl: options.publicUrl,
+    maxStoredContentBytes
+  });
   registerTeamRoutes(app, repo, {
     publicUrl: options.publicUrl ?? "http://127.0.0.1:8787",
     allowRemoteBootstrap: options.allowRemoteBootstrap ?? false,
@@ -141,13 +162,14 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     security: inviteSecurity
   });
   const publicUrl = options.publicUrl ?? "http://127.0.0.1:8787";
-  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, presenceService, security: inviteSecurity, crdtDocManager });
+  registerRoomRoutes(app, repo, { publicUrl, connectionRegistry, presenceService, security: inviteSecurity, crdtDocManager, contentWriteService });
   registerFriendRoutes(app, repo, { publicUrl, connectionRegistry, security: inviteSecurity });
   registerFileRoutes(app, repo, {
     maxFileBytes,
     connectionRegistry,
     presenceService,
-    crdtDocManager
+    crdtDocManager,
+    contentWriteService
   });
   registerAuditRoutes(app, repo);
   if (security) {
@@ -159,7 +181,8 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
       maxConnections,
       timerHost: nodeSyncTimerHost,
       crdtDocManager,
-      presenceService
+      presenceService,
+      contentWriteService
     });
   });
 

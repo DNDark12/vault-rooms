@@ -16,7 +16,7 @@ import { CrdtEditorController } from "./crdtEditorBinding.js";
 import { CrdtDocStore } from "./crdtDocStore.js";
 import { CrdtSessionManager } from "./crdtSession.js";
 import { CrdtOperationJournal } from "./crdtOperationJournal.js";
-import { userFacingError } from "./errorMessages.js";
+import { isTransportFailure, userFacingError } from "./errorMessages.js";
 import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
@@ -67,6 +67,8 @@ export default class VaultRoomsPlugin extends Plugin {
    *  and for non-owners. Refreshed by refreshTeams(); see advertisedAddressDrift for how it's used. */
   private observedClientHost: string | null = null;
   private serverOwnerIdentity: { id: string; displayName: string } | undefined;
+  /** Active server storage usage, refreshed with team data. */
+  private storageStatus: { usageBytes: number; maxBytes: number } | undefined;
   /** This device's own teams (with ownerUserId) - scoped to the caller's memberships by the server
    *  (server owner sees all). Used for team-management UI (Invite link/Delete team/members), which
    *  needs ownerUserId/role - never use this for the room ACL "Team" picker. */
@@ -158,10 +160,7 @@ export default class VaultRoomsPlugin extends Plugin {
     this.vaultAdapter = new ObsidianVaultAdapter(this);
     this.syncEngine = new VaultSyncEngine(this.vaultAdapter, new RelayApiClient("http://127.0.0.1:8787"));
     this.roomMountController = new RoomMountController(this.ctx);
-    // Persistent CRDT client state (contract 1.12, strategy A) - a sibling directory of
-    // server-data/relay.sqlite (see ServerConnectionManager), through Obsidian's DataAdapter, never
-    // node:fs (CLAUDE.md rule 3). Independent of which server is active, so constructed once here
-    // rather than per connectSyncSocket() call.
+    // CRDT state persists independently of the active server connection.
     const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
     this.crdtDocStore = new CrdtDocStore(this.app.vault.adapter, `${pluginDir}/server-data/crdt`);
     this.crdtOperationJournal = new CrdtOperationJournal({
@@ -277,6 +276,11 @@ export default class VaultRoomsPlugin extends Plugin {
       callback: () => this.diagnoseLiveEditing()
     });
     this.addCommand({
+      id: "reclaim-relay-storage",
+      name: "Reclaim relay database space",
+      callback: () => this.reclaimRelayStorage()
+    });
+    this.addCommand({
       id: "setup-server",
       name: "Set up server",
       callback: () => this.openSetupServerModal()
@@ -342,6 +346,7 @@ export default class VaultRoomsPlugin extends Plugin {
       const mode = params.mode ?? params.op ?? "join";
       const inviteServer = params.server;
       const inviteToken = params.token;
+      const inviteServerId = typeof params.serverId === "string" ? params.serverId : undefined;
       if (mode !== "join" || !inviteServer || !inviteToken) {
         new Notice("Vault Rooms invite link is missing server/token parameters.");
         return;
@@ -356,10 +361,28 @@ export default class VaultRoomsPlugin extends Plugin {
       // If this device already has an active identity on the exact server, accept the Team/Room/
       // Friend invite against that existing user instead of trying to create a second identity.
       void this.serverConnectionManager
-        .resolveInviteServer(inviteServer, pin?.serverId)
-        .then((existing) => {
+        .resolveInviteServer(inviteServer, pin?.serverId ?? inviteServerId)
+        .then(async (existing) => {
           if (existing) {
-            return this.acceptInviteForServer(existing, inviteToken, inviteServer, pin);
+            try {
+              await this.acceptInviteForServer(existing, inviteToken, inviteServer, pin);
+            } catch (error) {
+              if (pin && isTransportFailure(error)) {
+                const recover = await confirmModal(
+                  this.app,
+                  "Server address may have changed",
+                  "Search this LAN for the same server? Vault Rooms verifies its identity before sending the invite.",
+                  "Find server on LAN",
+                  false
+                );
+                if (recover) {
+                  await this.recoverExistingInviteOnLan(existing.id, inviteToken, pin, inviteServer);
+                }
+                return;
+              }
+              throw error;
+            }
+            return;
           }
           new JoinTeamModal(this, "join", inviteServer, inviteToken, pin).open();
         })
@@ -429,6 +452,11 @@ export default class VaultRoomsPlugin extends Plugin {
    *  against the advertised LAN URL to warn about a stale Public URL override - see advertisedAddressDrift. */
   getObservedClientHost(): string | null {
     return this.observedClientHost;
+  }
+
+  /** Returns active server storage usage when available. */
+  getStorageStatus(): { usageBytes: number; maxBytes: number } | undefined {
+    return this.storageStatus;
   }
 
   getLanShareReachability(): LanShareReachability {
@@ -537,13 +565,10 @@ export default class VaultRoomsPlugin extends Plugin {
     return this.serverConnectionManager.getActiveServer();
   }
 
-  /** True only for this plugin's own embedded relay connection. isServerOwner alone is too broad:
-   *  this account can own a standalone vault-rooms-relay deployment running elsewhere. Bootstrap
-   *  through this plugin's UI always stores the embedded server's loopback localUrl (see
-   *  setupServer() and serverManager.ts), so pairing owner identity with a loopback baseUrl pins it
-   *  to this device's embedded server. */
+  /** Uses the persisted local-server marker; loopback is only a legacy fallback. */
   private isOwnEmbeddedServerConnection(server: ServerConnection): boolean {
-    return isOwnEmbeddedServerConnection(server);
+    const markedId = this.settings.embeddedServerConnectionId;
+    return markedId ? server.id === markedId : isOwnEmbeddedServerConnection(server);
   }
 
   activeServerIsOwnEmbeddedServer(): boolean {
@@ -631,12 +656,15 @@ export default class VaultRoomsPlugin extends Plugin {
         })();
     const previousServers = this.settings.servers;
     const previousActiveServerId = this.settings.activeServerId;
+    const previousEmbeddedServerConnectionId = this.settings.embeddedServerConnectionId;
     this.upsertServer(baseUrl, response, pinnedInfo);
+    this.settings.embeddedServerConnectionId = response.device.id;
     try {
       await this.saveSettings();
     } catch (error) {
       this.settings.servers = previousServers;
       this.settings.activeServerId = previousActiveServerId;
+      this.settings.embeddedServerConnectionId = previousEmbeddedServerConnectionId;
       if (recoveredDeviceId) {
         try {
           await this.serverConnectionManager.revokeRecoveredEmbeddedOwnerDevice(recoveredDeviceId);
@@ -677,6 +705,7 @@ export default class VaultRoomsPlugin extends Plugin {
 
     const previousServers = this.settings.servers;
     const previousActiveServerId = this.settings.activeServerId;
+    const previousEmbeddedServerConnectionId = this.settings.embeddedServerConnectionId;
     const deviceName = this.getActiveServer()?.deviceName || "Obsidian desktop";
     const restoredStatus = await this.serverConnectionManager.restoreEmbeddedLegacyV01Backup();
     if (!restoredStatus.running) {
@@ -684,11 +713,13 @@ export default class VaultRoomsPlugin extends Plugin {
     }
     const recovered = await this.serverConnectionManager.recoverEmbeddedOwnerDevice(deviceName);
     this.upsertServer(restoredStatus.localUrl, recovered, restoredStatus.pinnedInfo);
+    this.settings.embeddedServerConnectionId = recovered.device.id;
     try {
       await this.saveSettings();
     } catch (error) {
       this.settings.servers = previousServers;
       this.settings.activeServerId = previousActiveServerId;
+      this.settings.embeddedServerConnectionId = previousEmbeddedServerConnectionId;
       try {
         await this.serverConnectionManager.revokeRecoveredEmbeddedOwnerDevice(recovered.device.id);
       } catch (rollbackError) {
@@ -700,6 +731,31 @@ export default class VaultRoomsPlugin extends Plugin {
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     this.renderOpenRoomsViews();
     new Notice("Restored v0.1 server data and recovered owner access. The previous database was retained as a pre-restore backup.");
+  }
+
+  /** Compacts the embedded relay database after user confirmation. */
+  async reclaimRelayStorage(): Promise<void> {
+    const status = this.getServerStatus();
+    if (!status.running) {
+      new Notice("Start the Vault Rooms server before reclaiming database space.");
+      return;
+    }
+    if (
+      !(await confirmModal(
+        this.app,
+        "Reclaim relay database space",
+        "Compacts the relay's SQLite file to reclaim space freed by deleted or superseded content. This briefly pauses other writes to the database and, for a large database, needs roughly its full size again in memory while it runs. It does not delete any current file content.",
+        "Reclaim space"
+      ))
+    ) {
+      return;
+    }
+    try {
+      await this.serverConnectionManager.reclaimEmbeddedStorage();
+      new Notice("Reclaimed relay database space.");
+    } catch (error) {
+      new Notice(`Could not reclaim relay database space: ${userFacingError(error, "the server did not report a reason.")}`);
+    }
   }
 
   async joinServer(
@@ -726,8 +782,9 @@ export default class VaultRoomsPlugin extends Plugin {
     baseUrl = server.baseUrl,
     pin?: PinnedInviteInfo
   ): Promise<void> {
+    const addressChanged = baseUrl !== server.baseUrl;
     const result = await this.serverConnectionManager.acceptInviteForServer(server, inviteToken, baseUrl, pin);
-    if ((pin || result.deviceToken) && this.getActiveServer()?.id === server.id) {
+    if ((addressChanged || pin || result.deviceToken) && this.getActiveServer()?.id === server.id) {
       this.connectSyncSocket();
     }
     if (result.inviteType !== "friend" && this.getActiveServer()?.id === server.id) {
@@ -815,6 +872,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // it's compared against and why that comparison is the only way to notice a stale Public URL override.
     this.observedClientHost = me.observedClientHost?.host ?? null;
     this.serverOwnerIdentity = me.serverOwner;
+    this.storageStatus = { usageBytes: me.storageUsageBytes, maxBytes: me.maxStoredContentBytes };
     this.myTeamRoles = Object.fromEntries(me.teams.map((team) => [team.id, team.role]));
     this.teams = teamsResult.teams;
     this.teamDirectory = directoryResult.teams;
@@ -1066,6 +1124,9 @@ export default class VaultRoomsPlugin extends Plugin {
     }
     const isActive = this.getActiveServer()?.id === server.id;
     this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
+    if (this.settings.embeddedServerConnectionId === server.id) {
+      this.settings.embeddedServerConnectionId = undefined;
+    }
     if (this.settings.activeServerId === server.id) {
       this.settings.activeServerId = undefined;
     }
@@ -1108,6 +1169,48 @@ export default class VaultRoomsPlugin extends Plugin {
     new Notice(`Using ${server.baseUrl}`);
   }
 
+  async updateServerAddress(serverId: string, address: string): Promise<void> {
+    const wasActive = this.getActiveServer()?.id === serverId;
+    const updated = await this.serverConnectionManager.updateServerAddress(serverId, address);
+    if (wasActive) {
+      this.connectSyncSocket();
+      await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
+        new Notice(userFacingError(error, "Address updated, but server data could not be refreshed yet"));
+      });
+    }
+    this.renderOpenRoomsViews();
+    new Notice(`Server address updated to ${updated.baseUrl}. Existing rooms and access were preserved.`);
+  }
+
+  async findServerOnLan(serverId: string): Promise<void> {
+    const wasActive = this.getActiveServer()?.id === serverId;
+    const updated = await this.serverConnectionManager.findServerOnLan(serverId);
+    if (wasActive) {
+      this.connectSyncSocket();
+      await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
+        new Notice(userFacingError(error, "Server found, but its data could not be refreshed yet"));
+      });
+    }
+    this.renderOpenRoomsViews();
+    new Notice(`Found the same server at ${updated.baseUrl}. Existing rooms and access were preserved.`);
+  }
+
+  async findInviteServerOnLan(pin: PinnedInviteInfo, advertisedBaseUrl?: string): Promise<string> {
+    return this.serverConnectionManager.findInviteServerOnLan(pin, advertisedBaseUrl);
+  }
+
+  async recoverExistingInviteOnLan(
+    connectionId: string,
+    inviteToken: string,
+    pin: PinnedInviteInfo,
+    advertisedBaseUrl?: string
+  ): Promise<void> {
+    const server = this.settings.servers.find((candidate) => candidate.id === connectionId);
+    if (!server) throw new Error("Saved server not found.");
+    const baseUrl = await this.serverConnectionManager.findInviteServerOnLan(pin, advertisedBaseUrl);
+    await this.acceptInviteForServer(server, inviteToken, baseUrl, pin);
+  }
+
   async refreshRooms(options: { notify?: boolean } = {}): Promise<void> {
     const server = this.requireActiveServer();
     const result = await this.apiFor(server).listRooms();
@@ -1130,25 +1233,7 @@ export default class VaultRoomsPlugin extends Plugin {
     }
   }
 
-  /**
-   * Mirrors each visible room's `crdtEnabled` flag and (third hardware-testing round, item 1)
-   * `sync:push`-derived `canPushLocalEdits` flag onto its persisted `MountedRoomState`, for any room
-   * that's actually mounted - so `resolveRoomCrdtEnabled`/`resolveCanPushLocalEdits`'s fallback
-   * chains have a synchronously available last-known value at the start of the *next* Obsidian
-   * session, before that session's own `refreshRooms()` round trip has resolved (see CLAUDE.md's
-   * post-hardware-testing audit notes). Best-effort: only saves settings when something actually
-   * changed, and a save failure here is not worth surfacing on top of whatever normally happens
-   * after refreshRooms().
-   *
-   * Freshness note for `canPushLocalEdits`: there is no live-push equivalent of `room_mode_changed`
-   * for ACL/permission changes - `ConnectionRegistry.revalidateAccess` (relay-server) only ever
-   * fully revokes a subscription on loss of `room:read` (handled by `onAccessRevoked` below), it
-   * never notifies a narrower downgrade like losing `sync:push` while keeping `room:read`. This
-   * `refreshRooms()`-only mirror (called at startup and periodically via user actions) is the
-   * accepted staleness bound: a permission *downgrade* becoming visible with a short lag is a much
-   * smaller risk than the bug this closes (a read-only member's local divergence being treated as a
-   * real edit worth protecting).
-   */
+  /** Persists the latest CRDT mode and push permission for startup routing. */
   private async persistRoomFlagsForMountedRooms(): Promise<void> {
     let changed = false;
     for (const room of this.visibleRooms) {
@@ -1261,12 +1346,7 @@ export default class VaultRoomsPlugin extends Plugin {
     this.crdtOperationJournal?.markDisconnected();
   }
 
-  /**
-   * Resolves a vault-relative file path to a CRDT lane target: which currently-mounted room it
-   * falls under (if any), only when that room has `crdtEnabled` and the path is CRDT-eligible
-   * (`.md`). Folder-scoped by construction - checked against one specific path at a time, never a
-   * vault-wide enumeration (CLAUDE.md rule 5).
-   */
+  /** Resolves an eligible vault path to a mounted CRDT room. */
   private resolveCrdtTarget(vaultPath: string): { roomId: string; relativePath: string } | undefined {
     for (const [roomId, roomState] of Object.entries(this.settings.mountedRooms)) {
       if (roomState.unmounted) continue;
@@ -1293,18 +1373,7 @@ export default class VaultRoomsPlugin extends Plugin {
     return undefined;
   }
 
-  /**
-   * Reacts to Obsidian's `active-leaf-change`/`file-open`/`layout-change` workspace events by
-   * enumerating *every currently-open* markdown pane (via `Workspace#getLeavesOfType("markdown")`,
-   * not just the focused one - second-hardware-testing-round item 3) and handing the full set to
-   * the CRDT editor controller's reconcile method, so every open pane showing a live CRDT note stays
-   * bound regardless of focus. Getting from the public `Editor` API to the underlying CM6
-   * `EditorView` goes through Editor's undocumented but long-standing `.cm` accessor (see
-   * getCmEditorView below) - this glue is inherently not unit-testable without a real Obsidian
-   * runtime (the same gap already recorded and accepted for Task 0.2 Step 3); crdtEditorBinding.ts's
-   * own tests cover everything reachable once a real EditorView is in hand, including the multi-view
-   * reconcile logic itself (syncOpenViews).
-   */
+  /** Reconciles CRDT bindings for every open Markdown pane. */
   private handleActiveEditorChanged(): void {
     const openViews: Array<{ vaultPath: string; view: EditorView }> = [];
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
@@ -1606,6 +1675,7 @@ export default class VaultRoomsPlugin extends Plugin {
     // device's own hosted LAN URL and warn about drift that doesn't exist.
     this.observedClientHost = null;
     this.serverOwnerIdentity = undefined;
+    this.storageStatus = undefined;
     this.visibleRooms = [];
     this.teams = [];
     this.teamDirectory = [];
@@ -1670,19 +1740,7 @@ export default class VaultRoomsPlugin extends Plugin {
         // "modify" | "delete". A rename fully inside the room additionally carries renameHint on
         // each of the two calls (see fileWatcher.ts's RenameHint doc comment).
         const changeType = event.type as "create" | "modify" | "delete";
-        // CRDT-managed files must never also go through the whole-file CAS lane (CLAUDE.md's
-        // dual-lane invariant) - a create/modify of a `.md` path in a CRDT-enabled room instead
-        // ensures a CRDT session is open (first-create allocates an epoch; an already-open bound
-        // editor already captured the edit live, and an unbound file gets reconciled against disk
-        // here). Delete always stays on the CAS lane regardless of room mode - see
-        // isCrdtManagedLocalChange's doc comment for why there is no separate CRDT delete message.
-        //
-        // CRDT mode is resolved via resolveRoomCrdtEnabled rather than a raw `visibleRooms.find(...)`
-        // lookup: visibleRooms is network-confirmed but empty until refreshRooms() first resolves
-        // (e.g. immediately after Obsidian starts) - looking it up alone would silently misroute a
-        // CRDT-managed file's local edit into this legacy CAS lane during that window, marking it
-        // dirty in a way a later remote CRDT update would mistake for a real conflict (see
-        // CLAUDE.md's post-hardware-testing audit notes for the bug this fixes).
+        // Use persisted CRDT mode until the first room refresh completes.
         const crdtEnabled = resolveRoomCrdtEnabled(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
         // Third-hardware-testing-round item 1's invariant, resolved early here too (not just at its
         // original call site below) so the rename short-circuit can honor "a room this device can't
@@ -1898,14 +1956,7 @@ export default class VaultRoomsPlugin extends Plugin {
           new Notice(`Vault Rooms: "${requestedRelativePath}" already exists in this room - your note was saved as "${relativePath}".`);
         }
       });
-      // A session manager didn't exist a moment ago (unbindAll()/dispose() above tore down the
-      // previous one, if any) - retroactively re-run the full open-pane reconcile, so every note that
-      // was already open (e.g. Obsidian auto-restoring several panes on startup before this ran, which
-      // fires active-leaf-change/file-open ahead of onLayoutReady - see CLAUDE.md's post-hardware-
-      // testing audit notes) gets bound to its CRDT session retroactively instead of staying an unbound
-      // plain CM6 editor for the rest of the session - not just whichever pane happens to be focused
-      // (second-hardware-testing-round item 3). No-ops cleanly via syncOpenViews's empty-list handling
-      // when there are no open markdown panes.
+      // Bind panes restored before the session manager was ready.
       this.handleActiveEditorChanged();
       for (const roomId of Object.keys(this.settings.mountedRooms)) {
         this.watchMountedRoom(roomId);

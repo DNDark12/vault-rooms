@@ -4,7 +4,6 @@ import type { EditorView } from "@codemirror/view";
 import type { SyncClientMessage } from "@vault-rooms/protocol";
 import { CrdtPresenceSession, presenceColor } from "./crdtPresence.js";
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // Pins the exact `y-codemirror.next@0.3.5` Awareness contract this adapter has to satisfy - every one
 // of these fails *silently* in a real editor if regressed, which is why they are asserted directly
 // rather than only through the editor-binding tests.

@@ -9,10 +9,6 @@ import {
   normalizeRelativePath
 } from "./paths.js";
 
-// User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
-// These messages are not internal parser diagnostics: they cross the REST/WS error envelope and land
-// in an Obsidian Notice, so they describe what the user should pick instead of restating the
-// path-normalization rule that rejected the input. The INVALID_PATH code carries the machine meaning.
 describe("path error prose", () => {
   it("does not expose path-parser vocabulary", () => {
     expect(() => normalizeRelativePath("../Secret.md")).toThrowError(

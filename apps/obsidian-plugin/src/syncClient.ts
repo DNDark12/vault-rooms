@@ -9,10 +9,7 @@ export interface VaultAdapter {
   readBinary(path: string): Promise<ArrayBuffer>;
   writeBinary(path: string, data: ArrayBuffer): Promise<void>;
   delete(path: string): Promise<void>;
-  /** Moves/renames a file in place (fourth hardware-testing round, 2026-07-23) - used to apply a
-   *  `remote_crdt_rename` on a device that has no open session for the path (so there's no live
-   *  Y.Doc/editor to rekey, just a plain on-disk file to move to match the new name). A no-op is
-   *  not implied when the source doesn't exist - callers check `exists()` first where that matters. */
+  /** Moves a file in place. */
   rename(oldPath: string, newPath: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   list(prefix: string): Promise<string[]>;
@@ -87,36 +84,9 @@ export type MountedRoomState = {
    *  additive so rooms saved before this field existed load as "not unmounted" (i.e. actively
    *  mounted), matching their pre-existing behavior. */
   unmounted?: boolean;
-  /**
-   * Client-side cache of this room's CRDT mode (contract 1.11), last learned from either a fresh
-   * `refreshRooms()` REST fetch or a live `room_mode_changed` push - see main.ts's
-   * `persistRoomFlagsForMountedRooms()`/`connectSyncSocket()`'s `onRoomModeChanged` wiring. Exists
-   * so `resolveRoomCrdtEnabled` has a synchronously-available last-known value at plugin startup,
-   * before `visibleRooms` (which requires a network round trip) is populated - see
-   * CLAUDE.md's post-hardware-testing audit notes for the bug this closes (a CRDT-managed file's
-   * local edit getting misrouted into the legacy whole-file CAS lane during that startup window).
-   * Optional/additive so rooms saved before this field existed load with no persisted opinion
-   * (falls through to `false` in `resolveRoomCrdtEnabled` until the next refresh).
-   */
+  /** Last known CRDT mode, available before the first room refresh completes. */
   crdtEnabled?: boolean;
-  /**
-   * Client-side cache of whether this device currently has `sync:push` for this room (third
-   * hardware-testing round, item 1) - last learned from either a fresh `refreshRooms()` REST fetch
-   * (`RoomSummary.permissions`) or, at mount time, the `RoomSummary` passed to
-   * `RoomMountController.mountRoom()`. There is no live push equivalent of `room_mode_changed` for
-   * ACL/permission changes (see `ConnectionRegistry.revalidateAccess` - it only ever fully revokes a
-   * subscription on loss of `room:read`, it does not notify on a narrower permission downgrade like
-   * losing `sync:push` while keeping `room:read`), so `refreshRooms()` freshness is the accepted
-   * staleness bound here: a permission *downgrade* becoming visible with a short lag is a much
-   * smaller risk than the bug this field closes (an upgrade never being usable, or - the sharper
-   * case - a read-only member's local file divergence being treated as a real edit worth protecting
-   * with dirty-tracking, a push attempt, or a conflict-fork). Used via `resolveCanPushLocalEdits`
-   * at call sites that only have a `roomId` (no fresh `RoomSummary` in hand); `VaultSyncEngine`'s own
-   * methods read this field directly with a safe `?? false` default (see `reconcileLocalEdits`/
-   * `applyRemoteChange`/`applyRemoteDelete`), since they only ever receive a `MountedRoomState`, not
-   * `visibleRooms`. Optional/additive so rooms saved before this field existed load with no
-   * persisted opinion (falls through to `false`, the safe default, until the next refresh/mount).
-   */
+  /** Last known `sync:push` permission. Unknown defaults to false. */
   canPushLocalEdits?: boolean;
   /** Durable structural intent for CRDT create/rename operations that have not yet received an ACK.
    *  Optional so settings written before the offline journal load as an empty queue. */
@@ -146,17 +116,7 @@ export function resolveRoomCrdtEnabled(
   return Boolean(mountedRoomState?.crdtEnabled);
 }
 
-/**
- * Resolves whether this device can currently push local edits to a room (third hardware-testing
- * round, item 1) - mirrors `resolveRoomCrdtEnabled`'s fallback-chain shape, but defaults to `false`
- * rather than the CRDT resolver's implicit-`false`-anyway default, spelled out explicitly here
- * because unlike CRDT-enablement (a room-level feature toggle, safe to assume off), push capability
- * is a *permission* - an unknown/stale state must never be treated as "can push," since the whole
- * point is to never risk a push attempt or a spurious dirty-mark for a device that actually can't
- * write. The worst case of defaulting `false` too eagerly (a legitimate editor's edit not pushed for
- * a few seconds until `visibleRooms` resolves) self-heals via the existing debounce/retry machinery;
- * defaulting `true` too eagerly reintroduces exactly the bug this closes.
- */
+/** Resolves `sync:push`, defaulting unknown permission state to false. */
 export function resolveCanPushLocalEdits(
   visibleRoom: { permissions: string[] } | undefined,
   mountedRoomState: { canPushLocalEdits?: boolean } | undefined
@@ -301,10 +261,7 @@ export class VaultSyncEngine {
     if (existingState && (remote.version < existingState.serverVersion || (!allowSameVersion && remote.version === existingState.serverVersion))) {
       return;
     }
-    // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate basis
-    // to ever have a real "conflicting local edit" - never fork a conflict copy for it, even if
-    // `dirty` is (incorrectly) true from stale pre-fix persisted state. Just apply the remote
-    // content silently, same as the non-dirty case.
+    // Read-only local divergence never creates a conflict copy.
     if ((room.canPushLocalEdits ?? false) && existingState?.dirty && (await this.vault.exists(path))) {
       const local = await this.readContent(path, remote.relativePath);
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
@@ -463,10 +420,7 @@ export class VaultSyncEngine {
    * Already-dirty files and files with no local copy to compare are left untouched.
    */
   async reconcileLocalEdits(room: MountedRoomState): Promise<void> {
-    // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate basis
-    // to ever treat a local content divergence as a real edit worth protecting - any such divergence
-    // must always silently defer to the synced/server version, never dirty-track. Skip the whole
-    // reconcile for such a room rather than gating each iteration.
+    // Read-only rooms always defer to server content.
     if (!(room.canPushLocalEdits ?? false)) {
       return;
     }
@@ -474,14 +428,7 @@ export class VaultSyncEngine {
       if (tracked.dirty || tracked.serverSha256 === null) {
         continue;
       }
-      // Second-hardware-testing-round item 2: a CRDT-managed path's on-disk content changes
-      // constantly and legitimately via the CRDT lane (yCollab live edits, CrdtSessionManager's
-      // materialize write-back) - none of which ever touch tracked.localSha256, since CRDT edits
-      // bypass this CAS-lane bookkeeping entirely by design (that's the whole point of the CRDT-lane
-      // routing fix from the prior hardware-testing round). Without this skip, every (re)mount's
-      // reconcile sees the hash mismatch and marks the file dirty purely as an artifact of never
-      // updating the tracked hash - not a real unsynced edit - and the next remote apply then forks
-      // a spurious conflict copy for it.
+      // CRDT writes bypass CAS hashes and are not local divergence.
       if (room.crdtEnabled && isCrdtEligiblePath(relativePath)) {
         continue;
       }

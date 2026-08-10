@@ -21,6 +21,7 @@ services:
       # first run, complete bootstrap, then set it back to "false" and restart.
       ALLOW_REMOTE_BOOTSTRAP: "false"
       # MAX_FILE_BYTES: "5242880"
+      # MAX_STORED_CONTENT_BYTES: "268435456"
       # For migrating an already-bootstrapped legacy plaintext server only —
       # see README "Migrating an existing server to TLS":
       # TLS_DUAL_STACK: "true"

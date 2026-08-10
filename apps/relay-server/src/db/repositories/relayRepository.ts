@@ -37,7 +37,8 @@ import {
   type FileRenameResult,
   type FileWriteResult,
   type IdempotentCrdtCreateResult,
-  type IdempotentCrdtRenameResult
+  type IdempotentCrdtRenameResult,
+  type LegacyContentReference
 } from "./fileRepository.js";
 import { RelayCrdtRepository, type CrdtSnapshot } from "./crdtRepository.js";
 
@@ -91,13 +92,17 @@ export class RelayRepository {
   private readonly files: RelayFileRepository;
   private readonly crdt: RelayCrdtRepository;
 
-  constructor(private readonly db: RelayDb) {
+  constructor(
+    private readonly db: RelayDb,
+    maxStoredContentBytes: number = 256 * 1024 * 1024
+  ) {
     this.crdt = new RelayCrdtRepository(db);
     this.files = new RelayFileRepository(
       db,
       (input) => this.audit(input),
       (roomId) => this.getRoom(roomId),
-      (fileId) => this.bumpFileCrdtEpochStatements(fileId)
+      (fileId) => this.bumpFileCrdtEpochStatements(fileId),
+      maxStoredContentBytes
     );
   }
 
@@ -869,11 +874,7 @@ export class RelayRepository {
     return updated;
   }
 
-  /** Room-mode toggle (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). Separate
-   *  from `updateRoom` since it's a distinct lifecycle concern with its own audit action, not just
-   *  another settings field - Phase 6 hooks Y.Doc seeding onto this same transition once
-   *  `CrdtDocManager` exists (contract 1.10's "conversion writes the current file text as the
-   *  initial Y.Doc state"). */
+  /** Toggles CRDT mode as an audited lifecycle transition. */
   setRoomCrdtEnabled(input: { roomId: string; actorUserId: string; enabled: boolean }): RoomRow {
     const set = this.db.transaction(() => {
       this.db.prepare("update rooms set crdt_enabled = ?, updated_at = ? where id = ?").run(input.enabled ? 1 : 0, new Date().toISOString(), input.roomId);
@@ -919,8 +920,9 @@ export class RelayRepository {
     }
     const remove = this.db.transaction(() => {
       const fileIds = (this.db.prepare("select id from files where room_id = ?").all(input.roomId) as Array<{ id: string }>).map((row) => row.id);
+      // Shared blobs survive until their final room reference is removed.
       for (const fileId of fileIds) {
-        this.db.prepare("delete from file_versions where file_id = ?").run(fileId);
+        this.files.deleteAllVersionsAndCollectBlobs(fileId);
       }
       this.db.prepare("delete from files where room_id = ?").run(input.roomId);
       this.db.prepare("delete from crdt_operation_receipts where room_id = ?").run(input.roomId);
@@ -1102,11 +1104,54 @@ export class RelayRepository {
     return this.files.getFileById(fileId);
   }
 
-  readFileContent(roomId: string, relativePath: string): { file: FileRow; content: string } {
+  getStorageUsageBytes(): number {
+    return this.files.getStorageUsageBytes();
+  }
+
+  getRoomStorageBytes(roomId: string): number {
+    return this.files.getRoomStorageBytes(roomId);
+  }
+
+  backfillStorageBatch(batchSize: number): { processedCount: number; done: boolean } {
+    return this.files.backfillStorageBatch(batchSize);
+  }
+
+  sweepOrphanedBlobsBatch(batchSize: number): { processedCount: number; done: boolean } {
+    return this.files.sweepOrphanedBlobsBatch(batchSize);
+  }
+
+  isBlobKeyReferenced(blobKey: string): boolean {
+    return this.files.isBlobKeyReferenced(blobKey);
+  }
+
+  listBlobKeysForFile(fileId: string): string[] {
+    return this.files.listBlobKeysForFile(fileId);
+  }
+
+  listLegacyContentReferences(batchSize: number): LegacyContentReference[] {
+    return this.files.listLegacyContentReferences(batchSize);
+  }
+
+  migrateLegacyContentReference(input: LegacyContentReference & { blobKey: string; rawSizeBytes: number }): boolean {
+    return this.files.migrateLegacyContentReference(input);
+  }
+
+  hasLegacyContentReferences(): boolean {
+    return this.files.hasLegacyContentReferences();
+  }
+
+  readFileContent(roomId: string, relativePath: string): { file: FileRow; content: string | null; blobKey: string | null } {
     return this.files.readFileContent(roomId, relativePath);
   }
 
-  writeFile(input: { roomId: string; relativePath: string; baseVersion: number; content: string; actorUserId: string }): FileWriteResult {
+  writeFile(input: {
+    roomId: string;
+    relativePath: string;
+    baseVersion: number;
+    content: string;
+    actorUserId: string;
+    blobKey?: string;
+  }): FileWriteResult {
     return this.files.writeFile(input);
   }
 
@@ -1140,12 +1185,7 @@ export class RelayRepository {
     return this.files.latestFileVersion(fileId);
   }
 
-  // --- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 2) ---
-
-  /** Bumps a file's authoritative CRDT epoch (contract 1.9) and purges the old epoch's update
-   *  log/snapshots (contract 1.5), transactionally. Standalone entry point for callers outside a
-   *  delete (e.g. Phase 4's explicit epoch management); `deleteFile` calls the non-transactional
-   *  `bumpFileCrdtEpochStatements` form directly so it stays atomic with its own tombstone update. */
+  /** Bumps the CRDT epoch and purges prior state atomically. */
   bumpFileCrdtEpoch(fileId: string): number {
     return this.db.transaction(() => this.bumpFileCrdtEpochStatements(fileId))();
   }
@@ -1201,7 +1241,12 @@ export class RelayRepository {
     return this.files.replayCrdtRenameReceipt(input);
   }
 
-  materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string }): { version: number; sha256: string } | null {
+  materializeCrdtContent(input: {
+    fileId: string;
+    content: string;
+    actorUserId: string;
+    blobKey?: string;
+  }): ({ version: number; sha256: string } & { orphanedBlobKeys?: string[] }) | null {
     return this.files.materializeCrdtContent(input);
   }
 

@@ -27,8 +27,9 @@ for new rooms and can be changed per room.
 
 1. Panel → **Set up and share**. The wizard shows four steps: **Connection**, **About you**, **Shared folder**,
    **Invite**.
-2. *Connection* - enter this computer's address on the local network, then **Check connection**. It does not
-   advance on its own; press **Continue** once the check passes.
+2. *Connection* - enter this computer's stable LAN hostname (for example `My-Vault.local`) when available, or its
+   current LAN IP, then **Check connection**. A `.local` hostname survives ordinary DHCP address changes. The
+   wizard does not advance on its own; press **Continue** once the check passes.
 3. *About you* - enter the name teammates will see, then **Create my account**.
 4. *Shared folder* - **Choose folder**, adjust **Room name** if you want, then **Create room**.
 5. *Invite* - pick **View and edit** or **View only**, then **Create invite link**. **Copy message** gives you a
@@ -36,9 +37,10 @@ for new rooms and can be changed per room.
    60 minutes, and needs Vault Rooms installed on your teammate's computer. **Create another link** if it
    expires; **I'll invite someone later** finishes without creating one.
 
-The plugin cannot discover the LAN address automatically. After the entered address passes the host-side
-check, automatic server startup is enabled. The guided flow applies the current room defaults without asking
-for technical settings, including Live editing for Markdown notes.
+The plugin does not create hostnames or discover an address automatically. Use an existing hostname or current
+IP during setup. After the entered address passes the host-side check, automatic server startup is enabled. The
+guided flow applies the current room defaults without asking for technical settings, including Live editing for
+Markdown notes.
 
 **On the teammate's device:** install Vault Rooms, click the link, add a display name, join, then choose
 **Add to this computer** for the room under **Rooms**.
@@ -66,8 +68,8 @@ The relay can run two ways, speaking the same protocol either way:
 - **Standalone** - a separate process, for development or for hosting on an always-on machine or NAS instead of
   someone's laptop.
 
-The relay owns all permission enforcement and keeps each room's file history in a local database. Clients hold a
-working copy of the rooms they mount.
+The relay owns all permission enforcement. SQLite stores metadata and CRDT state; current whole-file content is
+kept as immutable, content-addressed blobs outside SQLite. Clients hold a working copy of the rooms they mount.
 
 ## Security model
 
@@ -195,10 +197,15 @@ Vault Rooms never grants permission to run someone else's plugin code.
 - No cloud relay, NAT traversal, or mobile support. Desktop, one LAN.
 - Synced file types: every regular file in a room's folder, with one exception (below). Markdown, `.txt`,
   `.canvas`, `.json`, `.csv`, and `.excalidraw` sync as UTF-8 text; every other extension (images, PDFs, audio,
-  video, Office documents, anything unlisted) syncs as base64-encoded binary by default. Binary content counts
-  against the size limit at roughly 1.33x its real size. A device predating this widening never sees a file
-  outside the old whitelist at all (it simply doesn't learn the path exists), rather than receiving content it
-  would misinterpret - see `extendedBinarySync` in the sync protocol.
+  video, Office documents, anything unlisted) uses base64 on the current sync wire. The relay decodes it before
+  storage, so file and storage limits count real bytes and binary content no longer inflates `relay.sqlite`.
+  Base64 still adds about 33% to an in-flight frame and peak transport memory; optional raw sync framing remains
+  future work. A device predating this widening never sees a file outside the old whitelist at all.
+- Whole-file retention is latest-only. Superseded and deleted content is reference-checked and collected; a
+  default 256 MiB stored-content ceiling prevents unbounded growth. Lowering the ceiling never blocks reads,
+  deletes, cleanup, or a replacement that reduces usage. The physical SQLite file only returns freed pages to
+  the filesystem after **Vault Rooms: Reclaim relay database space**; this is explicit because compaction briefly
+  pauses writes and needs additional memory.
 - Dotfiles and dotfolders (any path segment starting with `.`, e.g. `.env`, `.secrets/`) never sync, deliberately -
   sharing a room's folder shouldn't risk shipping a teammate's local secrets file. This is the same rule that
   already excludes the vault's own config folder and `.git`/`node_modules`.
@@ -218,8 +225,10 @@ Vault Rooms never grants permission to run someone else's plugin code.
 - Single-host topology: whoever hosts must stay running. If their machine sleeps, sync stops for everyone.
 - No clustering, and not built for load-balancing - one process, one database. Fine for a small team editing
   occasionally, not for a write-heavy workload.
-- If the host's LAN address changes, previously issued invite links go stale and the host must update its Public
-  URL override and restart.
+- If a host uses a raw IP and DHCP changes it, old invite links and saved endpoints go stale. Prefer a stable
+  `.local` hostname that already resolves. Current pinned-TLS clients can press **Find server on LAN**; legacy
+  HTTP or older clients must use **Update address** or a fresh invite. Recovery preserves the server identity,
+  login, rooms, mounts, teams, friendships, and access.
 
 ## Troubleshooting
 
@@ -232,6 +241,13 @@ whether this device's login still works - then names the step that failed.
   address like `127.0.0.1` always means "the computer that's asking", so it sends every teammate back to their
   own machine. Use this device's LAN address instead. A browser can't validate a pinned server, so it isn't a
   useful check either.
+- **The host's IP changed:** do not recreate the server, rooms, teams, or friendships. Set the host's **Public URL
+  override** to an existing stable `.local` hostname if possible and restart sharing. Existing IP and hostname
+  settings are never rewritten automatically. On a current pinned-TLS client still trying the old IP, open
+  **Connection details → Find server on LAN**; the three-second multicast/broadcast search runs only when pressed
+  and saves an address only after the pinned server, user, and device identities match. Use **Update address** for legacy HTTP. Older
+  plugin versions cannot rediscover a DHCP-changed IP and need the new address or a fresh invite. A fresh 0.2.7
+  invite also matches the existing connection by `serverId` instead of creating another identity.
 - **The invite link does nothing:** the plugin must already be installed and enabled on that device - the link
   can't install it.
 - **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live

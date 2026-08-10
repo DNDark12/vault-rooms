@@ -39,12 +39,35 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   user's final filesystem state, and replayed after the reconnect snapshot. The relay stores an idempotency
   receipt in the same transaction as the mutation, so a retry after a lost acknowledgement returns the recorded
   result instead of creating a duplicate note. Turning live editing off with pending intent converts it to the
-  whole-file lane rather than stranding it. Design: `docs/superpowers/specs/2026-08-03-crdt-offline-operation-journal-design.md`.
+  whole-file lane rather than stranding it.
 - **Live editing skips `*.excalidraw.md`.** Character-level merging on structured JSON could produce a drawing
   that no longer loads, so that format stays on the whole-file lane like `.canvas` and `.excalidraw`.
 
+## Shipped in 0.2.7
+
+- **Binary storage and retention.** Whole-file content now lives as immutable, content-addressed blobs outside
+  SQLite in both standalone and embedded relays. Writes retain only the latest version, collect unreferenced
+  legacy and external blobs, enforce a projected 256 MiB stored-content ceiling, migrate old content resumably,
+  expose storage usage and explicit SQLite compaction, and provide authenticated raw HTTP bytes for future chat
+  attachments. File sync itself still uses base64-over-JSON; optional raw framing remains Phase C.
+- **DHCP-safe connection recovery.** Hosts are guided toward stable `.local` names. A teammate can verify and
+  replace a stale saved endpoint through a bounded, user-triggered LAN multicast/broadcast search, without changing device identity,
+  credentials, rooms, mounts, teams, friendships, or access. Discovery is bounded, user-triggered, and available
+  only when pinned TLS can authenticate the result before credentials are sent. Existing IP/hostname settings
+  remain unchanged; legacy HTTP and older clients keep manual address replacement. Invite links include the
+  stable `serverId`, so a fresh link updates an existing connection instead of creating a duplicate identity.
+- **Obsidian 1.13 settings compatibility.** Vault Rooms settings render as a normal vertical list instead of one
+  overflowing horizontal row.
+
 ## Next up
 
+- **Chat v1.** Direct, ad-hoc group (1-n), team, and room threads share the authenticated
+  `/sync` connection but keep their own authorization and presence state. The release is staged: text/Markdown,
+  emoji reactions, unread state, presence, sender deletion, and a built-in sticker catalog form the chat core;
+  image messages then reference either an existing authorized room file or an external chat blob. No chat
+  attachment folder is created in any Vault. Message metadata stays in a separately-pruned `chat.db`; blob bytes
+  reuse Phase B's external store and raw HTTP seam. General file-sync raw transport in Phase C does not block
+  chat.
 - **Continue CRDT soak.** Live editing is the default for new rooms and remains the newest, most
   integrity-sensitive part of the plugin. Continue broadening the real-machine and mixed-version soak beyond
   the 0.2.5 and 0.2.6 release checks; the two new surfaces are journal replay across a full restart and the
@@ -54,19 +77,12 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   still needs a decision: a peer on a build older than the rename protocol applies a rename only after
   reconnecting. Closing it means also broadcasting the rename as a delete+create to non-CRDT peers, which is more
   traffic and more edge cases for a case that already self-heals.
-- **Chat v1, after live cursors.** The existing design remains viable: direct, team, and room threads; immutable
-  Markdown messages; unread state; realtime delivery over the authenticated `/sync` socket; history isolated in
-  a separately-pruned `chat.db`; and a docked desktop UI. Refresh the protocol and threat-model sections before
-  implementation because TLS pinning and CRDT traffic have shipped since the design was written. Do not bundle
-  chat with cursors: they can share connection lifecycle and identity, but not authorization or presence state.
-- **Binary transport instead of base64.** Every non-text file now travels base64-encoded, not just images and
-  PDFs, so the ~33% overhead and the lowered practical size ceiling apply much more widely than when this item was
-  written - a video or Office document hits the limit at roughly 3/4 of the server's configured size. Independent
-  of everything else. Related and unaddressed: a room's file history keeps a full copy of every version, so
-  frequently-autosaved binaries grow the relay database quickly; retention/quota belongs with this work.
 
 ## Bigger efforts - each needs its own design pass
 
+- **Raw binary sync framing (optional Phase C).** Remove base64's transient frame/RAM overhead without changing
+  the hash domain for old peers or producing conflict-copy storms. Phase B already fixed persistent storage and
+  flush amplification, so this does not block chat.
 - **Selective sync / partial mounts.** Mounting a room is all-or-nothing per folder today.
 - **Conflict resolution UI beyond keep-both.** A real diff/merge view for the whole-file lane.
 - **Multi-server rooms.** A room lives on exactly one relay; there is no federation.

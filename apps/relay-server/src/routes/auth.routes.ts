@@ -9,7 +9,13 @@ import { requestTransport } from "./security.routes.js";
 export function registerAuthRoutes(
   app: FastifyInstance,
   repo: RelayRepository,
-  options: { connectionRegistry?: ConnectionRegistry; inviteSecurity?: () => InviteSecurityContext | undefined; publicUrl?: string } = {}
+  options: {
+    connectionRegistry?: ConnectionRegistry;
+    inviteSecurity?: () => InviteSecurityContext | undefined;
+    publicUrl?: string;
+    /** Server-wide stored-content ceiling. */
+    maxStoredContentBytes?: number;
+  } = {}
 ): void {
   // Route registration happens once per server start in both runtimes, which makes it the shared place to
   // notice that the advertised address changed since last time and drop observations made under the old one.
@@ -151,6 +157,9 @@ export function registerAuthRoutes(
       // Only the owner can act on this (it's their Public URL override that would be wrong), and only they
       // should see where other people are connecting from.
       ...(principal.isServerOwner ? { observedClientHost: repo.getObservedClientHost() } : {}),
+      // Shared blobs prevent deriving this total from per-room usage.
+      storageUsageBytes: repo.getStorageUsageBytes(),
+      maxStoredContentBytes: options.maxStoredContentBytes ?? 256 * 1024 * 1024,
       teams: repo.listUserTeams(principal.userId).map((team) => ({
         id: team.teamId,
         name: team.name,

@@ -25,7 +25,12 @@ export function registerFriendRoutes(app: FastifyInstance, repo: RelayRepository
         maxUses: body.maxUses ?? 1
       })
     );
-    return toInviteResponse(invite, options.publicUrl, repo.getSecurityState() === "plain_legacy" ? undefined : options.security);
+    return toInviteResponse(
+      invite,
+      options.publicUrl,
+      repo.getOrCreateServerId(),
+      repo.getSecurityState() === "plain_legacy" ? undefined : options.security
+    );
   });
 
   app.get("/api/friends", async (request) => {

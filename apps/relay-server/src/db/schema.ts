@@ -1,4 +1,4 @@
-import type { TeamRole } from "@vault-rooms/protocol";
+import type { ContentType, TeamRole } from "@vault-rooms/protocol";
 
 export type TeamRow = {
   id: string;
@@ -71,10 +71,7 @@ export type RoomRow = {
   conflict_policy: "keep_both" | "owner_wins";
   created_at: string;
   updated_at: string;
-  /** CRDT sync opt-in flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). SQLite
-   *  boolean (0/1). Existing rows default to 0 during migration; newly created rooms start at 1.
-   *  Only `.md` files in a room with this set to 1 use the CRDT lane;
-   *  everything else stays on the whole-file compare-and-swap lane. */
+  /** SQLite CRDT opt-in flag; only eligible Markdown files use it. */
   crdt_enabled: 0 | 1;
 };
 
@@ -103,7 +100,7 @@ export type FileRow = {
   room_id: string;
   relative_path: string;
   kind: "file" | "folder";
-  content_type: "markdown" | "text";
+  content_type: ContentType;
   version: number;
   sha256: string | null;
   size_bytes: number | null;
@@ -111,12 +108,10 @@ export type FileRow = {
   updated_by_user_id: string | null;
   updated_at: string;
   created_at: string;
-  /** Authoritative CRDT document epoch for this file (contract 1.9). Lives on the FileRow itself
-   *  (not in crdt_updates/crdt_snapshots) specifically so it survives purging those tables - after
-   *  a delete or recreate-at-same-path bumps it, the server never loses track of the current/next
-   *  epoch even though the old epoch's update log and snapshots are gone. Default 0; bumped
-   *  immediately on file delete (contract 1.5 "delete wins"), not deferred to recreate. */
+  /** Current CRDT epoch; bumped on delete or recreate to isolate stale state. */
   crdt_epoch: number;
+  /** Real decoded size; null until legacy backfill completes. */
+  raw_size_bytes: number | null;
 };
 
 export type CrdtUpdateRow = {
@@ -157,7 +152,18 @@ export type FileVersionWithContentRow = {
   content_storage_key: string;
   created_by_user_id: string;
   created_at: string;
-  content: string;
+  content: string | null;
+  /** Real decoded size; null until legacy backfill completes. */
+  raw_size_bytes: number | null;
+  /** Raw-byte address in the external blob store. */
+  blob_key: string | null;
+};
+
+/** Exact stored-content usage, maintained transactionally and recomputed at startup. */
+export type StorageUsageRow = {
+  id: 1;
+  blob_bytes: number;
+  recomputed_at: string;
 };
 
 export type AuditEventRow = {

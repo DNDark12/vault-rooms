@@ -5,16 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 
-// yjs (and transitively y-codemirror.next) depend on lib0, whose logging/environment-detection
-// modules read `process.env`/`process.argv`/`process.stdout.isTTY` at module load time and call
-// `console.log` for their generic "print" helper - both of which are things this bundle must never
-// contain (CLAUDE.md rules 3 and 13). Neither is reachable through a `define`-able static branch
-// (lib0/environment.js's `getVariable` does a *dynamic* `process.env[computedKey]` lookup, not a
-// literal `process.env.NAME` esbuild's `define` can match), so this plugin substitutes lib0's own
-// logging/environment modules for local shims that preserve their exported API but never touch
-// `process.env` and never call `console.log` (see src/vendor-shims/lib0-*.js for the full
-// rationale). The filter matches the *resolved* absolute path, so it applies no matter which of
-// lib0's node/browser/bun export conditions esbuild would otherwise have picked.
+// Replace lib0 modules that introduce forbidden environment and logging calls.
 const lib0ShimPlugin = {
   name: "lib0-shims",
   setup(build) {
@@ -32,11 +23,7 @@ const lib0ShimPlugin = {
 const result = await esbuild.build({
   entryPoints: ["src/main.ts"],
   bundle: true,
-  // sql.js ships its SQLite engine as a WASM binary. The community-plugin installer only ever
-  // downloads main.js/manifest.json/styles.css from a GitHub release - any extra file (like a
-  // standalone sql-wasm.wasm) never reaches end users. So the WASM binary is embedded directly
-  // into main.js at build time via esbuild's "binary" loader (base64-encoded, decoded into a
-  // Uint8Array at load time) instead of being shipped and read from disk - see serverManager.ts.
+  // Embed SQLite WASM because plugin releases ship only standard artifacts.
   loader: { ".wasm": "binary" },
   // The plugin always uses ws' pure-JS fallbacks. Folding these documented ws switches removes
   // process.env probes and unreachable optional-native require() branches from the shipped bundle.

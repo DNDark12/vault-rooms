@@ -7,10 +7,14 @@ export type InviteSecurityContext = {
   identityCertificateDer: string;
 };
 
-export function toInviteResponse(invite: InviteResponseInput, publicUrl: string, security?: InviteSecurityContext) {
-  const params = new URLSearchParams({ mode: "join", server: publicUrl, token: invite.inviteToken });
+export function toInviteResponse(
+  invite: InviteResponseInput,
+  publicUrl: string,
+  serverId: string,
+  security?: InviteSecurityContext
+) {
+  const params = new URLSearchParams({ mode: "join", server: publicUrl, token: invite.inviteToken, serverId });
   if (security) {
-    params.set("serverId", security.serverId);
     params.set("security", "pinned-tls");
     params.set("tlsName", security.tlsName);
     params.set("fp", security.identitySpkiSha256);

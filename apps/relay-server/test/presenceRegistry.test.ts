@@ -3,7 +3,6 @@ import { AppError } from "@vault-rooms/protocol";
 import { PresenceRegistry, type PresenceTarget } from "../src/sync/presenceRegistry.js";
 import type { SyncConnection, SyncSocket } from "../src/sync/connectionRegistry.js";
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // PresenceRegistry is the pure, in-memory ownership layer: no sockets are written, no policy is
 // evaluated, and nothing reaches RelayRepository/SQLite. Everything about *who may see what* lives
 // in PresenceService; this file only pins the storage contract.
@@ -237,7 +236,6 @@ describe("PresenceRegistry", () => {
     }
   });
 
-  // Room-session hue leases (docs/superpowers/plans/2026-07-28-room-session-presence-colors.md).
   // The relay owns colour assignment because a client-side hash cannot be made consistent: two
   // userIds landing in one slot look identical on one screen and distinct on another. A lease is
   // keyed by (roomId, userId), so one human with several devices is one colour, and the lease is

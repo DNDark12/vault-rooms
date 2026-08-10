@@ -11,17 +11,13 @@ export type ErrorCode =
   | "ADAPTER_CONFLICT"
   | "RATE_LIMITED"
   | "TLS_REQUIRED"
-  // --- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 4) ---
+  | "STORAGE_QUOTA_EXCEEDED"
   | "CRDT_DISABLED"
   | "CRDT_CAPABILITY_REQUIRED"
   | "CRDT_OPERATION_DEVICE_MISMATCH"
   | "CRDT_STALE_EPOCH"
   | "CRDT_INVALID_UPDATE"
-  // Phase 6, contract 1.4 ("decided-for-now: reject"): a legacy whole-file REST PUT or WS
-  // file_change targeting a path that is CRDT-enabled (room.crdt_enabled && isCrdtEligiblePath)
-  // is rejected with this code rather than silently diff-applied or corrupting the document -
-  // legacy clients keep read compatibility (GET / remote_file_change stay materialized-fresh)
-  // but must use the CRDT message types (or upgrade) to write.
+  // Rejects whole-file writes to CRDT-owned paths.
   | "CRDT_WRITE_UNSUPPORTED";
 
 export class AppError extends Error {

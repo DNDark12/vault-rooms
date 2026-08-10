@@ -22,19 +22,7 @@ function sanitizeSegment(value: string): string {
   return sanitized || "_";
 }
 
-/**
- * Persists full Yjs encoded document state client-side (contract 1.12, strategy A - chosen by the
- * Phase 0.3 spike over a text+state-vector baseline because reloading the full encoded state
- * preserves the original CRDT identity exactly across a restart, avoiding the "seed a fresh Y.Doc
- * from baseline text" trap). Storage key is (roomId, relativePath, epoch): the epoch is baked into
- * the on-disk filename, so a key miss on the *current* epoch simply means "start fresh via
- * crdt_create/handshake" - a stale persisted doc from a purged incarnation is never accidentally
- * reloaded.
- *
- * Uses Obsidian's DataAdapter (never node:fs - CLAUDE.md rule 3), under this plugin's own private
- * data directory (a sibling of server-data/relay.sqlite - see ServerConnectionManager), not vault
- * content - this is plugin-private storage, so there is no whole-vault enumeration concern here.
- */
+/** Persists full Yjs state by room, path, and epoch in plugin-private storage. */
 export class CrdtDocStore {
   constructor(
     private readonly adapter: DataAdapter,
@@ -84,15 +72,7 @@ export class CrdtDocStore {
     await this.prunePriorEpochs(dir, prefix, epoch);
   }
 
-  /**
-   * Moves a persisted document's on-disk entry to match a renamed path (fourth hardware-testing
-   * round, 2026-07-23), preserving the exact same epoch's persisted bytes rather than losing them
-   * (which would force a reseed-from-disk-text on next load, discarding fine-grained Yjs structure/
-   * history even though the actual text content would still be recovered via the disk fallback).
-   * `roomDir` only depends on `roomId` (unchanged by a rename), so this is always a same-directory
-   * move of one file, keyed by the new path's content hash. A no-op if nothing was ever persisted
-   * for this exact epoch yet - the next `save()` simply writes under the new key from scratch.
-   */
+  /** Moves persisted state to a renamed path without changing its epoch. */
   async rename(roomId: string, oldRelativePath: string, newRelativePath: string, epoch: number): Promise<void> {
     const { path: oldPath } = await this.keyFor(roomId, oldRelativePath, epoch);
     if (!(await this.adapter.exists(oldPath))) {

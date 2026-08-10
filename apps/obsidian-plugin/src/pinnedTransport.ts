@@ -47,6 +47,22 @@ export async function pinnedRequest(
   info: PinnedServerInfo,
   req: { url: string; method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }
 ): Promise<{ status: number; text: string; json: unknown }> {
+  const response = await pinnedRequestBytes(info, req);
+  return withLazyJson(response.status, response.bytes);
+}
+
+export async function pinnedRawRequest(
+  info: PinnedServerInfo,
+  req: { url: string; method?: string; headers?: Record<string, string>; body?: ArrayBuffer | Uint8Array; timeoutMs?: number }
+): Promise<{ status: number; text: string; json: unknown; arrayBuffer: ArrayBuffer }> {
+  const response = await pinnedRequestBytes(info, req);
+  return withLazyJson(response.status, response.bytes);
+}
+
+async function pinnedRequestBytes(
+  info: PinnedServerInfo,
+  req: { url: string; method?: string; headers?: Record<string, string>; body?: string | ArrayBuffer | Uint8Array; timeoutMs?: number }
+): Promise<{ status: number; bytes: Buffer }> {
   assertPinMaterial(info);
   return new Promise((resolve, reject) => {
     const request = httpsRequest(
@@ -79,7 +95,7 @@ export async function pinnedRequest(
         response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         response.once("end", () => {
           window.clearTimeout(timeout);
-          resolve(withLazyJson(response.statusCode ?? 0, Buffer.concat(chunks).toString("utf8")));
+          resolve({ status: response.statusCode ?? 0, bytes: Buffer.concat(chunks) });
         });
         response.once("error", (error) => {
           window.clearTimeout(timeout);
@@ -172,11 +188,12 @@ export async function fetchRotationProbe(baseUrl: string, timeoutMs = 10_000): P
   });
 }
 
-function withLazyJson(status: number, text: string): { status: number; text: string; json: unknown } {
-  return Object.defineProperty({ status, text }, "json", {
+function withLazyJson(status: number, bytes: Buffer): { status: number; text: string; json: unknown; arrayBuffer: ArrayBuffer } {
+  const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return Object.defineProperty({ status, text: bytes.toString("utf8"), arrayBuffer }, "json", {
     enumerable: true,
-    get: () => JSON.parse(text) as unknown
-  }) as { status: number; text: string; json: unknown };
+    get: () => JSON.parse(bytes.toString("utf8")) as unknown
+  }) as { status: number; text: string; json: unknown; arrayBuffer: ArrayBuffer };
 }
 
 function identitySpkiFromPeer(peer: DetailedPeerCertificate): string {

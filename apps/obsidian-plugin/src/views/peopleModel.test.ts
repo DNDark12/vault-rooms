@@ -14,6 +14,7 @@ const room = (overrides: Partial<RoomSummary> = {}): RoomSummary => ({
   permissions: [...EDITOR_PERMISSION_SET],
   capabilities: [],
   crdtEnabled: true,
+  storedBytes: 0,
   ...overrides
 });
 const friend = (overrides: Partial<FriendSummary> = {}): FriendSummary => ({

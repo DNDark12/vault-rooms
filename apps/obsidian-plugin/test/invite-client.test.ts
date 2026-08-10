@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { requestUrl } from "obsidian";
 import { certPemToDerBase64Url, generateServerIdentity } from "vault-rooms-relay/embedded-core";
 import { RelayApiClient } from "../src/apiClient.js";
-import { pinnedInfoForServer, ServerConnectionManager } from "../src/controllers/ServerConnectionManager.js";
+import {
+  normalizeReplacementServerUrl,
+  pinnedInfoForServer,
+  ServerConnectionManager
+} from "../src/controllers/ServerConnectionManager.js";
 import { copyInviteLink } from "../src/inviteClipboard.js";
 import { inviteAcceptanceNotice, inviteJoinNotice } from "../src/inviteNotices.js";
 import * as pinnedTransport from "../src/pinnedTransport.js";
@@ -53,6 +57,422 @@ describe("invite API client", () => {
 });
 
 describe("pinned invite connection updates", () => {
+  it("starts and stops LAN discovery with the embedded relay without making discovery a hosting dependency", async () => {
+    const embedded = connection({ isServerOwner: true, securityMode: "pinned-tls", serverId: "srv_local" });
+    const responder = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    const createLanDiscoveryResponder = vi.fn(() => responder);
+    const { manager } = createManager([embedded], {
+      createLanDiscoveryResponder,
+      resolveLanDiscoveryInterface: vi.fn().mockResolvedValue("192.168.12.16")
+    });
+    const status = {
+      running: true,
+      host: "0.0.0.0",
+      port: 8787,
+      localUrl: "https://127.0.0.1:8788",
+      lanUrl: "https://host.local:8788",
+      securityMode: "pinned-tls",
+      bootstrapped: true,
+      serverId: "srv_local",
+      legacyV01BackupAvailable: false,
+      securityState: "pinned_tls",
+      pinnedInfo: {
+        serverId: "srv_local",
+        tlsName: "srv-local.vault-rooms.internal",
+        identityCertificateDer: "cert",
+        pinnedIdentitySpkiSha256: "pin"
+      }
+    } as const;
+    const embeddedRuntime = {
+      start: vi.fn().mockResolvedValue(status),
+      stop: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(() => status)
+    };
+    (manager as unknown as { embeddedServer: typeof embeddedRuntime }).embeddedServer = embeddedRuntime;
+
+    await manager.startEmbeddedServer({ notify: false });
+
+    expect(responder.start).toHaveBeenCalledOnce();
+    expect(createLanDiscoveryResponder).toHaveBeenCalledWith(expect.objectContaining({
+      interfaceAddress: "192.168.12.16"
+    }));
+    expect(manager.getServerStatus()).toMatchObject({ lanDiscoveryAvailable: true });
+
+    await manager.stopEmbeddedServer({ notify: false });
+    expect(responder.stop).toHaveBeenCalledOnce();
+    expect(embeddedRuntime.stop).toHaveBeenCalledOnce();
+  });
+
+  it("keeps hosting available when the LAN discovery listener cannot start", async () => {
+    const embedded = connection({ isServerOwner: true, securityMode: "pinned-tls", serverId: "srv_local" });
+    const responder = { start: vi.fn().mockRejectedValue(new Error("UDP blocked")), stop: vi.fn() };
+    const { manager } = createManager([embedded], {
+      createLanDiscoveryResponder: vi.fn(() => responder)
+    });
+    const status = {
+      running: true,
+      host: "0.0.0.0",
+      port: 8787,
+      localUrl: "https://127.0.0.1:8788",
+      securityMode: "pinned-tls",
+      bootstrapped: true,
+      serverId: "srv_local",
+      legacyV01BackupAvailable: false,
+      securityState: "pinned_tls"
+    } as const;
+    (manager as unknown as { embeddedServer: unknown }).embeddedServer = {
+      start: vi.fn().mockResolvedValue(status),
+      stop: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(() => status)
+    };
+
+    await expect(manager.startEmbeddedServer({ notify: false })).resolves.toMatchObject({ running: true });
+    expect(manager.getServerStatus()).toMatchObject({
+      running: true,
+      lanDiscoveryAvailable: false,
+      lanDiscoveryError: "UDP blocked"
+    });
+  });
+
+  it("stops LAN discovery during silent plugin teardown", async () => {
+    const embedded = connection({ isServerOwner: true, securityMode: "pinned-tls", serverId: "srv_local" });
+    const responder = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    const { manager } = createManager([embedded], {
+      createLanDiscoveryResponder: vi.fn(() => responder)
+    });
+    const status = {
+      running: true,
+      host: "0.0.0.0",
+      port: 8787,
+      localUrl: "https://127.0.0.1:8788",
+      securityMode: "pinned-tls",
+      bootstrapped: true,
+      serverId: "srv_local",
+      legacyV01BackupAvailable: false,
+      securityState: "pinned_tls"
+    } as const;
+    const embeddedRuntime = {
+      start: vi.fn().mockResolvedValue(status),
+      stop: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(() => status)
+    };
+    (manager as unknown as { embeddedServer: typeof embeddedRuntime }).embeddedServer = embeddedRuntime;
+
+    await manager.startEmbeddedServer({ notify: false });
+    await manager.stopSilently();
+
+    expect(responder.stop).toHaveBeenCalledOnce();
+    expect(manager.getServerStatus()).toMatchObject({ lanDiscoveryAvailable: false });
+  });
+
+  it("recognizes an explicitly marked embedded connection even when its saved endpoint is a hostname", () => {
+    const embedded = connection({
+      baseUrl: "https://host-b.local:8788",
+      isServerOwner: true,
+      securityMode: "pinned-tls"
+    });
+    const { manager, settings } = createManager([embedded]);
+    settings.embeddedServerConnectionId = embedded.id;
+
+    expect(manager.ownEmbeddedServerId()).toBe(embedded.id);
+  });
+
+  it("updates a DHCP-stale address without replacing identity or mounted-room ownership", async () => {
+    const existing = connection({ baseUrl: "http://192.168.12.21:8787" });
+    const { manager, settings, saveSettings } = createManager([existing]);
+    settings.mountedRooms.room_1 = {
+      roomId: "room_1",
+      serverId: existing.id,
+      mountPath: "Vault Rooms/Room",
+      files: {},
+      unmounted: false,
+      canPushLocalEdits: true
+    };
+    vi.mocked(requestUrl).mockResolvedValueOnce({
+      status: 200,
+      headers: {},
+      text: "{}",
+      json: {
+        serverId: existing.serverId,
+        user: { id: existing.userId, displayName: existing.userDisplayName },
+        device: { id: existing.deviceId, displayName: existing.deviceName },
+        isServerOwner: false,
+        storageUsageBytes: 0,
+        maxStoredContentBytes: 1024,
+        teams: []
+      },
+      arrayBuffer: new ArrayBuffer(0)
+    });
+
+    const updated = await manager.updateServerAddress(existing.id, "HuyND.local");
+
+    expect(updated.baseUrl).toBe("http://huynd.local:8787");
+    expect(updated).toMatchObject({
+      id: existing.id,
+      serverId: existing.serverId,
+      userId: existing.userId,
+      deviceId: existing.deviceId,
+      deviceToken: existing.deviceToken
+    });
+    expect(settings.mountedRooms.room_1?.serverId).toBe(existing.id);
+    expect(saveSettings).toHaveBeenCalledOnce();
+  });
+
+  it("discovers and persists only a pinned endpoint with the same server, user, and device identity", async () => {
+    const identity = await generateServerIdentity("srv_existing");
+    const existing = connection({
+      baseUrl: "https://192.168.12.21:8788",
+      securityMode: "pinned-tls",
+      tlsName: identity.tlsName,
+      identityCertificateDer: certPemToDerBase64Url(identity.identityCertPem),
+      pinnedIdentitySpkiSha256: identity.identitySpkiSha256
+    });
+    const startLanDiscovery = vi.fn(() => ({
+      result: Promise.resolve([
+        { baseUrl: "https://192.168.12.40:8788", address: "192.168.12.40", transport: "https" as const, port: 8788 }
+      ]),
+      cancel: vi.fn()
+    }));
+    const { manager, settings, saveSettings } = createManager([existing], {
+      startLanDiscovery,
+      resolveLanDiscoveryClientInterface: vi.fn().mockResolvedValue("192.168.12.16")
+    });
+    settings.mountedRooms.room_1 = {
+      roomId: "room_1",
+      serverId: existing.id,
+      mountPath: "Shared",
+      files: {}
+    };
+    vi.spyOn(pinnedTransport, "pinnedRequest").mockResolvedValue({
+      status: 200,
+      text: "{}",
+      json: {
+        serverId: existing.serverId,
+        user: { id: existing.userId, displayName: existing.userDisplayName },
+        device: { id: existing.deviceId, displayName: existing.deviceName },
+        isServerOwner: false,
+        storageUsageBytes: 0,
+        maxStoredContentBytes: 1024,
+        teams: []
+      }
+    });
+
+    const updated = await manager.findServerOnLan(existing.id);
+
+    expect(startLanDiscovery).toHaveBeenCalledWith(existing.serverId, "192.168.12.16");
+    expect(updated).toMatchObject({
+      id: existing.id,
+      baseUrl: "https://192.168.12.40:8788",
+      serverId: existing.serverId,
+      userId: existing.userId,
+      deviceId: existing.deviceId,
+      deviceToken: existing.deviceToken
+    });
+    expect(settings.mountedRooms.room_1?.serverId).toBe(existing.id);
+    expect(saveSettings).toHaveBeenCalledOnce();
+  });
+
+  it("verifies a pinned invite candidate without sending the invite or device token", async () => {
+    const identity = await generateServerIdentity("srv_invite");
+    const pin = {
+      serverId: "srv_invite",
+      tlsName: identity.tlsName,
+      identityCertificateDer: certPemToDerBase64Url(identity.identityCertPem),
+      pinnedIdentitySpkiSha256: identity.identitySpkiSha256
+    };
+    const startLanDiscovery = vi.fn(() => ({
+      result: Promise.resolve([
+        { baseUrl: "https://192.168.12.40:8788", address: "192.168.12.40", transport: "https" as const, port: 8788 }
+      ]),
+      cancel: vi.fn()
+    }));
+    const request = vi.spyOn(pinnedTransport, "pinnedRequest").mockResolvedValue({
+      status: 200,
+      text: JSON.stringify({ name: "vault-rooms", version: "0.2.7" }),
+      json: { name: "vault-rooms", version: "0.2.7" }
+    });
+    const { manager, saveSettings } = createManager([], {
+      startLanDiscovery,
+      resolveLanDiscoveryClientInterface: vi.fn().mockResolvedValue("192.168.12.16")
+    });
+
+    await expect(manager.findInviteServerOnLan(pin, "https://old.local:8788")).resolves.toBe(
+      "https://192.168.12.40:8788"
+    );
+
+    expect(startLanDiscovery).toHaveBeenCalledWith("srv_invite", "192.168.12.16");
+    expect(request).toHaveBeenCalledOnce();
+    expect(request.mock.calls[0]![1]).toMatchObject({ url: "https://192.168.12.40:8788/health" });
+    expect(request.mock.calls[0]![1].headers).toBeUndefined();
+    expect(request.mock.calls[0]![1].body).toBeUndefined();
+    expect(JSON.stringify(request.mock.calls[0])).not.toContain("tr_inv_");
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not let remote-address controls rewrite the embedded connection", async () => {
+    const embedded = connection({ isServerOwner: true, securityMode: "pinned-tls" });
+    const startLanDiscovery = vi.fn();
+    const { manager, settings, saveSettings } = createManager([embedded], { startLanDiscovery });
+    settings.embeddedServerConnectionId = embedded.id;
+
+    await expect(manager.updateServerAddress(embedded.id, "host-b.local")).rejects.toThrow(/Public URL/i);
+    await expect(manager.findServerOnLan(embedded.id)).rejects.toThrow(/Public URL/i);
+
+    expect(startLanDiscovery).not.toHaveBeenCalled();
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not mutate settings when a discovered candidate has another identity", async () => {
+    const identity = await generateServerIdentity("srv_existing");
+    const existing = connection({
+      baseUrl: "https://192.168.12.21:8788",
+      securityMode: "pinned-tls",
+      tlsName: identity.tlsName,
+      identityCertificateDer: certPemToDerBase64Url(identity.identityCertPem),
+      pinnedIdentitySpkiSha256: identity.identitySpkiSha256
+    });
+    const { manager, settings, saveSettings } = createManager([existing], {
+      resolveLanDiscoveryClientInterface: vi.fn().mockResolvedValue("192.168.12.16"),
+      startLanDiscovery: () => ({
+        result: Promise.resolve([
+          { baseUrl: "https://192.168.12.40:8788", address: "192.168.12.40", transport: "https", port: 8788 }
+        ]),
+        cancel: vi.fn()
+      })
+    });
+    vi.spyOn(pinnedTransport, "pinnedRequest").mockResolvedValue({
+      status: 200,
+      text: "{}",
+      json: {
+        serverId: "srv_attacker",
+        user: { id: existing.userId, displayName: existing.userDisplayName },
+        device: { id: existing.deviceId, displayName: existing.deviceName },
+        isServerOwner: false,
+        teams: []
+      }
+    });
+
+    await expect(manager.findServerOnLan(existing.id)).rejects.toThrow(/could not verify/i);
+    expect(settings.servers).toEqual([existing]);
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it.each(["user", "device"] as const)(
+    "does not mutate settings when a discovered candidate has another %s identity",
+    async (mismatch) => {
+      const identity = await generateServerIdentity("srv_existing");
+      const existing = connection({
+        baseUrl: "https://192.168.12.21:8788",
+        securityMode: "pinned-tls",
+        tlsName: identity.tlsName,
+        identityCertificateDer: certPemToDerBase64Url(identity.identityCertPem),
+        pinnedIdentitySpkiSha256: identity.identitySpkiSha256
+      });
+      const { manager, settings, saveSettings } = createManager([existing], {
+        resolveLanDiscoveryClientInterface: vi.fn().mockResolvedValue("192.168.12.16"),
+        startLanDiscovery: () => ({
+          result: Promise.resolve([
+            { baseUrl: "https://192.168.12.40:8788", address: "192.168.12.40", transport: "https", port: 8788 }
+          ]),
+          cancel: vi.fn()
+        })
+      });
+      vi.spyOn(pinnedTransport, "pinnedRequest").mockResolvedValue({
+        status: 200,
+        text: "{}",
+        json: {
+          serverId: existing.serverId,
+          user: {
+            id: mismatch === "user" ? "usr_other" : existing.userId,
+            displayName: existing.userDisplayName
+          },
+          device: {
+            id: mismatch === "device" ? "dev_other" : existing.deviceId,
+            displayName: existing.deviceName
+          },
+          isServerOwner: false,
+          teams: []
+        }
+      });
+
+      await expect(manager.findServerOnLan(existing.id)).rejects.toThrow(/could not verify/i);
+      expect(settings.servers).toEqual([existing]);
+      expect(saveSettings).not.toHaveBeenCalled();
+    }
+  );
+
+  it("restores the old endpoint when a discovered address cannot be saved", async () => {
+    const identity = await generateServerIdentity("srv_existing");
+    const existing = connection({
+      baseUrl: "https://192.168.12.21:8788",
+      securityMode: "pinned-tls",
+      tlsName: identity.tlsName,
+      identityCertificateDer: certPemToDerBase64Url(identity.identityCertPem),
+      pinnedIdentitySpkiSha256: identity.identitySpkiSha256
+    });
+    const { manager, settings, saveSettings } = createManager([existing], {
+      resolveLanDiscoveryClientInterface: vi.fn().mockResolvedValue("192.168.12.16"),
+      startLanDiscovery: () => ({
+        result: Promise.resolve([
+          { baseUrl: "https://192.168.12.40:8788", address: "192.168.12.40", transport: "https", port: 8788 }
+        ]),
+        cancel: vi.fn()
+      })
+    });
+    vi.spyOn(pinnedTransport, "pinnedRequest").mockResolvedValue({
+      status: 200,
+      text: "{}",
+      json: {
+        serverId: existing.serverId,
+        user: { id: existing.userId, displayName: existing.userDisplayName },
+        device: { id: existing.deviceId, displayName: existing.deviceName },
+        isServerOwner: false,
+        teams: []
+      }
+    });
+    saveSettings.mockRejectedValueOnce(new Error("save failed"));
+
+    await expect(manager.findServerOnLan(existing.id)).rejects.toThrow("save failed");
+    expect(settings.servers).toEqual([existing]);
+  });
+
+  it("keeps legacy HTTP discovery disabled before opening a socket", async () => {
+    const existing = connection({ baseUrl: "http://192.168.12.21:8787", securityMode: "plain" });
+    const startLanDiscovery = vi.fn();
+    const { manager } = createManager([existing], { startLanDiscovery });
+
+    await expect(manager.findServerOnLan(existing.id)).rejects.toThrow(/pinned TLS/i);
+    expect(startLanDiscovery).not.toHaveBeenCalled();
+  });
+
+  it("rejects an address belonging to another server without mutating settings", async () => {
+    const existing = connection({ baseUrl: "http://192.168.12.21:8787" });
+    const { manager, settings, saveSettings } = createManager([existing]);
+    vi.mocked(requestUrl).mockResolvedValueOnce({
+      status: 200,
+      headers: {},
+      text: "{}",
+      json: {
+        serverId: "srv_other",
+        user: { id: existing.userId, displayName: existing.userDisplayName },
+        device: { id: existing.deviceId, displayName: existing.deviceName },
+        isServerOwner: false,
+        teams: []
+      },
+      arrayBuffer: new ArrayBuffer(0)
+    });
+
+    await expect(manager.updateServerAddress(existing.id, "192.168.12.16")).rejects.toThrow(/different Vault Rooms server/i);
+    expect(settings.servers).toEqual([existing]);
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("preserves protocol and port when only a stable hostname is entered", () => {
+    const existing = connection({ baseUrl: "http://192.168.12.21:8787" });
+    expect(normalizeReplacementServerUrl("HuyND.local", existing)).toBe("http://huynd.local:8787");
+    expect(() => normalizeReplacementServerUrl("https://HuyND.local:8787", existing)).toThrow(/must keep using http/i);
+  });
+
   it("matches an existing connection by stable serverId before URL", () => {
     const existing = connection();
     const { manager } = createManager([existing]);
@@ -324,7 +744,7 @@ function connection(overrides: Partial<ServerConnection> = {}): ServerConnection
   };
 }
 
-function createManager(servers: ServerConnection[]) {
+function createManager(servers: ServerConnection[], contextOverrides: Record<string, unknown> = {}) {
   const settings: VaultRoomsSettings = {
     servers,
     activeServerId: servers[0]?.id,
@@ -340,7 +760,8 @@ function createManager(servers: ServerConnection[]) {
     manifest: { id: "vault-rooms", dir: ".obsidian/plugins/vault-rooms" },
     settings,
     saveSettings,
-    renderOpenRoomsViews: vi.fn()
+    renderOpenRoomsViews: vi.fn(),
+    ...contextOverrides
   } as never);
   return { manager, settings, saveSettings };
 }

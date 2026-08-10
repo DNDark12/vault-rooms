@@ -77,11 +77,7 @@ export class RoomMountController {
     state.mountPath = mountPath;
     state.serverId = server.id;
     state.unmounted = false;
-    // Third-hardware-testing-round item 1: mirror this device's actual write access onto the
-    // persisted state *before* reconcileLocalEdits/the "push anything unknown" loop below run, so
-    // both read the freshest permission instead of whatever was last persisted (possibly stale/
-    // unset on a first-ever mount). `room` is the RoomSummary this call was given directly, so no
-    // fallback-resolver is needed here - `permissions` is always present.
+    // Persist current write access before reconciling local files.
     const canPushLocalEdits = room.permissions.includes("sync:push");
     state.canPushLocalEdits = canPushLocalEdits;
     state.crdtEnabled = room.crdtEnabled;
@@ -122,9 +118,7 @@ export class RoomMountController {
     // mountPath the server has never heard of (skips anything it already knows about, including
     // tombstoned/deleted paths - those are intentional server-side deletions, not "missing" files).
     //
-    // Third-hardware-testing-round item 1: a room this device can't push to has no legitimate basis
-    // to ever push anything here - skip the whole loop rather than attempting (and silently
-    // swallowing failures for) pushes that can only ever be rejected server-side.
+    // Never push existing local files into a read-only room.
     if (canPushLocalEdits) {
       const localPaths = await this.deps.vaultAdapter.list(mountPath);
       const configDir = this.deps.app.vault.configDir.replace(/\/+$/, "");

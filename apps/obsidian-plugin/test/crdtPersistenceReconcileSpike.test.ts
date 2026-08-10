@@ -1,21 +1,4 @@
-// Phase 0.3 spike (docs/superpowers/plans/2026-07-20-crdt-sync.md) - retires spec open question 2:
-// does persisting the *full Yjs CRDT state* (not just a text baseline + hash) across a simulated
-// restart let a client (a) avoid duplicating content when disk is unchanged, (b) reconcile a disk
-// edit that happened while no editor/doc was bound (another app, or the plugin was disabled), and
-// (c) still converge with a concurrent remote edit that arrived while this peer was "offline"?
-//
-// This directly informs contract 1.12 (pick ONE persistence strategy). The spike below tests
-// strategy A (full Yjs persistence: `Y.encodeStateAsUpdate(doc)` saved and reloaded) rather than
-// strategy B (baseline text + state vector only), because reconstructing the actual CRDT op history
-// sidesteps the ambiguity a text-only baseline has (a text-only baseline can tell you *that* content
-// changed, but the reconstructed doc's internal item/clock structure after a naive "seed a fresh
-// Y.Doc from the baseline text" is a *different* CRDT identity than the original doc ever had, which
-// is the "seed-then-merge duplicates content" trap the spec warns about). Full-state persistence
-// avoids that entirely: the reloaded doc IS the original CRDT identity, just resumed.
-//
-// This is a spike/prototype (not the production module - that's apps/obsidian-plugin/src/
-// crdtDocStore.ts and crdtReconcile.ts in Phase 5), but it is a real, working proof of the
-// approach, not a thought experiment.
+// Verifies persisted Yjs identity and offline disk reconciliation.
 
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";

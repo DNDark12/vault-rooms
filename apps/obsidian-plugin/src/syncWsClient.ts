@@ -50,18 +50,9 @@ export type RoomSyncSocketDeps = {
   /** Fired after epoch registration and CAS reconciliation. Must stay synchronous/non-blocking:
    *  replay waits for later ACK frames, which this socket can only process after this handler returns. */
   onRoomSnapshotApplied?: (roomId: string, crdtOperationReceiptsSupported: boolean) => void;
-  /** Called when the server pushes a live CRDT room-mode toggle (contract 1.11) for a room. Lets
-   *  the caller mirror the new `crdtEnabled` flag onto persisted `MountedRoomState`/`visibleRooms`
-   *  immediately, rather than waiting on the follow-up snapshot re-subscribe below to eventually
-   *  reflect it via a full `refreshRooms()` round trip - see `resolveRoomCrdtEnabled` and CLAUDE.md's
-   *  post-hardware-testing audit notes. Optional so a socket used purely for tests/diagnostics
-   *  doesn't need one wired up. */
+  /** Applies a pushed room-mode change immediately. */
   onRoomModeChanged?: (roomId: string, crdtEnabled: boolean) => void;
-  /** CRDT message-lane bridge (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 5) - handles
-   *  every CRDT-lane server message (crdt_created, crdt_rejected, crdt_sync_step1/step2,
-   *  remote_crdt_update) and re-runs the bidirectional handshake for live sessions on (re)connect
-   *  (contract 1.3, blocker 1: outbound recovery). Optional so a socket used purely for
-   *  tests/diagnostics doesn't need one wired up. */
+  /** Bridges CRDT messages and reconnect handshakes. */
   crdt?: CrdtWsBridge;
 };
 
@@ -415,22 +406,12 @@ export class RoomSyncSocket {
           const room = this.deps.getMountedRoom(message.roomId);
           if (!room) return;
           if (this.deps.isCrdtPathProtected?.(message.roomId, message.relativePath)) return;
-          // Second-hardware-testing-round item 1: the relay now sends this materialized broadcast
-          // to every subscriber with file:read (CRDT-capable or not - see relayCore.ts's
-          // createCrdtMaterializedHandler), since a CRDT-capable device with no open session for
-          // this exact path would otherwise never learn about the change at all (remote_crdt_update
-          // is silently dropped by crdtSession.ts when no session exists). If a CRDT session IS
-          // already open for this path, that lane already owns it live - applying this coarser
-          // snapshot on top could clobber in-flight editor state, so skip it here. isSessionOpen
-          // always returns false for a path that was never a CRDT target (or when there's no CRDT
-          // bridge at all, e.g. a non-CRDT room), so this is a no-op change for the ordinary CAS-lane
-          // case - every relative_path gets applied exactly as before.
+          // An open CRDT session owns the path; otherwise apply the materialized fallback.
           // Record the document's epoch BEFORE writing anything to disk. That write makes this
           // device's own vault watcher fire a local "create"/"modify", which calls ensureSession -
           // and without a known epoch that would crdt_create a path the server already has a document
           // at. Once collisions auto-renamed instead of failing, each such collision produced a fresh
-          // suffixed name that got announced back, escalating without bound between devices
-          // (`Untitled (a) (b) (a) (b)…` - ninth hardware-testing round, 2026-07-24).
+          // suffixed name that gets announced back, escalating without bound.
           if (message.crdtEpoch !== undefined) {
             this.deps.crdt?.registerKnownEpoch(message.roomId, message.relativePath, message.crdtEpoch);
           }

@@ -1,11 +1,8 @@
 import { userFacingError } from "./errorMessages.js";
 import { isConflictCopyPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
 
-/** Error codes the relay returns for requests that can never succeed by retrying unchanged (see
- *  file.routes.ts) - as opposed to network failures or transient server errors, which are worth
- *  retrying. Kept intentionally narrow (422-family validation codes only, per the audited finding)
- *  rather than guessing at every code that might also warrant giving up. */
-const TERMINAL_ERROR_CODES = new Set(["FILE_TOO_LARGE", "INVALID_PATH", "VALIDATION_ERROR"]);
+/** Errors that cannot succeed by retrying the same write. */
+const TERMINAL_ERROR_CODES = new Set(["FILE_TOO_LARGE", "INVALID_PATH", "VALIDATION_ERROR", "STORAGE_QUOTA_EXCEEDED"]);
 
 export function isTerminalSyncError(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;

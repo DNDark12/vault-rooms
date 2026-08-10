@@ -1,18 +1,8 @@
 import type { Permission } from "@vault-rooms/protocol";
 
-/**
- * Helpers for keeping wire identifiers out of `AppError` messages
- * (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
- *
- * `AppError.message` is not a developer log line - it crosses the wire in the REST/WS error envelope
- * and the Obsidian plugin puts it straight into a `Notice`. A permission code or an env-var name in
- * that string is something a user reads and cannot act on. Codes and HTTP statuses are unaffected:
- * `ErrorCode` is behaviour (clients branch on it), the message is presentation.
- */
+/** Keeps wire identifiers out of user-facing error messages. */
 
-/** Renders a `Permission` as the action a user was stopped from doing. Exhaustive by design: no
- *  string-returning `default`, so adding to the union is a compile error rather than a silent
- *  fallthrough that leaks the raw code again. */
+/** Renders a permission as the blocked user action. */
 export function describePermission(permission: Permission): string {
   switch (permission) {
     case "room:read":

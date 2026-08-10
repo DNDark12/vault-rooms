@@ -134,11 +134,12 @@ export class LanShareReachabilityMonitor {
       // of being dropped. That keeps the probe diagnosable without putting a machine code on screen.
       console.warn("Vault Rooms: LAN share reachability probe failed", target.baseUrl, error);
       const message = userFacingError(error, "LAN reachability check failed.");
-      this.state = { key, baseUrl: target.baseUrl, status: "unreachable", error: message };
+      const actionable = `${message} If this device's LAN address changed, update Public URL override (prefer a .local hostname) and restart sharing.`;
+      this.state = { key, baseUrl: target.baseUrl, status: "unreachable", error: actionable };
       this.onChange();
       if (required) {
         throw new Error(
-          `LAN share URL is unreachable. Check Public URL override and confirm this address reaches the server from this device. ${message}`
+          `LAN share URL is unreachable. ${actionable}`
         );
       }
     }

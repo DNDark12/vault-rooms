@@ -8,7 +8,6 @@ import { ConnectionRegistry } from "../src/sync/connectionRegistry.js";
 import { handleSyncSocket, type SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // Real Fastify app, real WebSockets, real ACL/policy stack - the whole point is that presence is
 // gated by exactly the same per-path authorization as content, over a transport that actually
 // serializes. Pure ownership/replacement semantics live in presenceRegistry.test.ts.
@@ -666,6 +665,7 @@ describe("presence over the sync socket", () => {
       transport: "http",
       timerHost: new NoopTimerHost(),
       crdtDocManager: {} as never,
+      contentWriteService: {} as never,
       presenceService: {
         removeConnection: (connection: unknown) => {
           cleared.push(connection);
@@ -689,6 +689,7 @@ describe("presence over the sync socket", () => {
       transport: "http",
       timerHost: new NoopTimerHost(),
       crdtDocManager: {} as never,
+      contentWriteService: {} as never,
       presenceService: {
         // The server may already be tearing down when this runs, so a throw here must not prevent
         // the rest of the close handler (audit write, registry removal) from completing.

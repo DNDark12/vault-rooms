@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { Permission } from "@vault-rooms/protocol";
 import { describePermission, formatFileLimit } from "../src/services/userFacingMessages.js";
 
-// User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
 // The relay owns the *specific* wording for a failure, so these helpers exist to keep wire
 // identifiers out of it: a permission code and a byte constant are the two things that leaked into
 // prose the most ("You do not have file:read permission", "The file exceeds MAX_FILE_BYTES").

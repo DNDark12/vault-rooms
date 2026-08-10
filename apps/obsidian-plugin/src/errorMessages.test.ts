@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { userFacingError } from "./errorMessages.js";
+import { isTransportFailure, userFacingError } from "./errorMessages.js";
 
-// User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
 // This helper sits at display sinks only. Everything upstream of it - apiClient's error
 // normalization, pinned-TLS recovery, connectionDiagnostics' evidence, console logging - keeps the
 // raw error, because that is what makes a failure diagnosable after the fact.
@@ -89,6 +88,13 @@ describe("userFacingError", () => {
       expect(result).not.toContain("net::");
       expect(result).not.toMatch(/\bE[A-Z]{4,}\b/);
     }
+  });
+
+  it("identifies only transport failures for manual LAN recovery", () => {
+    expect(isTransportFailure(new Error("net::ERR_CONNECTION_REFUSED"))).toBe(true);
+    expect(isTransportFailure({ code: "ENOTFOUND" })).toBe(true);
+    expect(isTransportFailure({ code: "UNAUTHORIZED", message: "Invalid invite" })).toBe(false);
+    expect(isTransportFailure(new Error("Invite expired"))).toBe(false);
   });
 
   it("does not mistake ordinary prose or relay wording for a transport code", () => {

@@ -31,6 +31,8 @@ export type PanelState = {
     localRoomCount: number;
     error?: string;
   };
+  /** Active server storage usage, if loaded. */
+  storage?: { usageBytes: number; maxBytes: number };
   rooms: PanelRoomState[];
   peopleAttentionItems: readonly string[];
   activityAttentionItems: readonly string[];
@@ -46,6 +48,8 @@ export type PanelRoomState = {
   mountedServerId?: string;
   conflictCount: number;
   canManage: boolean;
+  /** Stored bytes referenced by this room. Shared blobs can appear in multiple rooms. */
+  storedBytes: number;
 };
 
 export type PanelDescriptor = {
@@ -56,6 +60,8 @@ export type PanelDescriptor = {
     summary: string;
   };
   hostLine?: { status: string; text: string; action?: "setup" | "recover" | "start" | "stop" };
+  /** Shown only when storage is near or over its limit. */
+  storageLine?: { level: "nearLimit" | "overLimit"; text: string; usageBytes: number; maxBytes: number };
   alert?: string;
   dataNotice?: { text: string; action?: "retry" };
   tabs: Record<PanelTab, { label: string; attentionCount: number; visible: boolean }>;
@@ -96,6 +102,7 @@ export function panelModel(state: PanelState): PanelDescriptor {
   return {
     connection,
     hostLine: hostPresentation(state),
+    storageLine: storagePresentation(state),
     alert: connectionAlert(state),
     dataNotice:
       state.dataState === "refreshing"
@@ -227,6 +234,23 @@ function hostPresentation(state: PanelState): PanelDescriptor["hostLine"] {
         : PANEL_COPY.hosting.stopped,
       action: "start"
     };
+  }
+  return undefined;
+}
+
+/** Below this fraction of the ceiling, storage is not surfaced at all - the point is to make the
+ *  cliff observable before it bites, not to show a number that is not yet actionable. */
+const STORAGE_NEAR_LIMIT_RATIO = 0.9;
+
+function storagePresentation(state: PanelState): PanelDescriptor["storageLine"] {
+  const storage = state.storage;
+  if (!storage || storage.maxBytes <= 0) return undefined;
+  const ratio = storage.usageBytes / storage.maxBytes;
+  if (ratio >= 1) {
+    return { level: "overLimit", text: PANEL_COPY.storage.overLimit, usageBytes: storage.usageBytes, maxBytes: storage.maxBytes };
+  }
+  if (ratio >= STORAGE_NEAR_LIMIT_RATIO) {
+    return { level: "nearLimit", text: PANEL_COPY.storage.nearLimit, usageBytes: storage.usageBytes, maxBytes: storage.maxBytes };
   }
   return undefined;
 }

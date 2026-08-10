@@ -1,16 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SyncClientMessage, SyncServerMessage } from "./protocol.js";
 
-// Phase 3 of docs/superpowers/plans/2026-07-20-crdt-sync.md: CRDT wire messages + capability
-// negotiation. Every CRDT message is keyed by roomId + relativePath + epoch (contract 1.3/1.9);
-// documentId is the stable outer identity carried only in crdt_created/room_snapshot metadata, not
-// repeated on every update (Phase 3 scoping decision). Round-tripping through JSON.stringify/parse
-// is the same shape the real WS transport uses (see connectionRegistry.ts's sendJson), so this is
-// not just a type-level check.
-//
-// Colocated in src/ (like smoke.test.ts), not a separate test/ directory - this package's
-// tsconfig.json only includes "src/**/*.ts", so a test/ directory file would silently escape
-// `pnpm typecheck` coverage even though vitest would still run it.
+// Verifies CRDT wire shapes through JSON round trips.
 function roundTrip<T>(message: T): T {
   return JSON.parse(JSON.stringify(message)) as T;
 }
@@ -54,7 +45,6 @@ describe("CRDT protocol messages", () => {
     expect(roundTrip(legacy).capabilities).toBeUndefined();
   });
 
-  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
   // `hello_error` used to carry a code and nothing else, so the plugin had no wording to show and fell
   // back to a generic notice. `message` is optional so a relay that predates this still parses.
   it("hello_error carries optional prose alongside its code", () => {
@@ -215,7 +205,6 @@ describe("CRDT protocol messages", () => {
   });
 });
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // Presence is additively negotiated: `presence: true` is only meaningful alongside `crdt: true`,
 // and a client that sends neither still parses under these unions. The cursor payload carries
 // *JSON-serialized* Yjs relative positions (Y.relativePositionToJSON) - never live

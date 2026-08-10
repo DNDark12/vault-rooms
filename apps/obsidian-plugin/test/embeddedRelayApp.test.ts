@@ -6,6 +6,7 @@ import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic } from "sql
 import WebSocket from "ws";
 import * as Y from "yjs";
 import { CRDT_TEXT_KEY, type PreparedStatement, type RelayDb, type SqlRow } from "vault-rooms-relay/embedded-core";
+import { createAppWithDb } from "vault-rooms-relay/app-core";
 import { createEmbeddedRelayApp, EmbeddedRelayApp } from "../src/embeddedRelayApp.js";
 
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
@@ -46,10 +47,7 @@ describe("embedded relay WebSocket server", () => {
   });
 
   it("wires CrdtDocManager into the same handleSyncSocket the standalone runtime uses - crdt_create/crdt_update/handshake work over the embedded transport", async () => {
-    // Phase 4 of docs/superpowers/plans/2026-07-20-crdt-sync.md: the CRDT message-handling logic
-    // (syncServer.ts's handleMessage) is one shared function reused by both runtimes - this test
-    // exercises it through the embedded (node:http + real `ws`) transport specifically, so CRDT
-    // coverage isn't only ever exercised via the standalone Fastify injectWS harness.
+    // Exercise shared CRDT handlers through the embedded transport.
     const { app, baseUrl } = await startEmbeddedRelay();
     const owner = await bootstrapOwner(app, baseUrl);
     const roomResponse = await fetch(`${baseUrl}/api/rooms`, {
@@ -125,6 +123,77 @@ describe("embedded relay WebSocket server", () => {
   });
 });
 
+describe.each(["standalone", "embedded"] as const)("raw HTTP file contract - %s", (runtime) => {
+  it("round-trips bytes and enforces authentication and size limits", async () => {
+    const started = await startRawRuntime(runtime, 8);
+    try {
+      const owner = await bootstrapOwner(started.app, started.baseUrl);
+      const roomResponse = await fetch(`${started.baseUrl}/api/rooms`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${owner.deviceToken}` },
+        body: JSON.stringify({ name: "Raw", type: "folder", sourcePath: "Raw", mountName: "Raw", capabilities: [] })
+      });
+      const room = (await roomResponse.json()).room as { id: string };
+      const url = `${started.baseUrl}/api/rooms/${room.id}/files/raw?path=image.bin&baseVersion=0`;
+
+      expect((await fetch(url)).status).toBe(401);
+      const bytes = new Uint8Array([0, 1, 2, 127, 128, 255]);
+      const upload = await fetch(url, {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream", authorization: `Bearer ${owner.deviceToken}` },
+        body: bytes
+      });
+      expect(upload.status).toBe(200);
+
+      const download = await fetch(`${started.baseUrl}/api/rooms/${room.id}/files/raw?path=image.bin`, {
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      });
+      expect(download.status).toBe(200);
+      expect(download.headers.get("content-type")).toContain("application/octet-stream");
+      expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
+
+      const inviteResponse = await fetch(`${started.baseUrl}/api/rooms/${room.id}/invites`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${owner.deviceToken}` },
+        body: JSON.stringify({ preset: "reader" })
+      });
+      const invite = (await inviteResponse.json()) as { inviteToken: string };
+      const joinResponse = await fetch(`${started.baseUrl}/api/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inviteToken: invite.inviteToken, displayName: "Reader", deviceName: "Reader laptop" })
+      });
+      const reader = (await joinResponse.json()) as { deviceToken: string };
+      const readerHeaders = { authorization: `Bearer ${reader.deviceToken}` };
+      expect(
+        (
+          await fetch(`${started.baseUrl}/api/rooms/${room.id}/files/raw?path=image.bin`, {
+            headers: readerHeaders
+          })
+        ).status
+      ).toBe(200);
+      expect(
+        (
+          await fetch(`${started.baseUrl}/api/rooms/${room.id}/files/raw?path=image.bin&baseVersion=1`, {
+            method: "PUT",
+            headers: { ...readerHeaders, "content-type": "application/octet-stream" },
+            body: bytes
+          })
+        ).status
+      ).toBe(403);
+
+      const oversized = await fetch(`${started.baseUrl}/api/rooms/${room.id}/files/raw?path=large.bin&baseVersion=0`, {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream", authorization: `Bearer ${owner.deviceToken}` },
+        body: new Uint8Array(9)
+      });
+      expect(oversized.status).toBe(413);
+    } finally {
+      await started.close();
+    }
+  });
+});
+
 describe("EmbeddedRelayApp.close", () => {
   it("does not terminate sockets that close during the graceful shutdown window", async () => {
     const app = new EmbeddedRelayApp(await createMemoryDb(), 1024, "123456", () => undefined, { dispose: () => undefined });
@@ -197,7 +266,7 @@ async function startEmbeddedRelay(options: { maxFileBytes?: number } = {}): Prom
   return { app, baseUrl, port };
 }
 
-async function bootstrapOwner(app: EmbeddedRelayApp, baseUrl: string): Promise<{
+async function bootstrapOwner(app: { bootstrapPin: string }, baseUrl: string): Promise<{
   user: { id: string };
   device: { id: string };
   deviceToken: string;
@@ -214,6 +283,28 @@ async function bootstrapOwner(app: EmbeddedRelayApp, baseUrl: string): Promise<{
   });
   expect(response.status).toBe(200);
   return (await response.json()) as { user: { id: string }; device: { id: string }; deviceToken: string };
+}
+
+async function startRawRuntime(runtime: "standalone" | "embedded", maxFileBytes: number): Promise<{
+  app: { bootstrapPin: string };
+  baseUrl: string;
+  close(): Promise<void>;
+}> {
+  if (runtime === "embedded") {
+    const started = await startEmbeddedRelay({ maxFileBytes });
+    return { app: started.app, baseUrl: started.baseUrl, close: async () => undefined };
+  }
+  const app = await createAppWithDb(await createMemoryDb(), { maxFileBytes });
+  await app.listen({ host: "127.0.0.1", port: 0 });
+  const address = app.server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected TCP address");
+  }
+  return {
+    app: app as typeof app & { bootstrapPin: string },
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => app.close()
+  };
 }
 
 async function connect(url: string): Promise<WebSocket> {

@@ -80,7 +80,8 @@ describe("RoomMountController", () => {
       conflictPolicy: "keep_both",
       permissions: ["sync:push"],
       capabilities: [],
-      crdtEnabled: false
+      crdtEnabled: false,
+      storedBytes: 0
     };
     const vaultAdapter: Pick<VaultAdapter, "list"> = {
       async list(prefix: string): Promise<string[]> {
@@ -153,7 +154,8 @@ describe("RoomMountController", () => {
       conflictPolicy: "keep_both",
       permissions: ["sync:push"],
       capabilities: [],
-      crdtEnabled: true
+      crdtEnabled: true,
+      storedBytes: 0
     };
     const deps: RoomMountControllerDeps = {
       app: { vault: { configDir: ".obsidian" } } as App,
@@ -215,7 +217,8 @@ describe("RoomMountController", () => {
       conflictPolicy: "keep_both",
       permissions: ["sync:push"],
       capabilities: [],
-      crdtEnabled: false
+      crdtEnabled: false,
+      storedBytes: 0
     };
     const deps: RoomMountControllerDeps = {
       app: { vault: { configDir: ".obsidian" } } as App,
@@ -275,7 +278,8 @@ describe("RoomMountController", () => {
       conflictPolicy: "keep_both",
       permissions: ["room:read", "file:read", "sync:subscribe"],
       capabilities: [],
-      crdtEnabled: false
+      crdtEnabled: false,
+      storedBytes: 0
     };
     let listCalled = false;
     const vaultAdapter: Pick<VaultAdapter, "list"> = {
@@ -387,7 +391,8 @@ describe("RoomMountController", () => {
       conflictPolicy: "keep_both",
       permissions: ["file:read", "file:write"],
       capabilities: [],
-      crdtEnabled: true
+      crdtEnabled: true,
+      storedBytes: 0
     };
     // Minimal duck-typed vault tree for listRoomConflicts()'s traversal (vaultTraversal.ts's
     // isFile/isFolder only check for "extension"/"children" - no real obsidian TFile/TFolder needed).
@@ -448,7 +453,8 @@ describe("RoomMountController", () => {
       conflictPolicy: "keep_both",
       permissions: ["sync:subscribe", "sync:push"],
       capabilities: [],
-      crdtEnabled: true
+      crdtEnabled: true,
+      storedBytes: 0
     };
     const saveSettings = vi.fn(async () => {
       events.push("save");

@@ -1,23 +1,6 @@
 import type { ErrorCode } from "@vault-rooms/protocol";
 
-/**
- * User-facing error text for display sinks (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
- *
- * The relay stays the primary source of wording: it is the only side that knows which of ~30
- * distinct `VALIDATION_ERROR` situations actually happened. This table is the *fallback* for the
- * cases relay prose cannot cover:
- *
- * - a frame that carries a code and no message at all (`hello_error` was exactly this);
- * - an older relay whose prose still reads as wire vocabulary;
- * - a non-`Error` throw, which used to reach a notice as `String(error)` - "[object Object]".
- *
- * It is deliberately NOT a mirror of the relay's sentences. Duplicating them would guarantee the two
- * drift apart, and the generic wording here is only ever seen when the specific wording is missing.
- *
- * Call this at display sinks only. Error normalization (`apiClient.ts`, `pinnedTransport.ts`,
- * `syncWsClient.ts`), pinned-TLS recovery decisions, `connectionDiagnostics.ts` evidence, and every
- * `console.warn`/`console.error` keep the raw error - that is what makes a failure diagnosable later.
- */
+/** Fallback copy for display sinks when the relay provides no usable message. */
 const BY_CODE = {
   UNAUTHORIZED: "This device is no longer signed in to that server.",
   PERMISSION_DENIED: "You don't have permission to do that in this room.",
@@ -36,7 +19,9 @@ const BY_CODE = {
   CRDT_OPERATION_DEVICE_MISMATCH: "That offline change belongs to another device and was not replayed.",
   CRDT_STALE_EPOCH: "This note was reset on the server - reopen it.",
   CRDT_INVALID_UPDATE: "A live-editing update couldn't be applied.",
-  CRDT_WRITE_UNSUPPORTED: "This note uses live editing - update the plugin to edit it."
+  CRDT_WRITE_UNSUPPORTED: "This note uses live editing - update the plugin to edit it.",
+  STORAGE_QUOTA_EXCEEDED:
+    "The store on the hosting device is full - delete files in this room, then run the reclaim command on that device."
 } satisfies Record<ErrorCode, string>;
 
 /** `SCREAMING_SNAKE` with no lowercase and no spaces is never prose a human wrote for a user. Used
@@ -97,6 +82,13 @@ function transportMessage(message: string, code: string | undefined): string | u
 }
 
 type ErrorLike = { code?: unknown; message?: unknown };
+
+export function isTransportFailure(error: unknown): boolean {
+  const candidate = typeof error === "object" && error !== null ? (error as ErrorLike) : {};
+  const message = typeof error === "string" ? error : typeof candidate.message === "string" ? candidate.message : "";
+  const code = typeof candidate.code === "string" ? candidate.code : undefined;
+  return transportMessage(message, code) !== undefined;
+}
 
 /**
  * Resolves the most specific human-readable text available, in order:

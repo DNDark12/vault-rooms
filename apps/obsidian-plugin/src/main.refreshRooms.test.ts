@@ -49,6 +49,7 @@ function roomSummary(overrides: Partial<RoomSummary> = {}): RoomSummary {
     permissions: ["file:read", "file:write"],
     capabilities: [],
     crdtEnabled: true,
+    storedBytes: 0,
     ...overrides
   };
 }

@@ -17,6 +17,7 @@ import {
   certPemToDerBase64Url,
   createRelayCore,
   createCrdtMaterializedHandler,
+  createCrdtRepositoryPort,
   handleSyncSocket,
   assertTransportAllowed,
   registerAuditRoutes,
@@ -26,6 +27,7 @@ import {
   registerRoomRoutes,
   registerSecurityRoutes,
   registerTeamRoutes,
+  reclaimDatabaseSpace,
   CrdtDocManager,
   type RelayDb,
   type InviteSecurityContext,
@@ -33,17 +35,18 @@ import {
   type SecurityRuntime,
   type SyncTimerHost
 } from "vault-rooms-relay/embedded-core";
+import { isRawHttpResponse } from "vault-rooms-relay/embedded-core";
 
 type SyncSocketLike = Parameters<typeof handleSyncSocket>[0];
 
-/** Narrow structural type instead of the concrete `CrdtDocManager` class - `EmbeddedRelayApp` only
- *  ever calls `dispose()` on it (from `close()`), so this is all it should require, both for
- *  decoupling and so tests that don't exercise the CRDT lane can pass a trivial stub. */
+/** Minimal lifecycle contract used by the embedded relay. */
 type DisposableCrdtDocManager = { dispose(): void };
 
 type EmbeddedRelayAppOptions = {
   publicUrl?: string;
   maxFileBytes?: number;
+  /** Stored-content limit forwarded to the repository. */
+  maxStoredContentBytes?: number;
   maxConnections?: number;
   allowRemoteBootstrap?: boolean;
   rateLimit?: {
@@ -96,17 +99,19 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
   const core = options.core ?? createRelayCore(db, options);
   const {
     repo,
+    contentWriteService,
     connectionRegistry,
     bootstrapPin,
     bootstrapRateLimiter,
     rotationProbeRateLimiter,
     presenceService,
     maxFileBytes,
-    maxConnections
+    maxConnections,
+    maxStoredContentBytes
   } = core;
   const security = options.security ?? core.security;
   const crdtDocManager = new CrdtDocManager(
-    repo,
+    createCrdtRepositoryPort(repo, contentWriteService),
     options.crdtTimerHost ?? windowSyncTimerHost,
     createCrdtMaterializedHandler(repo, connectionRegistry),
     Date.now,
@@ -120,6 +125,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
       timerHost: windowSyncTimerHost,
       crdtDocManager,
       presenceService,
+      contentWriteService,
       withDbAccess: (operation) => repo.withExclusiveAccess(operation)
     });
   }, crdtDocManager, options.publicUrl ?? "http://127.0.0.1:8787");
@@ -152,7 +158,12 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
         }
       : undefined;
   };
-  registerAuthRoutes(routeApp, repo, { connectionRegistry, inviteSecurity: currentInviteSecurity, publicUrl: options.publicUrl });
+  registerAuthRoutes(routeApp, repo, {
+    connectionRegistry,
+    inviteSecurity: currentInviteSecurity,
+    publicUrl: options.publicUrl,
+    maxStoredContentBytes
+  });
   registerTeamRoutes(routeApp, repo, {
     get publicUrl() {
       return app.getPublicUrl();
@@ -174,7 +185,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     },
     connectionRegistry,
     presenceService,
-    crdtDocManager
+    crdtDocManager,
+    contentWriteService
   });
   registerFriendRoutes(routeApp, repo, {
     get publicUrl() {
@@ -189,7 +201,8 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     maxFileBytes,
     connectionRegistry,
     presenceService,
-    crdtDocManager
+    crdtDocManager,
+    contentWriteService
   });
   registerAuditRoutes(routeApp, repo);
   if (security) {
@@ -268,6 +281,9 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     revokeRecoveredOwnerDevice: (deviceId) =>
       repo.withExclusiveAccess(() => repo.durable(() => repo.revokeRecoveredOwnerDevice(deviceId)))
   };
+  app.storageAdmin = {
+    reclaim: () => reclaimDatabaseSpace(repo, db)
+  };
 
   return app;
 }
@@ -281,6 +297,7 @@ export class EmbeddedRelayApp {
   private tlsServer: HttpsServer | null = null;
   securityAdmin!: EmbeddedSecurityAdmin;
   ownerAdmin!: EmbeddedOwnerAdmin;
+  storageAdmin!: EmbeddedStorageAdmin;
 
   constructor(
     private readonly db: RelayDb,
@@ -455,16 +472,15 @@ export class EmbeddedRelayApp {
         ip: request.socket.remoteAddress ?? "",
         transport
       };
-      await this.db.withExclusiveAccess(() => {
-        for (const hook of this.beforeRouteHooks) {
-          hook(baseRequest);
-        }
-      });
+      for (const hook of this.beforeRouteHooks) {
+        hook(baseRequest);
+      }
       const embeddedRequest: EmbeddedRequest = {
         ...baseRequest,
-        body: await readJsonBody(request, this.maxFileBytes)
+        body: await readRequestBody(request, this.maxFileBytes)
       };
-      sendJson(response, 200, await this.db.withExclusiveAccess(() => match.route.handler(embeddedRequest)));
+      await this.db.withExclusiveAccess(() => undefined);
+      sendResponse(response, 200, await match.route.handler(embeddedRequest));
     } catch (error) {
       sendError(response, error);
     }
@@ -552,6 +568,11 @@ export type EmbeddedOwnerAdmin = {
   revokeRecoveredOwnerDevice(deviceId: string): Promise<void>;
 };
 
+/** User-triggered database compaction. */
+export type EmbeddedStorageAdmin = {
+  reclaim(): Promise<void>;
+};
+
 async function listenServer(server: HttpServer | HttpsServer, host: string, port: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -603,7 +624,7 @@ function splitPath(path: string): string[] {
   return path.split("/").filter(Boolean);
 }
 
-async function readJsonBody(request: IncomingMessage, maxFileBytes: number): Promise<unknown> {
+async function readRequestBody(request: IncomingMessage, maxFileBytes: number): Promise<unknown> {
   if (request.method === "GET" || request.method === "DELETE") {
     return {};
   }
@@ -623,8 +644,12 @@ async function readJsonBody(request: IncomingMessage, maxFileBytes: number): Pro
   if (chunks.length === 0) {
     return {};
   }
+  const bytes = Buffer.concat(chunks);
+  if (request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() === "application/octet-stream") {
+    return new Uint8Array(bytes);
+  }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(bytes.toString("utf8"));
   } catch {
     throw new AppError("VALIDATION_ERROR", "Request body must be valid JSON.", 400);
   }
@@ -640,6 +665,15 @@ function applyCors(response: ServerResponse): void {
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
+}
+
+function sendResponse(response: ServerResponse, status: number, body: unknown): void {
+  if (!isRawHttpResponse(body)) {
+    sendJson(response, status, body);
+    return;
+  }
+  response.writeHead(status, { "content-type": body.contentType, ...(body.headers ?? {}) });
+  response.end(Buffer.from(body.body));
 }
 
 function sendError(response: ServerResponse, error: unknown): void {

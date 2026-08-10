@@ -19,6 +19,7 @@ import { fileContentByteLength } from "../services/fileContentSize.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
 import type { CrdtDocManager } from "./crdtDocManager.js";
 import type { PresenceService } from "./presenceService.js";
+import type { ContentWriteService } from "../storage/contentWriteService.js";
 
 export type SyncTimerHost = {
   setInterval(callback: () => void, delayMs: number): unknown;
@@ -37,6 +38,7 @@ export function registerSyncRoutes(
     timerHost: SyncTimerHost;
     crdtDocManager: CrdtDocManager;
     presenceService: PresenceService;
+    contentWriteService: ContentWriteService;
     withDbAccess?: <T>(operation: () => T | Promise<T>) => Promise<T>;
   }
 ): void {
@@ -59,6 +61,7 @@ export function handleSyncSocket(
     timerHost: SyncTimerHost;
     crdtDocManager: CrdtDocManager;
     presenceService: PresenceService;
+    contentWriteService: ContentWriteService;
     withDbAccess?: <T>(operation: () => T | Promise<T>) => Promise<T>;
   }
 ): void {
@@ -103,7 +106,7 @@ export function handleSyncSocket(
     // message-type branch below also has its own try/catch for a clean client-facing
     // rejection; this is the last-resort backstop for anything that slips past those.
     const handle = () => handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString());
-    const pending = options.withDbAccess ? options.withDbAccess(handle) : handle();
+    const pending = options.withDbAccess ? options.withDbAccess(() => undefined).then(handle) : handle();
     pending.catch((error) => {
       console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
       try {
@@ -116,15 +119,11 @@ export function handleSyncSocket(
   socket.on("close", () => {
     clearHelloTimeout();
     options.timerHost.clearInterval(ping);
-    // The single canonical disconnect hook. The forced-close helpers on ConnectionRegistry
-    // (closeRevokedUser/Device, closeDeviceConnections, closeLegacyPlainTokenConnections) never call
-    // registry.remove themselves - they rely on this event firing - so clearing presence here covers
-    // revocation and TLS enforcement too. Guarded like the audit write below, because the server may
-    // already be tearing down.
+    // Forced-close paths rely on this canonical cleanup hook.
     try {
       options.presenceService.removeConnection(connection);
-    } catch (error) {
-      console.warn("Vault Rooms relay: could not clear disconnected presence", error);
+    } catch {
+      // Shutdown may close the database before the socket event arrives.
     }
     if (connection.principal) {
       try {
@@ -155,6 +154,7 @@ async function handleMessage(
     onAuthenticated: () => void;
     crdtDocManager: CrdtDocManager;
     presenceService: PresenceService;
+    contentWriteService: ContentWriteService;
   },
   raw: string
 ): Promise<void> {
@@ -329,10 +329,14 @@ async function handleMessage(
         for (const file of repo.listFiles(room.id)) {
           if (file.deleted_at || !isCrdtEligiblePath(file.relative_path)) continue;
           try {
-            options.crdtDocManager.materializeNow({
+            const materializedContent = await options.contentWriteService.readFileContent({
+              roomId: room.id,
+              relativePath: file.relative_path
+            });
+            await options.crdtDocManager.materializeNow({
               fileId: file.id,
               epoch: file.crdt_epoch,
-              materializedContent: repo.latestFileVersion(file.id)?.content ?? null,
+              materializedContent: materializedContent.content,
               fallbackActor: { userId: file.updated_by_user_id ?? room.owner_user_id, displayName: "" }
             });
           } catch (error) {
@@ -418,7 +422,7 @@ async function handleMessage(
         permission: message.baseVersion === 0 ? "file:create" : "file:write",
         relativePath
       });
-      const result = repo.writeFile({
+      const result = await options.contentWriteService.writeFile({
         roomId: room.id,
         relativePath,
         baseVersion: message.baseVersion,
@@ -475,7 +479,7 @@ async function handleMessage(
       // Evict it immediately: harmless no-op for a file that never had a CRDT document, and closes
       // the loop on "destructive cleanup" covering in-memory state, not just durable rows.
       const beforeDelete = repo.getFile(room.id, relativePath);
-      const result = repo.deleteFile({
+      const result = await options.contentWriteService.deleteFile({
         roomId: room.id,
         relativePath,
         baseVersion: message.baseVersion,
@@ -522,9 +526,7 @@ async function handleMessage(
     return;
   }
 
-  // --- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 4, contracts 1.2/1.3/
-  // 1.7/1.8/1.9/1.10). Every branch below requires the sender to have advertised
-  // capabilities.crdt on `hello` - a legacy build has no business initiating any of these. ---
+  // CRDT messages require the advertised capability.
 
   if (message.type === "crdt_create") {
     const roomId = message.roomId;
@@ -589,16 +591,11 @@ async function handleMessage(
         });
         adopted = Boolean(existingBeforeCreate && !existingBeforeCreate.deleted_at && created.fileId === existingBeforeCreate.id);
       }
-      // Seeding replaces the document's snapshot with a fresh empty Y.Doc, so it must never run for a
-      // document that was *adopted* rather than created - that would wipe the note's content.
+      // Never seed an adopted document; it already owns content.
       if (!replayed && !adopted) {
         options.crdtDocManager.createDocument(created.fileId, created.epoch, createdBy);
       }
-      // `created.relativePath` may differ from what was asked for: first creator keeps the name, and a
-      // second device creating a *different* note at the same path (Obsidian's identical default name
-      // for every new note) is given its own disambiguated path instead of being rejected or merged
-      // into the first note. Ack the path actually assigned - the client renames its local file to
-      // match (see CrdtSessionManager.openSession).
+      // Acknowledge the server-assigned path after collision disambiguation.
       sendJson(connection.socket, {
         type: "crdt_created",
         requestId: message.requestId,
@@ -606,17 +603,9 @@ async function handleMessage(
         relativePath: created.relativePath,
         documentId: created.fileId,
         epoch: created.epoch,
-        // Tells the client whether its local disk copy is this document's only content (create) or a
-        // second copy of what the server already holds (adopt) - see the field's doc comment.
         adopted
       });
-      // Announce the new (empty) document to everyone else right away. Without this, a brand-new note
-      // was invisible to every other device until their next subscribe_room: `crdt_create` had no
-      // broadcast at all, and the materialized `remote_file_change` substitute is driven by
-      // CrdtDocManager's *update* debounce - so a note created and not yet typed into produces no
-      // update, never materializes, and never reaches anyone (eighth hardware-testing round,
-      // 2026-07-24). Sent as an ordinary empty `remote_file_change` so CRDT-capable and legacy peers
-      // alike just create the file; a CRDT peer that later opens it handshakes into the real document.
+      // Announce empty documents before their first materialized update.
       const createdFile = repo.getFile(room.id, created.relativePath);
       if (!replayed && createdFile && !createdFile.deleted_at) {
         const createAclRules = repo.listAclRulesForRoom(room.id);
@@ -630,8 +619,7 @@ async function handleMessage(
             sha256: createdFile.sha256 ?? "",
             content: "",
             updatedBy: createdBy,
-            // Tells a CRDT-capable receiver this path is an existing document at this epoch, so its
-            // own watcher's "create" event adopts it instead of issuing a colliding crdt_create.
+            // Lets receivers adopt the existing CRDT document.
             crdtEpoch: created.epoch,
             updatedAt: new Date().toISOString()
           },
@@ -648,13 +636,7 @@ async function handleMessage(
     return;
   }
 
-  // Atomic rename (fourth hardware-testing round, 2026-07-23) - replaces the old client-side
-  // delete-old+create-new translation, which discarded the file's id/epoch/history and left a
-  // multi-second, uncorrelated gap on every OTHER subscriber's device between "old file gone" and
-  // "new file appears" (see docs/superpowers/plans/2026-07-20-crdt-sync.md's fourth hardware-
-  // testing round, item 3). `repo.renameFile` only updates `relative_path` - `CrdtDocManager`
-  // caches by `(fileId, epoch)`, never by path (see crdtDocManager.ts's `key()`), so neither the
-  // in-memory doc cache nor any pending materialize timer needs touching here at all.
+  // Atomic rename preserves file identity and CRDT epoch.
   if (message.type === "crdt_rename") {
     const roomId = message.roomId;
     const relativePath = message.relativePath;
@@ -664,8 +646,6 @@ async function handleMessage(
       const normalizedNewPath = requireCrdtEligiblePath(relativePath);
       requireCrdtCapability(connection);
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "sync:push", relativePath: normalizedOldPath });
-      // Mirrors exactly the two permissions the old delete+create translation required - a rename
-      // grants no capability beyond what was already achievable via that slower path.
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:delete", relativePath: normalizedOldPath });
       assertRoomPermission({ repo, principal: connection.principal, room, permission: "file:create", relativePath: normalizedNewPath });
       if (!room.crdt_enabled) {
@@ -699,6 +679,8 @@ async function handleMessage(
         actorUserId: connection.principal.userId,
         actorDisplayName: connection.principal.userDisplayName
       };
+      const targetBeforeRename = repo.getFile(room.id, normalizedNewPath);
+      const targetBlobKeys = targetBeforeRename?.deleted_at ? repo.listBlobKeysForFile(targetBeforeRename.id) : [];
       let replayed = false;
       const result = message.operationId
         ? await repo.durable(() => {
@@ -711,6 +693,7 @@ async function handleMessage(
             return applied.result;
           })
         : repo.renameFile(renameInput);
+      await options.contentWriteService.collectOrphanedBlobKeys(targetBlobKeys);
       // A rename is path-only and deliberately leaves crdt_epoch untouched, so presence keyed by
       // (roomId, relativePath, epoch) does *not* follow the document - it would orphan at the old
       // path and render a second caret for the same person. Clear the old path before either side

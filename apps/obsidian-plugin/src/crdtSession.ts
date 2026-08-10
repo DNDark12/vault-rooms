@@ -38,14 +38,7 @@ function sessionKey(roomId: string, relativePath: string): string {
   return `${roomId}\0${relativePath}`;
 }
 
-/**
- * A `crdt_rejected` answer to one of this manager's requests, carrying the server's error `code`
- * alongside its message. Callers need the code, not just the text: main.ts's rename fallback must
- * treat "the old path was never on the server" (NOT_FOUND/FILE_DELETED - creating at the new path is
- * the correct recovery) differently from "the new path is already taken" (FILE_EXISTS - creating is
- * both impossible and how stray duplicate files used to get manufactured; see the sixth
- * hardware-testing round in docs/superpowers/plans/2026-07-20-crdt-sync.md).
- */
+/** CRDT rejection that preserves the server error code for recovery decisions. */
 export class CrdtRejectedError extends Error {
   constructor(
     readonly code: string,
@@ -98,14 +91,9 @@ export type CrdtSessionManagerDeps = {
    *  locally (nothing to reconcile against yet - e.g. a brand-new remote document not yet
    *  downloaded). */
   readDiskText: (roomId: string, relativePath: string) => Promise<string | null>;
-  /** Writes materialized doc text back to the vault when the file is not currently bound to an open
-   *  editor (coexistence: an unopened CRDT file's on-disk copy still needs to stay current - see
-   *  the research spec's "when the file is not open" case). */
+  /** Writes materialized text for a document without an open editor. */
   writeDiskText: (roomId: string, relativePath: string, text: string) => Promise<void>;
-  /** Moves the vault file on disk to match a `remote_crdt_rename` from another device (fourth
-   *  hardware-testing round, 2026-07-23) - never called for this device's *own* rename (Obsidian
-   *  already renamed the file itself before the watcher ever fired). A no-op if the source path
-   *  doesn't exist locally (e.g. this device never downloaded the file before the rename). */
+  /** Applies a remote CRDT rename to the vault file. */
   renameDiskFile: (roomId: string, oldRelativePath: string, newRelativePath: string) => Promise<void>;
   onSessionChanged?: (roomId: string, relativePath: string) => void;
   /** Synchronously removes editor bindings before a session's Y.Doc is destroyed. */
@@ -141,12 +129,7 @@ export interface CrdtWsBridge {
    *  write it triggers can't make this device try to create a document the server already has - see
    *  the implementation's doc comment for the feedback loop this prevents. */
   registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void;
-  /** Whether a live CRDT session is already open for (roomId, relativePath) - used by
-   *  syncWsClient.ts's `remote_file_change` handler (second-hardware-testing-round item 1) to decide
-   *  whether the materialized fallback broadcast should still be applied to disk. When a session is
-   *  already open, the CRDT lane owns this file live and applying the coarser materialized snapshot
-   *  on top could clobber in-flight editor state; when no session is open (including for a file that
-   *  was never a CRDT target at all), applying it keeps the on-disk copy fresh. */
+  /** Whether a live CRDT session owns this path. */
   isSessionOpen(roomId: string, relativePath: string): boolean;
 }
 
@@ -398,16 +381,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     return { relativePath: resolved.relativePath };
   }
 
-  /**
-   * Renames this device's own already-known CRDT file (fourth hardware-testing round, 2026-07-23):
-   * sends `crdt_rename` and, once the server acks with `crdt_renamed`, rekeys this session's
-   * in-memory/persisted state onto the new path - without tearing down or re-seeding the `Y.Doc`,
-   * unlike the old delete-old+create-new translation this replaces. A live-bound editor keeps its
-   * document identity, network connection, and content throughout. Never touches the vault file on
-   * disk - the caller (main.ts's watcher, reacting to Obsidian's own rename event) only calls this
-   * after Obsidian has already renamed the file itself; see `renameDiskFile` for the other device's
-   * side of this, which does need to move the file.
-   */
+  /** Renames a local CRDT session without changing its document identity. */
   async renameSession(
     roomId: string,
     oldRelativePath: string,
@@ -427,7 +401,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     // `ensureSession` gets called for the destination path while this rename is still in flight. With
     // no session or known epoch there yet, that call allocated a brand-new document at the destination,
     // and the rename then collided with the document its own device had just created ~5ms earlier
-    // (`FILE_EXISTS`, confirmed from a real WS trace - eleventh hardware-testing round, 2026-07-24).
+    // (`FILE_EXISTS`).
     // `ensureSession` consults this set and waits for the rename instead of creating.
     const destinationKey = sessionKey(roomId, newRelativePath);
     this.pendingRenameTargets.add(destinationKey);
@@ -624,13 +598,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
       // caller's "is this a brand-new note" hint: recovery after a NOT_FOUND, for instance, is not a new
       // note but does genuinely (re)create the document, and its disk text must still be seeded.
       //
-      // Seeding whenever there was no persisted state (the previous behaviour) corrupted content on
-      // every unmount/remount cycle: unmounting deletes this device's persisted CRDT state by design,
-      // so remounting found none, seeded the doc with the file's text, and then the handshake merged in
-      // the server's document - which already held that same text. The note ended up with two copies,
-      // and each cycle doubled it again, which is exactly the "content keeps getting copied further and
-      // further down" report (seventeenth hardware-testing round, 2026-07-24; the growing `crdt_update`
-      // payloads - 4KB, 9.4KB, 12.9KB - are the duplication being pushed back out as real edits).
+      // Seeding an adopted document duplicates content after unmount/remount.
       //
       // For every other case the server's document is authoritative, and local divergence is not lost:
       // the post-handshake reconcile (in the `crdt_sync_step2` handler) diffs the disk text against the
@@ -862,9 +830,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
         // NOT_FOUND/FILE_DELETED it's saying "there is no document at this path at all". Until now
         // that had *no recovery*: the session stayed alive pointing at a document the server doesn't
         // have, so every subsequent `crdt_update` was rejected the same way and the user's edits were
-        // silently stranded forever - visible on real hardware as an endless
-        // `crdt_update` -> `crdt_rejected` stream in the WS log while the note refused to sync
-        // (tenth hardware-testing round, 2026-07-24). Re-establish the document instead: the local
+        // silently stranded forever. Re-establish the document instead: the local
         // text is safe on disk, so dropping the stale session/epoch and re-opening adopts (or creates)
         // the right document and re-seeds it from that disk text via the normal handshake.
         if (!pendingCreateEntry && !pendingRenameEntry && (message.code === "NOT_FOUND" || message.code === "FILE_DELETED")) {
@@ -948,10 +914,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
         const session = this.sessions.get(key);
         if (!session) {
           // No session yet, so this live update would be dropped and this device would not see the
-          // change until the server's *debounced* materialize arrived as a `remote_file_change` -
-          // roughly three seconds behind the keystroke, which is exactly the "edits take ~3s to show
-          // up, or appear all at once when I click away" latency reported from real hardware
-          // (thirteenth hardware-testing round, 2026-07-24). Live receipt must not depend on the
+          // change until the server's debounced materialization. Live receipt must not depend on the
           // editor-binding pass having run: open the session now, then apply this exact update.
           // The handshake remains the catch-up mechanism for anything else missed, but cannot be the
           // only carrier for this update: another socket's update and this device's step1 can cross

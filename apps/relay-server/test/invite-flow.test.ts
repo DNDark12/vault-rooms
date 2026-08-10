@@ -43,7 +43,9 @@ describe("room, team, and friend invites", () => {
       headers: { authorization: `Bearer ${plainOwner.deviceToken}` },
       payload: {}
     });
-    expect(new URL(plainInvite.json().joinUrl).searchParams.get("security")).toBeNull();
+    const plainJoinUrl = new URL(plainInvite.json().joinUrl);
+    expect(plainJoinUrl.searchParams.get("security")).toBeNull();
+    expect(plainJoinUrl.searchParams.get("serverId")).toEqual(expect.stringMatching(/^srv_/));
     await plainApp.close();
   });
 

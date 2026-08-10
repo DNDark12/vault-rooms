@@ -7,15 +7,19 @@ import {
   ensureServerIdentity,
   resolveServerIdForIdentityStore,
   rotateServerIdentity,
+  scheduleStorageBackfill,
   tlsCertificateChainPem,
   type IdentityStore,
   type PersistedIdentity,
   type RelayDb,
-  type SecurityRuntime
+  type SecurityRuntime,
+  type StorageBackfillHandle,
+  type StorageMaintenanceTimerHost
 } from "vault-rooms-relay/embedded-core";
-import type { EmbeddedServerSettings } from "./settings.js";
+import { DEFAULT_SERVER_SETTINGS, type EmbeddedServerSettings } from "./settings.js";
 import { requestUrlWithTimeout } from "./apiClient.js";
 import { createEmbeddedRelayApp, type EmbeddedOwnerRecoveryResult, type EmbeddedRelayApp } from "./embeddedRelayApp.js";
+import { createDataAdapterBlobStore } from "./dataAdapterBlobStore.js";
 import { createObsidianIdentityStore } from "./obsidianIdentityStore.js";
 import { openObsidianSqlJsDb, restoreObsidianLegacyV01Backup } from "./obsidianSqlJsDb.js";
 import { withPort } from "./publicUrl.js";
@@ -24,6 +28,12 @@ import { isRestrictedPort } from "./restrictedPorts.js";
 // avoids depending on a separately-shipped sql-wasm.wasm file, which the community-plugin
 // installer would never actually deliver (it only downloads main.js/manifest.json/styles.css).
 import sqlWasmBinary from "sql.js/dist/sql-wasm-browser.wasm";
+
+// Plugin-only file (rule 2): call window.setTimeout/clearTimeout directly rather than a bare global.
+const windowStorageTimerHost: StorageMaintenanceTimerHost = {
+  setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => window.clearTimeout(handle as number)
+};
 
 export type EmbeddedServerStatus =
   | { running: false; error?: string }
@@ -50,6 +60,8 @@ export type EmbeddedServerStatus =
         pinnedIdentitySpkiSha256: string;
         serverId: string;
       };
+      lanDiscoveryAvailable?: boolean;
+      lanDiscoveryError?: string;
     };
 
 /**
@@ -63,6 +75,8 @@ export class EmbeddedRelayServer {
   private activeSettings: EmbeddedServerSettings | null = null;
   private identityStore: IdentityStore | null = null;
   private securityRuntimeState: { persisted: PersistedIdentity; httpsUrl: string | null } | null = null;
+  /** Cancelled before the database closes. */
+  private storageBackfillHandle: StorageBackfillHandle | null = null;
 
   constructor(
     private readonly adapter: DataAdapter,
@@ -97,7 +111,14 @@ export class EmbeddedRelayServer {
     let app: EmbeddedRelayApp | null = null;
     try {
       db = await openObsidianSqlJsDb(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
-      const core = createRelayCore(db, { maxFileBytes: settings.maxFileBytes });
+      const core = createRelayCore(db, {
+        maxFileBytes: settings.maxFileBytes,
+        maxStoredContentBytes: settings.maxStoredContentBytes ?? DEFAULT_SERVER_SETTINGS.maxStoredContentBytes,
+        // Keep blobs beside the relay database in plugin-private storage.
+        blobStore: createDataAdapterBlobStore(this.adapter, `${parentDirectory(this.dbPath)}/blobs`)
+      });
+      // Run resumable storage maintenance off the startup path.
+      this.storageBackfillHandle = scheduleStorageBackfill(core.repo, windowStorageTimerHost, core.contentWriteService);
       // A legacy schema migration is an integrity boundary: persist the fully migrated image
       // before deriving owner/security state or opening any listener against it.
       await db.flush();
@@ -207,6 +228,7 @@ export class EmbeddedRelayServer {
     } catch (error) {
       // A partial dual-stack start must close whichever listeners were opened and the shared DB.
       // Preserve the startup error if cleanup also fails.
+      this.clearRunningState();
       try {
         if (app) {
           await app.close();
@@ -225,15 +247,22 @@ export class EmbeddedRelayServer {
     }
   }
 
-  async stop(): Promise<void> {
-    const app = this.app;
+  /** Cancels maintenance before clearing the running server state. */
+  private clearRunningState(): void {
+    this.storageBackfillHandle?.cancel();
+    this.storageBackfillHandle = null;
     this.app = null;
-    if (app) {
-      await app.close();
-    }
     this.activeSettings = null;
     this.identityStore = null;
     this.securityRuntimeState = null;
+  }
+
+  async stop(): Promise<void> {
+    const app = this.app;
+    this.clearRunningState();
+    if (app) {
+      await app.close();
+    }
     this.status = { running: false };
   }
 
@@ -248,6 +277,12 @@ export class EmbeddedRelayServer {
     await running.app.ownerAdmin.revokeRecoveredOwnerDevice(deviceId);
   }
 
+  /** Runs the user-confirmed SQLite compaction. */
+  async reclaimStorage(): Promise<void> {
+    const running = this.requireRunningSecurityContext();
+    await running.app.storageAdmin.reclaim();
+  }
+
   async restoreLegacyV01Backup(): Promise<EmbeddedServerStatus> {
     const running = this.requireRunningSecurityContext();
     const settings = running.settings;
@@ -257,7 +292,10 @@ export class EmbeddedRelayServer {
       await restoreObsidianLegacyV01Backup(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
       const db = await openObsidianSqlJsDb(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
       try {
-        const core = createRelayCore(db, { maxFileBytes: settings.maxFileBytes });
+        const core = createRelayCore(db, {
+        maxFileBytes: settings.maxFileBytes,
+        maxStoredContentBytes: settings.maxStoredContentBytes ?? DEFAULT_SERVER_SETTINGS.maxStoredContentBytes
+      });
         await core.repo.durable(() => core.repo.setServerIdIfMissing(stableServerId));
       } finally {
         await db.close();
@@ -343,11 +381,9 @@ export class EmbeddedRelayServer {
     try {
       await running.app.closePlainListener();
     } catch (error) {
-      const cleanup = await Promise.allSettled([running.app.close()]);
-      this.app = null;
-      this.activeSettings = null;
-      this.identityStore = null;
-      this.securityRuntimeState = null;
+      const app = running.app;
+      this.clearRunningState();
+      const cleanup = await Promise.allSettled([app.close()]);
       this.status = { running: false, error: "TLS enforcement listener shutdown failed; embedded relay stopped." };
       const cleanupErrors = rejectionErrors(cleanup);
       throw new AggregateError(
@@ -403,11 +439,9 @@ export class EmbeddedRelayServer {
       // A failed persistence/listener rollback leaves no identity that is simultaneously true on
       // disk and on the wire. Stop the whole embedded relay so status cannot claim a TLS listener
       // is running under stale pin material; the next explicit Start reloads the durable identity.
-      const cleanup = await Promise.allSettled([running.app.close()]);
-      this.app = null;
-      this.activeSettings = null;
-      this.identityStore = null;
-      this.securityRuntimeState = null;
+      const app = running.app;
+      this.clearRunningState();
+      const cleanup = await Promise.allSettled([app.close()]);
       this.status = { running: false, error: "Identity rotation rollback failed; embedded relay stopped." };
       const rollbackErrors = rejectionErrors(rollback);
       const cleanupErrors = rejectionErrors(cleanup);

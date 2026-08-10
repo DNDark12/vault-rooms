@@ -3,12 +3,7 @@ import { runMigrations } from "../src/db/migrations.js";
 import { openSqlJsDb, type RelayDb } from "../src/db/sqlJsAdapter.js";
 import { RelayRepository } from "../src/db/repositories/relayRepository.js";
 
-// Phase 2 of docs/superpowers/plans/2026-07-20-crdt-sync.md: epoch-aware CRDT persistence.
-// Contract 1.9 (authoritative epoch source): `files.crdt_epoch` survives purges because it lives
-// on the FileRow itself, not inside the tables that get purged. Contract 1.5 (destructive vs
-// non-destructive cleanup): a file delete bumps the epoch and purges crdt_updates/crdt_snapshots
-// for the OLD epoch immediately ("delete wins" per contract 1.5), so any in-flight update for the
-// old epoch is rejected as stale, and a later recreate-at-same-path starts clean at the new epoch.
+// Covers epoch-aware CRDT persistence and destructive cleanup.
 
 async function createTestRepo(): Promise<{ db: RelayDb; repo: RelayRepository }> {
   const db = await openSqlJsDb(":memory:");

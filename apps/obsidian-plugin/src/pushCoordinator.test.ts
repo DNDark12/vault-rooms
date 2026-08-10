@@ -175,6 +175,36 @@ describe("RoomPushCoordinator", () => {
     coordinator.dispose();
   });
 
+  it("does not retry a file whose last push failed because the relay's storage quota is full", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const error = Object.assign(new Error("store is full"), { code: "STORAGE_QUOTA_EXCEEDED" });
+    api.nextWriteError = error;
+    const engine = new VaultSyncEngine(vault, api);
+    const room = createRoom();
+    const coordinator = new RoomPushCoordinator({
+      room,
+      syncEngine: engine,
+      deviceName: "B laptop",
+      onPersist: () => undefined,
+      onError: () => undefined,
+      debounceMs: 10,
+      isStillMounted: () => true
+    });
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# big\n");
+
+    coordinator.handleLocalChange("modify", "Board.md");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(api.writes).toHaveLength(1);
+    expect(room.files["Board.md"]?.syncError).toBeTruthy();
+
+    coordinator.retryPending();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(api.writes).toHaveLength(1);
+
+    coordinator.dispose();
+  });
+
   it("does not retry a file whose last push failed with a terminal (422-family) error", async () => {
     const vault = new FakeVaultAdapter();
     const api = new FakeApi();
@@ -206,16 +236,9 @@ describe("RoomPushCoordinator", () => {
     coordinator.dispose();
   });
 
-  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
-  // `syncError` is rendered in the rooms panel, so it is a display sink: a bare code or an
-  // "[object Object]" from a non-Error throw both used to reach the user verbatim.
   it("stores a readable syncError for a bare code and for a message-less rejection", async () => {
-    // Both fixtures carry a terminal code, because only a terminal error records `syncError` at all -
-    // anything else stays retryable and deliberately leaves the field clear.
     const cases: Array<{ thrown: unknown; expected: string }> = [
-      // A relay whose prose is just the code, which the panel printed as-is.
       { thrown: { code: "VALIDATION_ERROR", message: "VALIDATION_ERROR" }, expected: "This server rejected the request." },
-      // A rejection with a code and no message - `String(error)` rendered this as "[object Object]".
       { thrown: { code: "FILE_TOO_LARGE" }, expected: "That file is larger than this server accepts." }
     ];
 

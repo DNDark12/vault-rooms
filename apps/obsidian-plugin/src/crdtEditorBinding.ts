@@ -29,23 +29,13 @@ export function buildCrdtEditorExtension(
 export type CrdtEditorTarget = { roomId: string; relativePath: string };
 
 export type CrdtEditorControllerDeps = {
-  /** Live accessor rather than a fixed instance - the plugin recreates its CrdtSessionManager
-   *  whenever the active server changes (mirrors how VaultSyncEngine/RelayApiClient are also
-   *  recreated per connectSyncSocket() call - see main.ts), so this controller (constructed once,
-   *  at plugin load) always needs whichever manager is current, not a stale one from a prior
-   *  server. Returns undefined when no server is active. */
+  /** Returns the current session manager, if connected. */
   getSessionManager: () => CrdtSessionManager | undefined;
-  /**
-   * Resolves the (roomId, relativePath) a given vault-relative file path maps to, or undefined if
-   * it's not inside any currently-mounted CRDT-enabled room's subtree, or isn't CRDT-eligible
-   * (`.md`). Folder-scoped by construction (a caller only ever asks about one specific path, never
-   * enumerates - CLAUDE.md rule 5).
-   */
+  /** Resolves a vault path to its mounted CRDT room target. */
   resolveCrdtTarget: (vaultPath: string) => CrdtEditorTarget | undefined;
 };
 
-/** One entry per currently open markdown editor view that main.ts wants reconciled - see
- *  CrdtEditorController.syncOpenViews. */
+/** One currently open Markdown editor view. */
 export type OpenCrdtEditorView = { vaultPath: string; view: EditorView };
 
 type ViewBinding = {
@@ -73,12 +63,6 @@ function sameTarget(a: CrdtEditorTarget | undefined, b: CrdtEditorTarget | undef
  * *specific* `EditorView`'s own configuration - reconfiguring it for one view's dispatch does not
  * affect any other view sharing the same `Compartment` instance, which is what makes tracking many
  * views against one shared `Compartment` correct and cheap (no per-view Compartment needed).
- *
- * Second-hardware-testing-round item 3: this supersedes the v1 scope note that used to live here
- * ("only actively (re)binds the currently focused editor view... a background pane keeps its last-
- * bound content until refocused"). The underlying Y.Doc/session already received and merged remote
- * updates regardless of focus even in v1 - this class is purely about keeping every open *editor
- * view* refreshed/bound, not just the focused one.
  */
 export class CrdtEditorController {
   readonly compartment = new Compartment();

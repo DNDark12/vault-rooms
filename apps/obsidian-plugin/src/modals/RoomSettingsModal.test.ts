@@ -178,6 +178,7 @@ const room = (overrides: Partial<RoomSummary> = {}): RoomSummary => ({
   permissions: ["room:read", "room:write", "room:delete"],
   capabilities: [],
   crdtEnabled: true,
+  storedBytes: 0,
   ...overrides
 });
 

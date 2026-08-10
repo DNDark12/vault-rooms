@@ -642,7 +642,6 @@ describe("CrdtEditorController.syncOpenViews", () => {
   });
 });
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // Covers the wiring between the presence adapter and the two lifecycles that own it: the editor
 // binding (which pane holds which facade) and the session (which Y.Doc the facade belongs to).
 describe("CrdtEditorController presence wiring", () => {

@@ -14,22 +14,7 @@ export type SyncConnection = {
   socket: SyncSocket;
   principal: DevicePrincipal | null;
   subscriptions: Set<string>;
-  // Capability negotiation (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.2). Defaults
-  // to { crdt: false, presence: false } until a "hello" advertising them is processed - absent/older
-  // clients never advertise support, so fanout branching in later phases can trust this
-  // rather than re-deriving it from message.client.version.
-  //
-  // `presence` (live cursors, docs/superpowers/specs/2026-07-28-live-cursors-design.md) is clamped
-  // to false unless `crdt` is also true: presence is scoped to live CRDT documents, so there is
-  // nothing for a whole-file-lane connection to attach a caret to.
-  //
-  // `extendedBinarySync` (2026-08-03 sync-widening) - defaults to false until a "hello" advertises
-  // it, same as crdt/presence. Gates room_snapshot's file list and remote_file_change's fanout (see
-  // syncServer.ts) so a connection that hasn't advertised it never learns a legacy-ineligible path
-  // (@vault-rooms/protocol's isLegacyEligiblePath) exists in the room at all - the same
-  // invisible-unless-you-opt-in treatment CRDT already gets from older clients, and for the same
-  // reason: a client that doesn't understand the new default-to-binary rule would silently corrupt
-  // such a file on disk rather than merely fail to sync it.
+  /** Advertised capabilities; presence requires CRDT and binary sync is opt-in. */
   capabilities: { crdt: boolean; presence: boolean; extendedBinarySync: boolean };
 };
 
@@ -59,11 +44,7 @@ export class ConnectionRegistry {
       // that message type is meant for the acting device, not passive observers. When omitted,
       // every room subscriber receives the message (existing behavior for room-level events).
       canReceive?: (principal: DevicePrincipal) => boolean;
-      // Connection-level filter (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.2) -
-      // distinct from canReceive, which only sees the ACL-relevant DevicePrincipal. This exists so
-      // the CRDT lane can partition a room's subscribers into "gets remote_crdt_update" vs "gets
-      // the materialized remote_file_change instead" by capability, without threading connection
-      // internals through the ACL-focused canReceive predicate.
+      // Filters recipients by connection capability after ACL checks.
       connectionFilter?: (connection: SyncConnection) => boolean;
     }
   ): void {

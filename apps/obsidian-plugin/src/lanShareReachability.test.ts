@@ -97,6 +97,7 @@ describe("LanShareReachabilityMonitor", () => {
     expect(state).toMatchObject({ status: "unreachable" });
     expect("error" in state && state.error).not.toContain("net::");
     expect("error" in state && state.error).toMatch(/same network|can't be reached/i);
+    expect("error" in state && state.error).toMatch(/Public URL override|stale/i);
 
     // The raw token is not discarded, just moved off-screen: it is what identifies which layer refused.
     expect(warn).toHaveBeenCalledWith(
@@ -107,7 +108,6 @@ describe("LanShareReachabilityMonitor", () => {
     warn.mockRestore();
   });
 
-  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
   // The stored `error` is displayed in the panel, so a non-Error throw must not surface as
   // "[object Object]". The actionable prefix on the *thrown* error is unrelated and stays intact.
   it("keeps the displayed unreachable reason readable for a non-Error throw", async () => {
@@ -118,7 +118,7 @@ describe("LanShareReachabilityMonitor", () => {
     );
     expect(monitor.getState()).toMatchObject({
       status: "unreachable",
-      error: "LAN reachability check failed."
+      error: expect.stringContaining("LAN reachability check failed.")
     });
     expect(JSON.stringify(monitor.getState())).not.toContain("[object Object]");
   });

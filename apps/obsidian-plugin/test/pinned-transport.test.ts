@@ -11,6 +11,7 @@ import {
 import {
   fetchRotationProbe,
   InvalidPinMaterialError,
+  pinnedRawRequest,
   pinnedRequest,
   type PinnedServerInfo
 } from "../src/pinnedTransport.js";
@@ -57,6 +58,42 @@ describe("pinned REST transport", () => {
       version: "0.1.0"
     });
     expect(remote.requests()).toBe(1);
+  });
+
+  it("preserves raw request and response bytes", async () => {
+    const identity = await generateServerIdentity("srv_pinned_raw_transport");
+    const responseBytes = Buffer.from([0, 1, 2, 127, 128, 255]);
+    let requestBytes = Buffer.alloc(0);
+    const server = createServer(
+      { key: identity.leafKeyPem, cert: tlsCertificateChainPem(identity) },
+      (request, response) => {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          requestBytes = Buffer.concat(chunks);
+          response.writeHead(200, { "content-type": "application/octet-stream" });
+          response.end(responseBytes);
+        });
+      }
+    );
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+    const uploadBytes = new Uint8Array([255, 128, 127, 2, 1, 0]);
+
+    const result = await pinnedRawRequest(pinnedInfo(identity), {
+      url: `https://127.0.0.1:${port}/raw`,
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: uploadBytes
+    });
+
+    expect(result.status).toBe(200);
+    expect(Buffer.from(result.arrayBuffer)).toEqual(responseBytes);
+    expect(requestBytes).toEqual(Buffer.from(uploadBytes));
   });
 
   it("rejects tampered local pin material before opening a network request", async () => {

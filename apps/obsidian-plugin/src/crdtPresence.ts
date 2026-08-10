@@ -9,33 +9,7 @@ import type {
   SyncClientMessage
 } from "@vault-rooms/protocol";
 
-/**
- * Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
- *
- * Supplies the minimum Awareness-shaped surface `y-codemirror.next@0.3.5` actually consumes, so the
- * mature remote-caret/selection renderer stays the source of editor behavior while identity, timers,
- * and lifecycle stay explicit and testable here. The renderer touches exactly six members
- * (`doc.clientID`, `getLocalState`, `setLocalStateField`, `getStates`, `on`/`off("change")`,
- * `destroy`) and types the argument `any`, so this is a duck type by design - `y-protocols` is not a
- * dependency and adding it would drag `lib0/observable` into the bundle for no product gain.
- *
- * Three details of that contract are load-bearing, and each fails *silently* if missed:
- *
- * 1. **The cursor format is asymmetric.** The renderer reads its own local state as JSON
- *    (`createRelativePositionFromJSON`) but consumes remote states as live `Y.RelativePosition`
- *    objects (`createAbsolutePositionFromRelativePosition`). So the local store keeps JSON and
- *    `getStates()` hands back rehydrated objects.
- * 2. **`getLocalState()` must never return `null`** - a null local state disables local cursor
- *    publishing entirely, so no cursor is ever advertised.
- * 3. **The `change` listener takes three positional arguments** and `.concat()`s all three of
- *    `{ added, updated, removed }`, so every notification must carry three arrays.
- *
- * Structural rule that is just as easy to regress: the adapter and its `ytext` must belong to one
- * *immutable* session/`Y.Doc` pair. `yCollab` captures both into a CodeMirror facet at
- * extension-build time, so a live getter onto "the current session" would let `awareness.doc` drift
- * ahead of `conf.ytext` - and the local peer's own caret would then render as a remote one. When an
- * epoch bump or recovery replaces the `Y.Doc`, the whole binding is rebuilt instead.
- */
+/** Minimal Awareness adapter bound to one immutable Y.Doc session. */
 
 export type AwarenessChange = {
   added: number[];

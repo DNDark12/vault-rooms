@@ -446,7 +446,8 @@ function roomSummary(): RoomSummary {
     conflictPolicy: "keep_both",
     permissions: ["room:read", "room:write", "file:read", "file:write", "sync:subscribe", "sync:push"],
     capabilities: [],
-    crdtEnabled: false
+    crdtEnabled: false,
+    storedBytes: 0
   };
 }
 

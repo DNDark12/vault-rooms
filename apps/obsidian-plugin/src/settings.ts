@@ -36,6 +36,8 @@ export type EmbeddedServerSettings = {
   /** Runtime-managed remembered TLS port. Leave undefined to start at the HTTP port plus one. */
   tlsPort?: number;
   maxFileBytes: number;
+  /** Total stored-content limit; missing values use the 256 MiB default. */
+  maxStoredContentBytes?: number;
   /** Start the embedded relay server automatically when Obsidian loads this vault. */
   autoStart: boolean;
   /**
@@ -50,6 +52,8 @@ export type VaultRoomsSettings = {
   /** Raw persisted entries that could not be safely interpreted; retained so a later version can recover them. */
   unrecognizedServers?: unknown[];
   activeServerId?: string;
+  /** Saved connection owned by this device's embedded relay. */
+  embeddedServerConnectionId?: string;
   mountRoot: string;
   debounceMs: number;
   mountedRooms: Record<string, MountedRoomState>;
@@ -57,10 +61,14 @@ export type VaultRoomsSettings = {
   server: EmbeddedServerSettings;
 };
 
-export const DEFAULT_SERVER_SETTINGS: EmbeddedServerSettings = {
+// `satisfies` (not `: EmbeddedServerSettings`) keeps maxStoredContentBytes's literal `number` type
+// instead of widening it to the field's declared optional `number | undefined` - normalizeServerSettings
+// below relies on DEFAULT_SERVER_SETTINGS.maxStoredContentBytes always being a concrete number.
+export const DEFAULT_SERVER_SETTINGS = {
   maxFileBytes: 5 * 1024 * 1024,
+  maxStoredContentBytes: 256 * 1024 * 1024,
   autoStart: false
-};
+} satisfies EmbeddedServerSettings;
 
 export const DEFAULT_SETTINGS: VaultRoomsSettings = {
   servers: [],
@@ -71,6 +79,29 @@ export const DEFAULT_SETTINGS: VaultRoomsSettings = {
   roomMountPaths: {},
   server: DEFAULT_SERVER_SETTINGS
 };
+
+/** Defense-in-depth against a corrupted/hand-edited data.json: falls back to the default instead of
+ *  passing through an invalid persisted byte limit (mirrors config.ts's env-var validation, as a
+ *  silent repair since there's no operator to show a startup error to). */
+function normalizePositiveByteLimit(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  // Round only after checking the pre-rounded value is positive - a value like 0.1 is finite and
+  // > 0 but rounds to 0, which must fall back rather than pass through as a real byte limit.
+  const rounded = Math.round(value);
+  return Number.isSafeInteger(rounded) && rounded > 0 ? rounded : fallback;
+}
+
+function normalizeServerSettings(server: EmbeddedServerSettings): { server: EmbeddedServerSettings; changed: boolean } {
+  const maxFileBytes = normalizePositiveByteLimit(server.maxFileBytes, DEFAULT_SERVER_SETTINGS.maxFileBytes);
+  const maxStoredContentBytes = normalizePositiveByteLimit(
+    server.maxStoredContentBytes,
+    DEFAULT_SERVER_SETTINGS.maxStoredContentBytes
+  );
+  const changed = maxFileBytes !== server.maxFileBytes || maxStoredContentBytes !== server.maxStoredContentBytes;
+  return { server: changed ? { ...server, maxFileBytes, maxStoredContentBytes } : server, changed };
+}
 
 export function activeServer(settings: VaultRoomsSettings): ServerConnection | undefined {
   return settings.servers.find((server) => server.id === settings.activeServerId) ?? settings.servers[0];
@@ -120,6 +151,15 @@ export function migrateVaultRoomsSettings(
       ? migrateLegacyServerConnection(server)
       : migrateServerConnectionSettings(server)
   );
+  const persistedEmbeddedId = loaded?.embeddedServerConnectionId;
+  const validPersistedEmbeddedId =
+    typeof persistedEmbeddedId === "string" && servers.some((server) => server.id === persistedEmbeddedId)
+      ? persistedEmbeddedId
+      : undefined;
+  const loopbackOwners = servers.filter(isOwnEmbeddedServerConnection);
+  const embeddedServerConnectionId =
+    validPersistedEmbeddedId ?? (loopbackOwners.length === 1 ? loopbackOwners[0]?.id : undefined);
+  const embeddedMarkerMigrated = persistedEmbeddedId !== embeddedServerConnectionId;
   const activeServerId = loaded?.activeServerId;
   // v0.1 mounted-room records did not store their server. With exactly one saved server the
   // association is certain; with multiple entries, using merely the active one could route a
@@ -171,17 +211,23 @@ export function migrateVaultRoomsSettings(
     })
   );
 
+  const { server: normalizedServer, changed: serverSettingsNormalized } = normalizeServerSettings({
+    ...DEFAULT_SERVER_SETTINGS,
+    ...(loaded?.server ?? {})
+  });
+
   return {
-    migratedLegacy: migratedLegacy || journalMigrated,
+    migratedLegacy: migratedLegacy || journalMigrated || serverSettingsNormalized || embeddedMarkerMigrated,
     settings: {
       ...DEFAULT_SETTINGS,
       ...loaded,
       servers,
       unrecognizedServers,
       activeServerId,
+      embeddedServerConnectionId,
       mountedRooms,
       roomMountPaths: loaded?.roomMountPaths ?? DEFAULT_SETTINGS.roomMountPaths,
-      server: { ...DEFAULT_SERVER_SETTINGS, ...(loaded?.server ?? {}) }
+      server: normalizedServer
     }
   };
 }

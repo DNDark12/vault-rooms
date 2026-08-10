@@ -165,7 +165,8 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
               // local change routes to, not about push permission.
               permissions: ["file:read", "file:write", "sync:push"],
               capabilities: [],
-              crdtEnabled: options.visibleRoomCrdtEnabled
+              crdtEnabled: options.visibleRoomCrdtEnabled,
+              storedBytes: 0
             }
           ];
     const ensureSession = options.ensureSessionError

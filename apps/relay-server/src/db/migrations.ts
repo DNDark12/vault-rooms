@@ -131,6 +131,7 @@ export function runMigrations(db: RelayDb): void {
       content_storage_key text not null,
       created_by_user_id text not null,
       created_at text not null,
+      blob_key text,
       unique(file_id, version)
     );
 
@@ -138,6 +139,16 @@ export function runMigrations(db: RelayDb): void {
       storage_key text primary key,
       content text not null,
       created_at text not null
+    );
+
+    -- Keeps per-write blob reference checks indexed.
+    create index if not exists idx_file_versions_storage_key on file_versions(content_storage_key);
+
+    -- Stored content bytes, recomputed at startup and maintained per transaction.
+    create table if not exists storage_usage(
+      id integer primary key check (id = 1),
+      blob_bytes integer not null,
+      recomputed_at text not null
     );
 
     create table if not exists audit_events(
@@ -153,10 +164,7 @@ export function runMigrations(db: RelayDb): void {
       created_at text not null
     );
 
-    -- CRDT sync (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 2). Additive only - never
-    -- reset an existing database. crdt_updates/crdt_snapshots are keyed by (file_id, epoch) rather
-    -- than file_id alone so a purged/superseded epoch's rows are unambiguous and never mixed with
-    -- a later incarnation's (contract 1.5/1.9).
+    -- CRDT state is keyed by file and epoch to isolate recreated documents.
     create table if not exists crdt_updates(
       id text primary key,
       file_id text not null,
@@ -178,9 +186,7 @@ export function runMigrations(db: RelayDb): void {
       unique(file_id, epoch)
     );
 
-    -- Exactly-once receipts for journal-backed CRDT create/rename operations. The client retries
-    -- one stable operation_id with a fresh request_id after reconnect/restart; storing the normalized
-    -- payload hash prevents an ID from ever being reused for a different mutation.
+    -- Exactly-once receipts bind one operation ID to one device payload.
     create table if not exists crdt_operation_receipts(
       room_id text not null,
       operation_id text not null,
@@ -197,17 +203,47 @@ export function runMigrations(db: RelayDb): void {
 
   rebuildLegacyInvitesTable(db);
 
-  // Schema evolution for databases created before a column existed: `create table if not exists`
-  // above only bootstraps brand new files, so an already-existing `rooms` table from an older
-  // version of the plugin needs the new column added explicitly. Safe to run on every startup.
+  // Add columns missing from databases created by older releases.
   addColumnIfMissing(db, "rooms", "conflict_policy", "text not null default 'keep_both'");
   addColumnIfMissing(db, "devices", "last_transport", "text");
   addColumnIfMissing(db, "devices", "token_security", "text not null default 'plain'");
   addColumnIfMissing(db, "rooms", "crdt_enabled", "integer not null default 0");
   addColumnIfMissing(db, "files", "crdt_epoch", "integer not null default 0");
+  // Nullable for legacy rows; the maintenance pass backfills it.
+  addColumnIfMissing(db, "files", "raw_size_bytes", "integer");
+  addColumnIfMissing(db, "file_versions", "raw_size_bytes", "integer");
+  // Null until a legacy content reference is migrated.
+  addColumnIfMissing(db, "file_versions", "blob_key", "text");
+  db.exec("create index if not exists idx_file_versions_blob_key on file_versions(blob_key)");
   if (upgradingV01) {
     db.prepare("insert or replace into server_meta(key, value) values ('legacy_v01_migrated', '1')").run();
   }
+  // Quota accounting is exact before writes are accepted.
+  recomputeStorageUsage(db);
+}
+
+/** Recomputes referenced legacy and external content bytes. */
+export function recomputeStorageUsage(db: RelayDb): void {
+  const row = db.prepare(`
+    select coalesce(sum(bytes), 0) as total
+    from (
+      select length(cast(cb.content as blob)) as bytes
+      from content_blobs cb
+      where exists (
+        select 1 from file_versions fv where fv.content_storage_key = cb.storage_key
+      )
+      union all
+      select max(raw_size_bytes) as bytes
+      from file_versions
+      where blob_key is not null
+      group by blob_key
+    )
+  `).get() as
+    | { total: number | null }
+    | undefined;
+  const blobBytes = row?.total ?? 0;
+  const now = new Date().toISOString();
+  db.prepare("insert or replace into storage_usage(id, blob_bytes, recomputed_at) values (1, ?, ?)").run(blobBytes, now);
 }
 
 export function isV01Schema(db: RelayDbReader): boolean {

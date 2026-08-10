@@ -14,11 +14,7 @@ import {
 } from "../src/sync/crdtDocManager.js";
 import type { SyncTimerHost } from "../src/sync/syncServer.js";
 
-// Phase 4 of docs/superpowers/plans/2026-07-20-crdt-sync.md: CrdtDocManager unit tests. These
-// exercise the manager's own cache/compaction/limits/eviction mechanics directly against a real
-// (in-memory) RelayRepository, without going through the WS/ACL layer - that integration-level
-// coverage (handshake, ACL parity, fanout, stale epoch, lifecycle, materialization SLA via the
-// full app) lives in crdt-sync-flow.test.ts instead.
+// Covers CRDT cache, compaction, limits, and eviction.
 
 class FakeCrdtTimerHost implements SyncTimerHost {
   private nextHandle = 1;
@@ -305,8 +301,9 @@ describe("CrdtDocManager (Phase 4)", () => {
     expect(events).toHaveLength(0); // debounced - not yet.
 
     timers.runAllTimeouts();
-
-    expect(events).toHaveLength(1);
+    // materialize() is now async (Phase B's write seam adds a real await point), so the timer
+    // firing synchronously no longer guarantees onMaterialized has run yet.
+    await vi.waitFor(() => expect(events).toHaveLength(1));
     expect(events[0]).toMatchObject({ fileId, roomId: room.id, relativePath: "note.md", content: "materialize me" });
     const { content } = repo.readFileContent(room.id, "note.md");
     expect(content).toBe("materialize me");

@@ -3,12 +3,7 @@ import type WebSocket from "ws";
 import { createApp } from "../src/app.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
-// Phase 3 of docs/superpowers/plans/2026-07-20-crdt-sync.md: room-mode + document-metadata
-// delivery (contract 1.11). Capability negotiation (contract 1.2) is plumbed here too, but its
-// first *observable* behavior difference (fanout branching on capabilities.crdt) lands in Phase 4
-// alongside CrdtDocManager - there's nothing for a Phase-3-only test to observe there yet beyond
-// "hello with a capabilities field doesn't get rejected", which packages/protocol/src/
-// crdtProtocol.test.ts already covers at the type/round-trip level.
+// Covers CRDT room mode and document metadata delivery.
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
 

@@ -13,32 +13,12 @@ import type { FixedWindowRateLimiter } from "../security/rateLimiter.js";
 import { ConnectionRegistry, sendJson, type SyncConnection } from "./connectionRegistry.js";
 import { PresenceRegistry, type PresenceEntry, type PresenceTarget } from "./presenceRegistry.js";
 
-/**
- * Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
- *
- * Owns everything the registry deliberately doesn't: runtime validation of an unchecked wire
- * payload, authorization, identity stamping, snapshots, fanout, rate limiting, and lifecycle
- * cleanup. Nothing here writes to SQLite - presence is ephemeral by contract.
- *
- * Two things about this file are load-bearing and easy to regress:
- *
- * 1. **Every field is hand-validated.** The sync socket parses with an unchecked cast
- *    (`JSON.parse(raw) as SyncClientMessage`), so there is no schema layer to inherit. A malformed
- *    presence message must be *rejected*, never allowed to throw past `handleSet` - the outer socket
- *    handler treats an unhandled rejection as fatal and closes the connection, which would let
- *    cursor noise kill a healthy editing session.
- * 2. **A null cursor is cleanup, not an update.** It bypasses the rate limiter (a throttled client
- *    must still be able to retract its caret, or it strands a ghost on every peer) and it runs before
- *    any room/file lookup, so it stays idempotent even after the document was renamed or deleted.
- */
+/** Validates, authorizes, and fans out ephemeral presence updates. */
 
-/** Presence payloads are capped well below the 10 MiB WebSocket frame limit: a serialized relative
- *  position is a few dozen bytes, so this is ~2 orders of magnitude of headroom and still bounds a
- *  hostile client. */
+/** Bounds untrusted presence payloads below the WebSocket frame limit. */
 const MAX_PRESENCE_BYTES = 8 * 1024;
 
-/** Relative-position JSON is Yjs's shape, not ours, so it is validated structurally rather than
- *  field-by-field: plain JSON only, bounded depth, bounded total size. */
+/** Structural limits for Yjs relative-position JSON. */
 const MAX_CURSOR_DEPTH = 8;
 const MAX_CURSOR_NODES = 128;
 

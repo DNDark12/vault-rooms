@@ -1,6 +1,6 @@
 import { requestUrl, type RequestUrlParam } from "obsidian";
 import type { SecurityUpgradeInfo } from "@vault-rooms/protocol";
-import { pinnedRequest, type PinnedServerInfo } from "./pinnedTransport.js";
+import { pinnedRawRequest, pinnedRequest, type PinnedServerInfo } from "./pinnedTransport.js";
 import type { RelayFileApi } from "./syncClient.js";
 
 export type RoomSummary = {
@@ -13,10 +13,10 @@ export type RoomSummary = {
   conflictPolicy: "keep_both" | "owner_wins";
   permissions: string[];
   capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string; installed: boolean | null }>;
-  // CRDT room-mode flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11). The
-  // client-side type mirrors the server's toRoomResponse()/managedRoomResponse() shape; consumed
-  // starting Phase 5 (editor binding decides CRDT vs whole-file sync per this flag).
+  /** Selects CRDT or whole-file sync for eligible files. */
   crdtEnabled: boolean;
+  /** Current bytes referenced by this room; shared blobs count in each room. */
+  storedBytes: number;
   accessSummary?: {
     level: "reader" | "editor" | "custom";
     sources: Array<
@@ -205,6 +205,10 @@ export class RelayApiClient implements RelayFileApi {
     /** Owner-only: the address a teammate last reached this server on, used to spot a stale Public URL
      *  override after the machine's LAN address changed. Absent for non-owners and until someone connects. */
     observedClientHost?: { host: string; at: string } | null;
+    /** Authoritative server-wide stored-content usage. */
+    storageUsageBytes: number;
+    /** Configured server-wide stored-content ceiling. */
+    maxStoredContentBytes: number;
     teams: MyTeamSummary[];
   }> {
     return this.request("/api/me");
@@ -347,10 +351,7 @@ export class RelayApiClient implements RelayFileApi {
       mountName: string;
       conflictPolicy?: "keep_both" | "owner_wins";
       capabilities: Array<{ pluginId: string; displayName: string; mode: string; minVersion?: string }>;
-      // CRDT room-mode toggle (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11,
-      // Phase 6 UI). Optional so existing callers that never touch this field don't need updating -
-      // the server only applies the toggle transition when the field is present and differs from
-      // the room's current crdtEnabled.
+      /** Omit to preserve the room's current sync mode. */
       crdtEnabled?: boolean;
     }
   ): Promise<{ room: RoomSummary }> {
@@ -409,6 +410,28 @@ export class RelayApiClient implements RelayFileApi {
       method: "PUT",
       body: { relativePath, baseVersion, content }
     });
+  }
+
+  async readFileRaw(roomId: string, relativePath: string): Promise<Uint8Array> {
+    const response = await this.rawRequest(
+      `/api/rooms/${roomId}/files/raw?path=${encodeURIComponent(relativePath)}`,
+      "GET"
+    );
+    return new Uint8Array(response.arrayBuffer);
+  }
+
+  async writeFileRaw(
+    roomId: string,
+    relativePath: string,
+    baseVersion: number,
+    bytes: Uint8Array
+  ): Promise<{ ok: true; relativePath: string; version: number; sha256: string }> {
+    const response = await this.rawRequest(
+      `/api/rooms/${roomId}/files/raw?path=${encodeURIComponent(relativePath)}&baseVersion=${baseVersion}`,
+      "PUT",
+      bytes
+    );
+    return response.json as { ok: true; relativePath: string; version: number; sha256: string };
   }
 
   async deleteFile(roomId: string, relativePath: string, baseVersion: number): Promise<{ ok: true; relativePath: string; version: number }> {
@@ -473,6 +496,57 @@ export class RelayApiClient implements RelayFileApi {
     }
     this.onAuthenticated?.();
     return body as T;
+  }
+
+  private async rawRequest(
+    path: string,
+    method: "GET" | "PUT",
+    body?: Uint8Array,
+    allowPinnedRecovery = true
+  ): Promise<{ status: number; json: unknown; arrayBuffer: ArrayBuffer }> {
+    const headers = {
+      ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+      ...(body ? { "content-type": "application/octet-stream" } : {})
+    };
+    const requestBody = body
+      ? (body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer)
+      : undefined;
+    let response: Awaited<ReturnType<typeof pinnedRawRequest>> | Awaited<ReturnType<typeof requestUrl>>;
+    try {
+      response = this.pinned
+        ? await pinnedRawRequest(this.pinned, { url: `${this.baseUrl}${path}`, method, headers, body: requestBody })
+        : await requestUrl({ url: `${this.baseUrl}${path}`, method, headers, throw: false, body: requestBody });
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+        const decision = await this.onPinnedTransportFailure(normalized);
+        if (decision === "retry") {
+          return this.rawRequest(path, method, body, false);
+        }
+      }
+      throw normalized;
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let errorBody: unknown;
+      try {
+        errorBody = response.json;
+      } catch {
+        errorBody = undefined;
+      }
+      const error = toRelayError(errorBody);
+      if (error.code === "UNAUTHORIZED") {
+        this.onUnauthorized?.();
+      }
+      throw error;
+    }
+    this.onAuthenticated?.();
+    let json: unknown;
+    try {
+      json = response.json;
+    } catch {
+      json = undefined;
+    }
+    return { status: response.status, json, arrayBuffer: response.arrayBuffer };
   }
 }
 

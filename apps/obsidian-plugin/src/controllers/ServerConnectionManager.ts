@@ -20,12 +20,28 @@ import { activeServer, isOwnEmbeddedServerConnection, type ServerConnection } fr
 import { EmbeddedRelayServer, type EmbeddedServerStatus } from "../serverManager.js";
 import type { PluginContext } from "./PluginContext.js";
 import { userFacingError } from "../errorMessages.js";
+import {
+  LanDiscoveryResponder,
+  resolveLanDiscoveryClientInterface,
+  resolveLanDiscoveryInterface,
+  startLanDiscovery,
+  type LanDiscoverySearch
+} from "../lanDiscovery.js";
 
 type ServerConnectionManagerContext = Pick<
   PluginContext,
   "app" | "manifest" | "settings" | "saveSettings" | "renderOpenRoomsViews" | "openJoinServer" | "removeSavedConnection"
 > & {
   showPinMismatch?: (server: ServerConnection, presentedSpkiSha256: string) => void;
+  createLanDiscoveryResponder?: (endpoint: {
+    serverId: string;
+    transport: "http" | "https";
+    port: number;
+    interfaceAddress?: string;
+  }) => Pick<LanDiscoveryResponder, "start" | "stop">;
+  resolveLanDiscoveryInterface?: (baseUrl: string) => Promise<string | undefined>;
+  startLanDiscovery?: (serverId: string, interfaceAddress?: string) => LanDiscoverySearch;
+  resolveLanDiscoveryClientInterface?: (baseUrl: string) => Promise<string | undefined>;
 };
 
 export type ServerActionOptions = { notify?: boolean };
@@ -35,6 +51,8 @@ export class ServerConnectionManager {
   private embeddedServer: EmbeddedRelayServer | null = null;
   private readonly lanShareReachability: LanShareReachabilityMonitor;
   private suppressLanShareRender = false;
+  private lanDiscoveryResponder: Pick<LanDiscoveryResponder, "start" | "stop"> | null = null;
+  private lanDiscoveryState: { available: boolean; error?: string } = { available: false };
 
   constructor(private readonly ctx: ServerConnectionManagerContext) {
     this.lanShareReachability = new LanShareReachabilityMonitor(probeLanShareTarget, () => {
@@ -45,7 +63,14 @@ export class ServerConnectionManager {
   }
 
   getServerStatus(): EmbeddedServerStatus {
-    return this.embeddedServer?.getStatus() ?? { running: false };
+    const status = this.embeddedServer?.getStatus() ?? { running: false };
+    return status.running
+      ? {
+          ...status,
+          lanDiscoveryAvailable: this.lanDiscoveryState.available,
+          ...(this.lanDiscoveryState.error ? { lanDiscoveryError: this.lanDiscoveryState.error } : {})
+        }
+      : status;
   }
 
   async startEmbeddedServer(options: ServerActionOptions = {}): Promise<EmbeddedServerStatus> {
@@ -55,11 +80,43 @@ export class ServerConnectionManager {
     const status = await server.start(this.ctx.settings.server);
     this.ctx.renderOpenRoomsViews();
     if (status.running) {
+      if (!this.lanDiscoveryResponder) {
+        const url = new URL(status.localUrl);
+        const endpoint = {
+          serverId: status.serverId,
+          transport: url.protocol === "https:" ? "https" as const : "http" as const,
+          port: Number.parseInt(url.port, 10),
+          interfaceAddress: status.lanUrl
+            ? await (this.ctx.resolveLanDiscoveryInterface ?? resolveLanDiscoveryInterface)(status.lanUrl)
+            : undefined
+        };
+        const responder = this.ctx.createLanDiscoveryResponder?.(endpoint) ?? new LanDiscoveryResponder(endpoint);
+        this.lanDiscoveryResponder = responder;
+        try {
+          await responder.start();
+          this.lanDiscoveryState = { available: true };
+        } catch (error) {
+          responder.stop();
+          this.lanDiscoveryResponder = null;
+          this.lanDiscoveryState = {
+            available: false,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      }
       const pinnedPortChanged = !this.ctx.settings.server.port && status.port !== this.ctx.settings.server.pinnedPort;
+      const embeddedConnection = this.ctx.settings.servers.find(
+        (saved) => saved.isServerOwner && saved.serverId === status.serverId
+      );
+      const embeddedMarkerChanged =
+        embeddedConnection !== undefined && this.ctx.settings.embeddedServerConnectionId !== embeddedConnection.id;
       if (pinnedPortChanged) {
         this.ctx.settings.server.pinnedPort = status.port;
       }
-      if (pinnedPortChanged || previousTlsPort !== this.ctx.settings.server.tlsPort) {
+      if (embeddedMarkerChanged) {
+        this.ctx.settings.embeddedServerConnectionId = embeddedConnection.id;
+      }
+      if (pinnedPortChanged || previousTlsPort !== this.ctx.settings.server.tlsPort || embeddedMarkerChanged) {
         await this.ctx.saveSettings();
       }
       if (status.portPinChanged) {
@@ -78,11 +135,15 @@ export class ServerConnectionManager {
         new Notice("Vault Rooms is ready to share.");
       }
       this.refreshLanShareReachability();
+      this.ctx.renderOpenRoomsViews();
     }
-    return status;
+    return this.getServerStatus();
   }
 
   async stopEmbeddedServer(options: ServerActionOptions = {}): Promise<void> {
+    this.lanDiscoveryResponder?.stop();
+    this.lanDiscoveryResponder = null;
+    this.lanDiscoveryState = { available: false };
     await this.embeddedServer?.stop();
     this.lanShareReachability.clear();
     if (options.notify !== false) {
@@ -96,6 +157,9 @@ export class ServerConnectionManager {
    * method also suppresses the reachability-clear render callback.
    */
   async stopSilently(): Promise<void> {
+    this.lanDiscoveryResponder?.stop();
+    this.lanDiscoveryResponder = null;
+    this.lanDiscoveryState = { available: false };
     await this.embeddedServer?.stop();
     this.suppressLanShareRender = true;
     try {
@@ -168,6 +232,123 @@ export class ServerConnectionManager {
       return activeServers.find((server) => server.serverId === serverId);
     }
     return activeServers.find((server) => normalizeBaseUrl(server.baseUrl) === normalizeBaseUrl(baseUrl));
+  }
+
+  async updateServerAddress(serverId: string, address: string): Promise<ServerConnection> {
+    const server = this.ctx.settings.servers.find((candidate) => candidate.id === serverId);
+    if (!server) {
+      throw new Error("Saved server not found.");
+    }
+    this.assertRemoteConnection(server);
+    const baseUrl = normalizeReplacementServerUrl(address, server);
+    const identity = await new RelayApiClient(
+      baseUrl,
+      server.deviceToken,
+      undefined,
+      pinnedInfoForServer(server)
+    ).me();
+    if (server.serverId && identity.serverId !== server.serverId) {
+      throw new Error("That address belongs to a different Vault Rooms server.");
+    }
+    if (identity.user.id !== server.userId || identity.device.id !== server.deviceId) {
+      throw new Error("The saved login was not accepted as the same user and device at that address.");
+    }
+    const candidate: ServerConnection = {
+      ...server,
+      baseUrl,
+      serverId: identity.serverId ?? server.serverId,
+      lastSuccessfulConnectionAt: new Date().toISOString()
+    };
+    await this.persistConnectionReplacement(server, candidate);
+    return candidate;
+  }
+
+  async findServerOnLan(connectionId: string): Promise<ServerConnection> {
+    const server = this.ctx.settings.servers.find((candidate) => candidate.id === connectionId);
+    if (!server) {
+      throw new Error("Saved server not found.");
+    }
+    this.assertRemoteConnection(server);
+    if (server.securityMode !== "pinned-tls") {
+      throw new Error("Find server on LAN requires pinned TLS. Update this legacy server address manually.");
+    }
+    if (!server.serverId) {
+      throw new Error("This saved server has no stable identity. Use a fresh invite link.");
+    }
+    const pin = pinnedInfoForServer(server);
+    if (!pin) {
+      throw new Error("This saved server is missing pinned TLS identity data. Use a fresh invite link.");
+    }
+    const interfaceAddress = await (
+      this.ctx.resolveLanDiscoveryClientInterface ?? resolveLanDiscoveryClientInterface
+    )(server.baseUrl);
+    const search = (this.ctx.startLanDiscovery ?? startLanDiscovery)(server.serverId, interfaceAddress);
+    const candidates = await search.result;
+    if (candidates.length === 0) {
+      throw new Error("No matching Vault Rooms server responded on this LAN.");
+    }
+
+    let verifiedBaseUrl: string | undefined;
+    for (const candidate of candidates) {
+      if (candidate.transport !== "https") continue;
+      try {
+        const identity = await new RelayApiClient(
+          candidate.baseUrl,
+          server.deviceToken,
+          undefined,
+          pin
+        ).me();
+        if (
+          identity.serverId === server.serverId &&
+          identity.user.id === server.userId &&
+          identity.device.id === server.deviceId
+        ) {
+          verifiedBaseUrl = candidate.baseUrl;
+          break;
+        }
+      } catch {
+        // Try another interface advertised by the same host.
+      }
+    }
+    if (!verifiedBaseUrl) {
+      throw new Error("Discovered a response, but could not verify the saved server identity.");
+    }
+
+    const candidate: ServerConnection = {
+      ...server,
+      baseUrl: verifiedBaseUrl,
+      lastSuccessfulConnectionAt: new Date().toISOString()
+    };
+    await this.persistConnectionReplacement(server, candidate);
+    return candidate;
+  }
+
+  async findInviteServerOnLan(pin: PinnedInviteInfo, advertisedBaseUrl?: string): Promise<string> {
+    assertPinMaterial(pin);
+    const interfaceAddress = advertisedBaseUrl
+      ? await (this.ctx.resolveLanDiscoveryClientInterface ?? resolveLanDiscoveryClientInterface)(advertisedBaseUrl)
+      : undefined;
+    const search = (this.ctx.startLanDiscovery ?? startLanDiscovery)(pin.serverId, interfaceAddress);
+    const candidates = await search.result;
+    if (candidates.length === 0) {
+      throw new Error("No matching Vault Rooms server responded on this LAN.");
+    }
+    for (const candidate of candidates) {
+      if (candidate.transport !== "https") continue;
+      try {
+        await new RelayApiClient(candidate.baseUrl, undefined, undefined, pin).testConnection();
+        return candidate.baseUrl;
+      } catch {
+        // Try the next interface.
+      }
+    }
+    throw new Error("Discovered a response, but could not verify the invite server identity.");
+  }
+
+  private assertRemoteConnection(server: ServerConnection): void {
+    if (server.id === this.ownEmbeddedServerId()) {
+      throw new Error("Change this computer's advertised address in Public URL override.");
+    }
   }
 
   async resolveInviteServer(baseUrl: string, serverId?: string): Promise<ServerConnection | undefined> {
@@ -398,6 +579,11 @@ export class ServerConnectionManager {
     return this.getOrCreateEmbeddedServer().revokeRecoveredOwnerDevice(deviceId);
   }
 
+  /** Compacts the embedded relay database. */
+  reclaimEmbeddedStorage(): Promise<void> {
+    return this.getOrCreateEmbeddedServer().reclaimStorage();
+  }
+
   async restoreEmbeddedLegacyV01Backup(): Promise<EmbeddedServerStatus> {
     const status = await this.getOrCreateEmbeddedServer().restoreLegacyV01Backup();
     this.ctx.renderOpenRoomsViews();
@@ -418,6 +604,10 @@ export class ServerConnectionManager {
   }
 
   ownEmbeddedServerId(): string | undefined {
+    const markedId = this.ctx.settings.embeddedServerConnectionId;
+    if (markedId && this.ctx.settings.servers.some((server) => server.id === markedId)) {
+      return markedId;
+    }
     return this.ctx.settings.servers.find(isOwnEmbeddedServerConnection)?.id;
   }
 
@@ -569,4 +759,23 @@ export function pinnedInfoForServer(server: ServerConnection): PinnedServerInfo 
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+export function normalizeReplacementServerUrl(value: string, server: ServerConnection): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error("Enter the server's new address.");
+  }
+  const current = new URL(server.baseUrl);
+  const candidate = new URL(trimmed.includes("://") ? trimmed : `${current.protocol}//${trimmed}`);
+  if (candidate.protocol !== current.protocol) {
+    throw new Error(`This saved connection must keep using ${current.protocol.replace(":", "")}.`);
+  }
+  if (candidate.username || candidate.password || candidate.search || candidate.hash || candidate.pathname !== "/") {
+    throw new Error("Enter only a server hostname or base URL, without credentials, query text, or a path.");
+  }
+  if (!candidate.port && current.port) {
+    candidate.port = current.port;
+  }
+  return candidate.origin;
 }

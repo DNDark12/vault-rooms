@@ -10,6 +10,7 @@ export type EnvLike = {
   HOST?: string;
   PUBLIC_URL?: string;
   MAX_FILE_BYTES?: string;
+  MAX_STORED_CONTENT_BYTES?: string;
   ALLOW_REMOTE_BOOTSTRAP?: string;
   TLS_MODE?: string;
   TLS_PORT?: string;
@@ -27,6 +28,8 @@ export type ServerRuntimeConfig = {
   port: number;
   publicUrl: string;
   maxFileBytes: number;
+  /** Total stored-content limit; excludes SQLite metadata and free pages. */
+  maxStoredContentBytes: number;
   allowRemoteBootstrap: boolean;
   tlsMode: TlsMode;
   tlsPort?: number;
@@ -97,7 +100,11 @@ export async function resolveRuntimeConfig(
     host,
     port,
     publicUrl,
-    maxFileBytes: Number.parseInt(env.MAX_FILE_BYTES ?? "5242880", 10),
+    maxFileBytes: env.MAX_FILE_BYTES === undefined ? 5242880 : parseByteLimit(env.MAX_FILE_BYTES, "MAX_FILE_BYTES"),
+    maxStoredContentBytes:
+      env.MAX_STORED_CONTENT_BYTES === undefined
+        ? 268435456
+        : parseByteLimit(env.MAX_STORED_CONTENT_BYTES, "MAX_STORED_CONTENT_BYTES"),
     allowRemoteBootstrap: env.ALLOW_REMOTE_BOOTSTRAP === "true",
     tlsMode,
     ...(tlsPort === undefined ? {} : { tlsPort }),
@@ -145,6 +152,21 @@ function parsePort(value: string): number {
     throw new Error(`Invalid PORT value: ${value}`);
   }
   return port;
+}
+
+/**
+ * Strictly parses a positive-byte-count env var, failing startup instead of silently misbehaving:
+ * bare `Number.parseInt` turns "garbage" into `NaN` (making every quota comparison silently `false`,
+ * i.e. unlimited), "1junk" into `1`, and accepts "0"/negatives. Round-tripping the parsed value back
+ * to a string catches all three.
+ */
+function parseByteLimit(value: string, envVarName: string): number {
+  const trimmed = value.trim();
+  const bytes = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || String(bytes) !== trimmed) {
+    throw new Error(`Invalid ${envVarName} value: ${value}`);
+  }
+  return bytes;
 }
 
 function parseTlsMode(value: string | undefined): TlsMode {

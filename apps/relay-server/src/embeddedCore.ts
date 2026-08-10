@@ -17,14 +17,19 @@ export * from "./security/rotation.js";
 export { ConnectionRegistry } from "./sync/connectionRegistry.js";
 export { handleSyncSocket } from "./sync/syncServer.js";
 export type { SyncTimerHost } from "./sync/syncServer.js";
-// Live cursors (docs/superpowers/specs/2026-07-28-live-cursors-design.md). Both runtimes share one
-// PresenceService instance out of createRelayCore - never construct a second registry, or the two
-// halves of the relay would each own a partial view of who is editing what.
+// Both runtimes share the same presence service and registry.
 export { PresenceRegistry } from "./sync/presenceRegistry.js";
 export type { PresenceEntry, PresenceTarget } from "./sync/presenceRegistry.js";
 export { PresenceService } from "./sync/presenceService.js";
 export { CrdtDocManager, CRDT_TEXT_KEY } from "./sync/crdtDocManager.js";
 export type { CrdtMaterializedEvent, CrdtUpdatedBy } from "./sync/crdtDocManager.js";
-export { createRelayCore, createCrdtMaterializedHandler } from "./relayCore.js";
+export { createRelayCore, createCrdtMaterializedHandler, createCrdtRepositoryPort } from "./relayCore.js";
 export type { PreparedStatement, RelayDb, SqlJsLocator, SqlRow } from "./db/sqlJsAdapter.js";
 export type { RelayCoreOptions } from "./relayCore.js";
+export { scheduleStorageBackfill, reclaimDatabaseSpace } from "./services/storageMaintenance.js";
+export type { StorageBackfillHandle, StorageMaintenanceTimerHost } from "./services/storageMaintenance.js";
+// Export only runtime-neutral blob helpers to the embedded bundle.
+export { blobKeyForBytes, isValidBlobKey, shardedRelativePath } from "./storage/blobStore.js";
+export type { BlobStore } from "./storage/blobStore.js";
+export type { ContentWriteService } from "./storage/contentWriteService.js";
+export { isRawHttpResponse } from "./services/rawHttpResponse.js";

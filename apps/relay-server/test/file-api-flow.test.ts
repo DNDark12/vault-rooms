@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import type { RelayRepository } from "../src/db/repositories/relayRepository.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
 async function setupFileFlow() {
@@ -327,5 +328,105 @@ describe("file REST API", () => {
     });
     expect(memberStale.statusCode).toBe(409);
     expect(memberStale.json().error.code).toBe("VERSION_CONFLICT");
+  });
+});
+
+describe("storage quota concurrency over the real standalone Fastify runtime (re-review fix)", () => {
+  it("cannot be crossed by two real concurrent PUT requests dispatched through Fastify, not just two sequential repository calls", async () => {
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787", maxStoredContentBytes: 30 });
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [], crdtEnabled: false }
+      })
+    ).json().room;
+
+    // Both requests go through Fastify's actual async dispatch (routing, hooks, JSON parsing) before
+    // either reaches the synchronous repository transaction - real concurrency at the HTTP layer, not
+    // just two calls into the same synchronous function.
+    const [responseA, responseB] = await Promise.all([
+      app.inject({
+        method: "PUT",
+        url: `/api/rooms/${room.id}/files/content`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { relativePath: "a.md", baseVersion: 0, content: "0".repeat(20) }
+      }),
+      app.inject({
+        method: "PUT",
+        url: `/api/rooms/${room.id}/files/content`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { relativePath: "b.md", baseVersion: 0, content: "1".repeat(20) }
+      })
+    ]);
+
+    expect([responseA.statusCode, responseB.statusCode].sort()).toEqual([200, 413]);
+    const rejected = responseA.statusCode === 413 ? responseA : responseB;
+    expect(rejected.json().error.code).toBe("STORAGE_QUOTA_EXCEEDED");
+
+    const repo = (app as unknown as { testRepo: RelayRepository }).testRepo;
+    expect(repo.getStorageUsageBytes()).toBe(20); // the 30-byte ceiling was never crossed
+    await app.close();
+  });
+});
+
+describe("0.2.6 client compatibility over the real REST path (gate 10, re-review fix)", () => {
+  it("serves identical hash/content/version after backfill and orphan sweep run, invisibly to a plain REST read", async () => {
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787" });
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [], crdtEnabled: false }
+      })
+    ).json().room;
+
+    const write = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "notes.md", baseVersion: 0, content: "hello from a 0.2.6 client" }
+    });
+    expect(write.statusCode).toBe(200);
+    const { version: expectedVersion, sha256: expectedSha256 } = write.json();
+
+    // A plain REST read, exactly what a 0.2.6 client (no extendedBinarySync, no knowledge that
+    // retention/backfill/sweep even exist) does.
+    const before = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=notes.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(before.json()).toMatchObject({ version: expectedVersion, sha256: expectedSha256, content: "hello from a 0.2.6 client" });
+
+    // Run the same maintenance a real startup schedules (backfill to completion, then orphan sweep),
+    // directly against the app's live repository - there is no HTTP surface for this on purpose.
+    const repo = (app as unknown as { testRepo: RelayRepository }).testRepo;
+    let done = false;
+    while (!done) {
+      done = repo.backfillStorageBatch(50).done;
+    }
+    repo.sweepOrphanedBlobsBatch(50);
+
+    const after = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=notes.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(after.json()).toEqual(before.json());
+    expect(after.json()).toMatchObject({ version: expectedVersion, sha256: expectedSha256, content: "hello from a 0.2.6 client" });
+
+    // No conflict-copy-shaped extra file was fabricated as a side effect of maintenance.
+    const list = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(list.json().files.map((file: { relativePath: string }) => file.relativePath)).toEqual(["notes.md"]);
+    await app.close();
   });
 });

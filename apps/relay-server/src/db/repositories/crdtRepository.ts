@@ -8,12 +8,7 @@ export type CrdtSnapshot = {
   upToSeq: number;
 };
 
-/** Owns the CRDT update log and compaction snapshots (docs/superpowers/plans/2026-07-20-crdt-sync.md
- *  Phase 2/4). Every method is keyed by `(fileId, epoch)` so a purged/superseded epoch's rows are
- *  never ambiguous with a later incarnation's (contract 1.5/1.9). This repository does not itself
- *  decide *when* to bump an epoch or compact - that orchestration lives in `CrdtDocManager` (Phase
- *  4) and in `RelayFileRepository.deleteFile` (contract 1.5's "delete wins, bump immediately"); this
- *  class only provides the durable primitives those callers use. */
+/** Stores CRDT updates and snapshots by file and epoch. */
 export class RelayCrdtRepository {
   constructor(private readonly db: RelayDb) {}
 

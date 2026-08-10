@@ -4,9 +4,17 @@ import { createAppWithDb } from "./appCore.js";
 import { detectLanIp, resolveRuntimeConfig } from "./config.js";
 import { openRelayDb } from "./db/db.js";
 import { createRelayCore } from "./relayCore.js";
+import { createFsBlobStore } from "./storage/fsBlobStore.js";
 import { createFsIdentityStore } from "./security/fsIdentityStore.js";
 import { ensureServerIdentity, resolveServerIdForIdentityStore } from "./security/identityLifecycle.js";
 import { tlsCertificateChainPem } from "./security/identity.js";
+import { scheduleStorageBackfill, type StorageMaintenanceTimerHost } from "./services/storageMaintenance.js";
+
+// Standalone timer host.
+const nodeStorageTimerHost: StorageMaintenanceTimerHost = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout)
+};
 
 export function serverIdentity(): string {
   return `${PRODUCT_NAME} v${PRODUCT_VERSION}`;
@@ -66,7 +74,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const db = await openRelayDb("data/relay.sqlite");
-  const core = createRelayCore(db, { maxFileBytes: config.maxFileBytes });
+  const core = createRelayCore(db, {
+    maxFileBytes: config.maxFileBytes,
+    maxStoredContentBytes: config.maxStoredContentBytes,
+    blobStore: createFsBlobStore("data/blobs")
+  });
+  // Run resumable storage maintenance off the startup path.
+  scheduleStorageBackfill(core.repo, nodeStorageTimerHost, core.contentWriteService);
   const identityStore = config.tlsMode === "pinned" ? createFsIdentityStore(config.identityDir) : null;
   // The identity store binds to this ID. Make it durable before any key file can be created so a
   // crash cannot leave identity.json referring to an ID that vanished with a delayed DB flush.

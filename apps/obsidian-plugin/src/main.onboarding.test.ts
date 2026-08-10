@@ -57,6 +57,16 @@ beforeEach(() => {
 });
 
 describe("VaultRoomsPlugin guided onboarding orchestration", () => {
+  it("recognizes its embedded server by the persisted marker after its address changes", () => {
+    const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
+    const ownServer = markedServerConnection({ id: "local", baseUrl: "https://my-vault.local:8788" });
+    plugin.settings = settingsWithServer(ownServer, "local");
+    (plugin as unknown as { serverConnectionManager: { getActiveServer: () => ServerConnection } })
+      .serverConnectionManager = { getActiveServer: () => ownServer };
+
+    expect(plugin.activeServerIsOwnEmbeddedServer()).toBe(true);
+  });
+
   it("rejects loopback before settings or server side effects", async () => {
     const harness = onboardingPlugin({ running: false });
 
@@ -203,6 +213,36 @@ describe("VaultRoomsPlugin guided onboarding orchestration", () => {
     expect(modalMocks.guidedOpen).not.toHaveBeenCalled();
   });
 });
+
+function markedServerConnection(overrides: Partial<ServerConnection> = {}): ServerConnection {
+  return {
+    id: "server_1",
+    baseUrl: "http://127.0.0.1:8787",
+    userId: "user_1",
+    userDisplayName: "Owner",
+    deviceId: "device_1",
+    deviceName: "Mac",
+    deviceToken: "token",
+    isServerOwner: true,
+    status: "active",
+    securityMode: "plain",
+    securityState: "ok",
+    ...overrides
+  };
+}
+
+function settingsWithServer(server: ServerConnection, embeddedServerConnectionId: string): VaultRoomsSettings {
+  return {
+    servers: [server],
+    activeServerId: server.id,
+    embeddedServerConnectionId,
+    mountRoot: "Vault Rooms",
+    debounceMs: 300,
+    mountedRooms: {},
+    roomMountPaths: {},
+    server: { maxFileBytes: 1024, autoStart: false }
+  };
+}
 
 function onboardingPlugin(input: {
   running: boolean;
@@ -362,6 +402,7 @@ function roomSummary(overrides: Partial<RoomSummary> = {}): RoomSummary {
     permissions: ["room:read", "room:write", "file:read", "file:write", "sync:subscribe", "sync:push"],
     capabilities: [],
     crdtEnabled: false,
+    storedBytes: 0,
     ...overrides
   };
 }

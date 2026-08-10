@@ -1,19 +1,6 @@
 // @vitest-environment jsdom
 //
-// Phase 0.2 spike (docs/superpowers/plans/2026-07-20-crdt-sync.md) - retires spec open questions
-// 1 + 6: does y-codemirror.next's `yCollab` bind cleanly to a real CM6 `EditorView`, do concurrent
-// edits from two peers merge instead of clobbering, and does `Y.UndoManager` scope undo to local
-// edits only (not eat a remote peer's edit that arrived in between)?
-//
-// IMPORTANT SCOPE NOTE: this is the automatable half of Task 0.2. It proves the binding mechanism
-// works against real `@codemirror/state`/`@codemirror/view` and real `yjs`/`y-codemirror.next`
-// objects, using jsdom for the DOM `EditorView` needs. It is NOT a substitute for Task 0.2 Step 3's
-// mandatory two-real-vault manual smoke test on an actual LAN inside real Obsidian - that requires
-// physical hardware this environment does not have, and remains an open gate blocking Phase 2+
-// until a human runs it. See the plan's Task 0.2 verification record.
-//
-// This file is a spike, not the production binding - Phase 5/6 write the real
-// apps/obsidian-plugin/src/crdtEditorBinding.ts informed by what's learned here.
+// Verifies CM6 collaboration and local-only undo behavior.
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";

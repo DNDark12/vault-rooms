@@ -46,6 +46,7 @@ vi.mock("obsidian", () => {
   }
   return {
     ItemView,
+    Modal: class Modal { readonly contentEl = document.createElement("div"); },
     Notice: class Notice {},
     Setting,
     WorkspaceLeaf: class WorkspaceLeaf {}
@@ -54,7 +55,11 @@ vi.mock("obsidian", () => {
 
 vi.mock("../modals/ConfirmModal.js", () => ({ confirmModal: vi.fn(async () => true) }));
 vi.mock("../controllers/ServerConnectionManager.js", () => ({
-  pinnedInfoForServer: vi.fn(() => undefined)
+  pinnedInfoForServer: vi.fn((server: ServerConnection) =>
+    server.securityMode === "pinned-tls"
+      ? { tlsName: "tls", identityCertificateDer: "cert", pinnedIdentitySpkiSha256: "pin" }
+      : undefined
+  )
 }));
 vi.mock("../modals/ConnectionDiagnosticsModal.js", () => ({
   ConnectionDiagnosticsModal: class ConnectionDiagnosticsModal { open(): void {} }
@@ -117,6 +122,7 @@ function room(overrides: Partial<RoomSummary> = {}): RoomSummary {
     permissions: ["room:read", "room:write"],
     capabilities: [],
     crdtEnabled: false,
+    storedBytes: 0,
     ...overrides
   };
 }
@@ -136,6 +142,8 @@ type HarnessOptions = {
   roomAcl?: Awaited<ReturnType<VaultRoomsViewTestPlugin["listRoomAcl"]>>;
   lanUrl?: string | null;
   serverRunning?: boolean;
+  lanDiscoveryAvailable?: boolean;
+  lanDiscoveryError?: string;
   auditEvents?: AuditEventSummary[];
 };
 
@@ -184,12 +192,15 @@ function harness(options: HarnessOptions | boolean = {}) {
       bootstrapped: true,
       lanUrl: normalized.lanUrl === null ? undefined : normalized.lanUrl ?? "http://192.168.1.20:8787",
       localUrl: active.baseUrl,
+      lanDiscoveryAvailable: normalized.lanDiscoveryAvailable ?? true,
+      ...(normalized.lanDiscoveryError ? { lanDiscoveryError: normalized.lanDiscoveryError } : {}),
       legacyV01BackupAvailable: false
     }),
     getSyncState: () => serverRunning ? "connected" : "disconnected",
     hasConnectedActiveServerThisSession: () => true,
     getLanShareReachability: () => ({ status: "reachable" }),
     getObservedClientHost: () => null,
+    getStorageStatus: () => undefined,
     hasOwnServer: () => normalized.hasOwnServer ?? true,
     ownEmbeddedServerId: () => "local",
     activeServerIsOwnEmbeddedServer: () =>
@@ -228,6 +239,7 @@ function harness(options: HarnessOptions | boolean = {}) {
       offset: 0
     })),
     diagnoseConnection: vi.fn(),
+    findServerOnLan: vi.fn(),
     revokeFriend: vi.fn(),
     createTeam: vi.fn(),
     addFriendToTeam: vi.fn(),
@@ -240,6 +252,21 @@ function harness(options: HarnessOptions | boolean = {}) {
 }
 
 describe("VaultRoomsView UX B", () => {
+  it("does not show remote address controls for the marked local server after it advertises a hostname", () => {
+    const { view } = harness({
+      active: server({ baseUrl: "https://host.local:8788", securityMode: "pinned-tls" }),
+      isOwnEmbedded: true
+    });
+
+    view.render();
+    Array.from(view.containerEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "Connection details")?.click();
+
+    expect(view.containerEl.textContent).toContain("Pause sharing");
+    expect(view.containerEl.textContent).not.toContain("Update address");
+    expect(view.containerEl.textContent).not.toContain("Test connection");
+  });
+
   it("renders one syncing chip and three accessible tabs", () => {
     const { view } = harness();
     view.render();
@@ -403,6 +430,70 @@ describe("VaultRoomsView UX B", () => {
     expect(details?.textContent).toContain("Switch");
   });
 
+  it("does not render the embedded server as a remote saved connection", () => {
+    const local = server({ id: "local", baseUrl: "https://127.0.0.1:8788" });
+    const { view } = harness({
+      active: server({
+        id: "remote",
+        baseUrl: "https://192.168.1.30:8788",
+        isServerOwner: false,
+        userDisplayName: "Remote member"
+      }),
+      savedServers: [local],
+      isOwnEmbedded: false,
+      serverRunning: false
+    });
+    view.render();
+    Array.from(view.containerEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "Connection details")?.click();
+
+    const savedCards = Array.from(view.containerEl.querySelectorAll(".vault-rooms-connection-card"))
+      .filter((card) => card.textContent?.includes(PANEL_COPY.connection.thisComputer));
+    expect(savedCards).toHaveLength(0);
+    expect(view.containerEl.textContent).toContain("Sharing from this computer");
+    expect(view.containerEl.textContent).toContain("Start sharing");
+  });
+
+  it("offers manual LAN discovery only for a remote pinned server", () => {
+    const pinned = server({
+      id: "pinned",
+      baseUrl: "https://192.168.1.30:8788",
+      isServerOwner: false,
+      securityMode: "pinned-tls",
+      serverId: "srv_pinned",
+      serverOwnerDisplayName: "Pinned owner",
+      tlsName: "srv-pinned.vault-rooms.internal",
+      identityCertificateDer: "cert",
+      pinnedIdentitySpkiSha256: "pin"
+    });
+    const plain = server({
+      id: "plain",
+      baseUrl: "http://192.168.1.31:8787",
+      isServerOwner: false,
+      securityMode: "plain",
+      serverId: "srv_plain",
+      serverOwnerDisplayName: "Plain owner"
+    });
+    const { view, plugin } = harness({ savedServers: [pinned, plain] });
+    view.render();
+    Array.from(view.containerEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "Connection details")?.click();
+
+    const pinnedCard = Array.from(view.containerEl.querySelectorAll(".vault-rooms-connection-card"))
+      .find((card) => card.textContent?.includes("Pinned owner"));
+    const plainCard = Array.from(view.containerEl.querySelectorAll(".vault-rooms-connection-card"))
+      .find((card) => card.textContent?.includes("Plain owner"));
+    const findButton = Array.from(pinnedCard?.querySelectorAll("button") ?? [])
+      .find((button) => button.textContent === "Find server on LAN");
+
+    expect(findButton).toBeDefined();
+    expect(Array.from(plainCard?.querySelectorAll("button") ?? []).map((button) => button.textContent))
+      .not.toContain("Find server on LAN");
+    expect(plainCard?.textContent).toContain("Secure LAN discovery requires pinned TLS");
+    findButton?.click();
+    expect(plugin.findServerOnLan).toHaveBeenCalledWith("pinned");
+  });
+
   it("hides the localhost address for this computer's server", () => {
     const { view } = harness();
     view.render();
@@ -425,6 +516,15 @@ describe("VaultRoomsView UX B", () => {
     expect(details?.textContent).not.toContain("127.0.0.1");
     expect(details?.textContent).toContain("No LAN address is set");
     expect(details?.textContent).toContain("Settings → Vault Rooms → Relay server");
+  });
+
+  it("shows whether teammates can discover this running server", () => {
+    const { view } = harness({ lanDiscoveryAvailable: false, lanDiscoveryError: "multicast unavailable" });
+    view.render();
+    Array.from(view.containerEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "Connection details")?.click();
+
+    expect(view.containerEl.textContent).toContain("LAN discovery unavailable: multicast unavailable");
   });
 
   it("drives team Manage and destructive actions from policy and listed members", () => {

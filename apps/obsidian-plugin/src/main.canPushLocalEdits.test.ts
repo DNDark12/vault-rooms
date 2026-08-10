@@ -134,7 +134,8 @@ describe("VaultRoomsPlugin.watchMountedRoom canPushLocalEdits gate", () => {
               conflictPolicy: "keep_both",
               permissions: options.visibleRoomPermissions,
               capabilities: [],
-              crdtEnabled: false
+              crdtEnabled: false,
+              storedBytes: 0
             }
           ];
     const ensureSession = vi.fn().mockResolvedValue(undefined);

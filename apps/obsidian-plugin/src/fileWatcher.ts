@@ -43,21 +43,7 @@ export function isWatchableChange(event: VaultChangeEvent, room: MountedRoomStat
   return relativePathIfWatchable(event.path, room, configDir);
 }
 
-/**
- * Decides whether a local vault change to `relativePath` in a CRDT-enabled room must be routed
- * through the CRDT lane (crdtSession.ts) instead of the whole-file CAS lane (pushCoordinator.ts) -
- * per CLAUDE.md's dual-lane invariant, CRDT files must never go through both.
- *
- * Only "create"/"modify" of a `.md` path route to the CRDT lane: a create is the client's
- * first-create flow (contract 1.10, `crdt_create`), and a modify is normally already captured
- * live by the bound CM6 editor (see crdtEditorBinding.ts) - routing the resulting vault "modify"
- * event here too lets an *unbound* file (edited by something that doesn't speak CRDT while the
- * plugin's editor binding wasn't attached, e.g. another app, or the file just isn't open) still get
- * reconciled. A "delete" always stays on the CAS lane regardless of room mode: there is no separate
- * CRDT delete message (contract 1.5's destructive epoch-bump lifecycle is driven by the existing
- * `file:delete`/REST delete path, which the server already handles), so excluding "delete" here
- * would silently drop the request to delete the file server-side.
- */
+/** Routes Markdown create/modify events through CRDT; deletes stay on the CAS lane. */
 export function isCrdtManagedLocalChange(room: { crdtEnabled: boolean }, eventType: "create" | "modify" | "delete", relativePath: string): boolean {
   return room.crdtEnabled && eventType !== "delete" && isCrdtEligiblePath(relativePath);
 }
@@ -89,15 +75,7 @@ export function classifyRenameEvent(oldPath: string, newPath: string, room: Moun
   return { kind: "ignore" };
 }
 
-/**
- * Attached to the synthetic delete/create pair `registerMountedRoomWatcher` emits for a rename
- * fully inside a room (fourth hardware-testing round, 2026-07-23) - lets a CRDT-aware caller
- * recognize "these two calls are actually one rename" and short-circuit them into a single atomic
- * `crdt_rename` (preserving the file's identity/epoch/history) instead of the old delete-old+
- * create-new handling, without changing what any *other* caller (the legacy CAS lane, a non-CRDT
- * room) receives - both calls still fire exactly as before, so ignoring this hint is always safe
- * and behavior-preserving.
- */
+/** Correlates the synthetic delete/create events emitted for one rename. */
 export type RenameHint = { renamedToRelativePath: string } | { renamedFromRelativePath: string };
 
 /** Returns an unsubscribe function - callers must invoke it when the room is unmounted, or the

@@ -130,9 +130,9 @@ describe("panelModel", () => {
     const descriptor = panelModel({
       ...baseState(),
       rooms: [
-        { id: "active", name: "Daily", mounted: true, mountedPath: "Shared/Daily", mountedServerId: "server_active", conflictCount: 0, canManage: true },
-        { id: "new", name: "Research", mounted: false, conflictCount: 0, canManage: false },
-        { id: "paused", name: "Archive", mounted: true, mountedServerId: "server_other", conflictCount: 1, canManage: false }
+        { id: "active", name: "Daily", mounted: true, mountedPath: "Shared/Daily", mountedServerId: "server_active", conflictCount: 0, canManage: true, storedBytes: 0 },
+        { id: "new", name: "Research", mounted: false, conflictCount: 0, canManage: false, storedBytes: 0 },
+        { id: "paused", name: "Archive", mounted: true, mountedServerId: "server_other", conflictCount: 1, canManage: false, storedBytes: 0 }
       ]
     });
     expect(descriptor.rooms[0]?.actions).toEqual(["open", "remove", "manage"]);
@@ -145,8 +145,8 @@ describe("panelModel", () => {
     const descriptor = panelModel({
       ...baseState(),
       rooms: [
-        { id: "choice", name: "Choice", mounted: true, mountedServerId: "server_active", conflictCount: 2, canManage: false },
-        { id: "quiet", name: "Quiet", mounted: true, mountedServerId: "server_active", conflictCount: 0, canManage: false }
+        { id: "choice", name: "Choice", mounted: true, mountedServerId: "server_active", conflictCount: 2, canManage: false, storedBytes: 0 },
+        { id: "quiet", name: "Quiet", mounted: true, mountedServerId: "server_active", conflictCount: 0, canManage: false, storedBytes: 0 }
       ],
       peopleAttentionItems: ["revoked member"],
       activityAttentionItems: ["stale data", "pin mismatch"]
@@ -160,14 +160,14 @@ describe("panelModel", () => {
     const descriptor = panelModel({
       ...baseState(),
       dataState: "stale-error",
-      rooms: [{ id: "r", name: "Daily", mounted: true, mountedServerId: "server_active", conflictCount: 0, canManage: false }]
+      rooms: [{ id: "r", name: "Daily", mounted: true, mountedServerId: "server_active", conflictCount: 0, canManage: false, storedBytes: 0 }]
     });
     expect(descriptor.rooms).toHaveLength(1);
     expect(descriptor.dataNotice).toMatchObject({ action: "retry" });
   });
 
   it("covers the approved scenario matrix", () => {
-    expect(panelScenarios).toHaveLength(15);
+    expect(panelScenarios).toHaveLength(18);
     for (const scenario of panelScenarios) {
       const descriptor = panelModel(scenario.state);
       expect(descriptor.connection.label, scenario.id).toBe(scenario.expectedConnection);
@@ -177,6 +177,7 @@ describe("panelModel", () => {
         scenario.expectedActivityAttention
       );
       expect(visiblePanelTabs(descriptor), scenario.id).toEqual(scenario.expectedVisibleTabs);
+      expect(descriptor.storageLine?.level ?? "none", scenario.id).toBe(scenario.expectedStorageLevel);
     }
   });
 
@@ -200,6 +201,22 @@ describe("panelModel", () => {
     });
     expect(descriptor.tabs.activity.visible).toBe(false);
     expect(descriptor.tabs.activity.attentionCount).toBe(0);
+  });
+
+  it("surfaces the storage line only from the near-limit threshold onward, each naming an action or who can act", () => {
+    const wellUnder = panelModel({ ...baseState(), storage: { usageBytes: 10_000_000, maxBytes: 268_435_456 } });
+    expect(wellUnder.storageLine).toBeUndefined();
+
+    const noKnownCeiling = panelModel({ ...baseState() });
+    expect(noKnownCeiling.storageLine).toBeUndefined();
+
+    const nearLimit = panelModel({ ...baseState(), storage: { usageBytes: 250_000_000, maxBytes: 268_435_456 } });
+    expect(nearLimit.storageLine?.level).toBe("nearLimit");
+    expect(nearLimit.storageLine?.text).toMatch(/\bdelete\b/i);
+
+    const overLimit = panelModel({ ...baseState(), storage: { usageBytes: 300_000_000, maxBytes: 268_435_456 } });
+    expect(overLimit.storageLine?.level).toBe("overLimit");
+    expect(overLimit.storageLine?.text).toMatch(/\bwhoever hosts it\b/i);
   });
 
   it("has no two scenarios describing the same state", () => {

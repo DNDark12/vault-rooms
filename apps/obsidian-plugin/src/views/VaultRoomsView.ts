@@ -5,8 +5,10 @@ import { userFacingError } from "../errorMessages.js";
 import { advertisedAddressDrift } from "../lanAddress.js";
 import { lanSharePresentation } from "../lanShareReachability.js";
 import type VaultRoomsPlugin from "../main.js";
+import type { ServerConnection } from "../settings.js";
 import { confirmModal } from "../modals/ConfirmModal.js";
 import { ConnectionDiagnosticsModal } from "../modals/ConnectionDiagnosticsModal.js";
+import { UpdateServerAddressModal } from "../modals/UpdateServerAddressModal.js";
 import { CONNECTION_STATUS_COPY, HOSTING_STATUS_COPY } from "../onboarding.js";
 import { activityPresentation } from "./activityPresentation.js";
 import { PANEL_COPY } from "./panelCopy.js";
@@ -35,6 +37,13 @@ function portOf(baseUrl: string): string {
   }
 }
 
+/** Formats storage sizes for the panel. */
+function formatStorageBytes(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return `${Math.max(0, Math.round(bytes / 1024))} KB`;
+  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
+}
+
 type FileExplorerView = {
   revealInFolder(file: TFolder): Promise<void> | void;
 };
@@ -51,6 +60,7 @@ export class VaultRoomsView extends ItemView {
   private auditHasMore = false;
   private auditTeamId: string | undefined;
   private auditServerId: string | undefined;
+  private discoveringServerIds = new Set<string>();
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -138,7 +148,8 @@ export class VaultRoomsView extends ItemView {
       mountedPath: this.plugin.mountedPathFor(room.id),
       mountedServerId: this.plugin.mountedRoomServerId(room.id),
       conflictCount: this.plugin.listRoomConflicts(room.id).length,
-      canManage: this.plugin.canManageRoom(room)
+      canManage: this.plugin.canManageRoom(room),
+      storedBytes: room.storedBytes
     }));
     // Revoked friends/members are history, not work the user can resolve. Keep the tab badge for
     // future actionable items (for example, a pending access request) instead of alarming on records.
@@ -170,6 +181,7 @@ export class VaultRoomsView extends ItemView {
         localRoomCount,
         error: status.running ? undefined : status.error
       },
+      storage: this.plugin.getStorageStatus(),
       rooms: roomStates,
       peopleAttentionItems,
       activityAttentionItems,
@@ -250,6 +262,17 @@ export class VaultRoomsView extends ItemView {
           this.runHostAction(descriptor.hostLine?.action)
         );
       }
+    }
+
+    if (descriptor.storageLine) {
+      const storageLine = statusCard.createDiv({
+        cls: `vault-rooms-storage-line is-${descriptor.storageLine.level === "overLimit" ? "negative" : "warning"}`
+      });
+      storageLine.createSpan({ text: descriptor.storageLine.text });
+      storageLine.createSpan({
+        cls: "vault-rooms-storage-usage",
+        text: `${formatStorageBytes(descriptor.storageLine.usageBytes)} of ${formatStorageBytes(descriptor.storageLine.maxBytes)} used`
+      });
     }
 
     const detailsToggle = statusCard.createDiv({ cls: "vault-rooms-status-actions" });
@@ -378,6 +401,7 @@ export class VaultRoomsView extends ItemView {
         title.createSpan({ cls: "vault-rooms-attention-label", text: PANEL_COPY.room.attentionLabel });
       }
       card.createDiv({ cls: "vault-rooms-card-status", text: presentation.status });
+      card.createDiv({ cls: "vault-rooms-card-size", text: formatStorageBytes(presentation.storedBytes) });
       const actions = card.createDiv({ cls: "vault-rooms-card-actions" });
       for (const action of presentation.actions) {
         this.renderRoomAction(actions, room, presentation.mountedServerId, action);
@@ -707,7 +731,10 @@ export class VaultRoomsView extends ItemView {
       list.createDiv({ cls: "vault-rooms-empty-state", text: PANEL_COPY.empty.connectionNone });
     }
 
-    const savedServers = this.plugin.settings.servers.filter((server) => server.id !== active?.id);
+    const embeddedServerId = this.plugin.ownEmbeddedServerId();
+    const savedServers = this.plugin.settings.servers.filter(
+      (server) => server.id !== active?.id && server.id !== embeddedServerId
+    );
     if (savedServers.length > 0) {
       list.createDiv({
         cls: "vault-rooms-card-status",
@@ -728,6 +755,29 @@ export class VaultRoomsView extends ItemView {
           this.plugin.diagnoseConnection(saved.baseUrl, pinnedInfoForServer(saved), saved.deviceToken)
         ).open();
       });
+      this.addPanelButton(actions, "Update address", () => {
+        new UpdateServerAddressModal(this.plugin, saved).open();
+      });
+      if (canDiscoverServer(saved)) {
+        const finding = this.discoveringServerIds.has(saved.id);
+        const find = this.addPanelButton(actions, finding ? "Finding…" : "Find server on LAN", async () => {
+          if (this.discoveringServerIds.has(saved.id)) return;
+          this.discoveringServerIds.add(saved.id);
+          this.render();
+          try {
+            await this.plugin.findServerOnLan(saved.id);
+          } finally {
+            this.discoveringServerIds.delete(saved.id);
+            this.render();
+          }
+        });
+        find.disabled = finding;
+      } else if (saved.securityMode !== "pinned-tls") {
+        card.createDiv({
+          cls: "vault-rooms-card-status",
+          text: "Secure LAN discovery requires pinned TLS. Use Update address for this legacy server."
+        });
+      }
     }
     if (!this.plugin.activeServerIsOwnEmbeddedServer()) {
       this.renderLocalSharingCard(list);
@@ -756,6 +806,29 @@ export class VaultRoomsView extends ItemView {
         this.plugin.diagnoseConnection(active.baseUrl, pinnedInfoForServer(active), active.deviceToken)
       ).open();
     });
+    this.addPanelButton(details, "Update address", () => {
+      new UpdateServerAddressModal(this.plugin, active).open();
+    });
+    if (canDiscoverServer(active)) {
+      const finding = this.discoveringServerIds.has(active.id);
+      const find = this.addPanelButton(details, finding ? "Finding…" : "Find server on LAN", async () => {
+        if (this.discoveringServerIds.has(active.id)) return;
+        this.discoveringServerIds.add(active.id);
+        this.render();
+        try {
+          await this.plugin.findServerOnLan(active.id);
+        } finally {
+          this.discoveringServerIds.delete(active.id);
+          this.render();
+        }
+      });
+      find.disabled = finding;
+    } else if (active.securityMode !== "pinned-tls") {
+      details.createDiv({
+        cls: "vault-rooms-card-status",
+        text: "Secure LAN discovery requires pinned TLS. Use Update address for this legacy server."
+      });
+    }
     if (this.plugin.canCreateAnyInvite()) {
       this.addPanelButton(details, "Invite", () => this.plugin.openCreateInviteModal(), true);
     }
@@ -789,6 +862,14 @@ export class VaultRoomsView extends ItemView {
         return;
       }
       details.createDiv({ cls: "vault-rooms-card-status", text: `Sharing from this device: ${status.lanUrl}` });
+      if (status.lanDiscoveryAvailable) {
+        details.createDiv({ cls: "vault-rooms-card-status", text: "LAN discovery: ready" });
+      } else if (status.lanDiscoveryError) {
+        details.createDiv({
+          cls: "vault-rooms-alert is-warning",
+          text: `LAN discovery unavailable: ${status.lanDiscoveryError}. Direct hostname/IP connections still work.`
+        });
+      }
       const reachability = this.plugin.getLanShareReachability();
       const reachabilityCopy = lanSharePresentation(reachability);
       if (reachabilityCopy) {
@@ -994,4 +1075,14 @@ function initials(name: string): string {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase() ?? "")
     .join("");
+}
+
+function canDiscoverServer(server: ServerConnection): boolean {
+  return Boolean(
+    server.securityMode === "pinned-tls" &&
+    server.serverId &&
+    server.tlsName &&
+    server.identityCertificateDer &&
+    server.pinnedIdentitySpkiSha256
+  );
 }

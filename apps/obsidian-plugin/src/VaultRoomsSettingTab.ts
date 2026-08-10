@@ -5,8 +5,10 @@ import type VaultRoomsPlugin from "./main.js";
 import { pinnedInfoForServer } from "./controllers/ServerConnectionManager.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import { ConnectionDiagnosticsModal } from "./modals/ConnectionDiagnosticsModal.js";
+import { UpdateServerAddressModal } from "./modals/UpdateServerAddressModal.js";
 import { refreshSettingTab, setDestructiveCompat } from "./obsidianCompat.js";
 import { isRestrictedPort } from "./restrictedPorts.js";
+import { DEFAULT_SERVER_SETTINGS } from "./settings.js";
 import { userFacingError } from "./errorMessages.js";
 
 export class VaultRoomsSettingTab extends PluginSettingTab {
@@ -20,17 +22,14 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
         name: "Vault Rooms settings",
         searchable: false,
         render: (setting) => {
+          setting.settingEl.addClass("vault-rooms-settings-root");
           this.renderSettings(setting.settingEl);
         }
       }
     ];
   }
 
-  /** Fallback for Obsidian runtimes that don't call getSettingDefinitions() (pre-1.13, or any
-   *  build where the app doesn't wire that dispatch up) - the app core calls this unconditionally
-   *  when it doesn't know about the declarative API, and gets a TypeError if it's missing. Kept
-   *  in sync with getSettingDefinitions()'s render callback above; only one of the two runs on any
-   *  given Obsidian version, per Obsidian's own SettingTab#display() doc. */
+  /** Fallback for Obsidian versions before 1.13. */
   display(): void {
     this.renderSettings(this.containerEl);
   }
@@ -94,11 +93,11 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Public URL override")
       .setDesc(
-        "The server listens on your local network, but the plugin does not read your network interfaces automatically. Set this to this device's LAN address before sharing invites, e.g. 192.168.1.100 - just the address, no http:// or port needed (both are filled in automatically, and any port you do include is ignored in favor of the server's real one). Leave this field blank entirely to use loopback for this device only."
+        "This is the address advertised to teammates. A hostname must already exist and resolve on this LAN; Vault Rooms does not create one. An IP also works but may change after DHCP renewal. Protocol and port are filled in automatically."
       )
       .addText((text) =>
         text
-          .setPlaceholder("192.168.1.100")
+          .setPlaceholder("My-Mac.local")
           .setValue(this.plugin.settings.server.publicUrlOverride ?? "")
           .onChange(async (value) => {
             const trimmed = value.trim();
@@ -138,11 +137,41 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
       .addText((text) =>
         text.setValue(String(this.plugin.settings.server.maxFileBytes / (1024 * 1024))).onChange(async (value) => {
           const parsedMb = Number.parseFloat(value);
-          if (Number.isFinite(parsedMb) && parsedMb > 0) {
-            this.plugin.settings.server.maxFileBytes = Math.round(parsedMb * 1024 * 1024);
+          const bytes = Math.round(parsedMb * 1024 * 1024);
+          // Reject values that round to zero bytes.
+          if (Number.isFinite(parsedMb) && parsedMb > 0 && Number.isSafeInteger(bytes) && bytes > 0) {
+            this.plugin.settings.server.maxFileBytes = bytes;
             await this.plugin.saveSettings();
           }
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Max total stored content (MB)")
+      .setDesc(
+        "Bounds the total content this relay database stores, across all rooms. Not the same as the " +
+          ".sqlite file's own size, which only shrinks after running the reclaim command below. Default 256 MB."
+      )
+      .addText((text) =>
+        text
+          .setValue(
+            String(
+              (this.plugin.settings.server.maxStoredContentBytes ?? DEFAULT_SERVER_SETTINGS.maxStoredContentBytes!) /
+                (1024 * 1024)
+            )
+          )
+          .onChange(async (value) => {
+            const parsedMb = Number.parseFloat(value);
+            const bytes = Math.round(parsedMb * 1024 * 1024);
+            // Reject values that round to zero bytes.
+            if (Number.isFinite(parsedMb) && parsedMb > 0 && Number.isSafeInteger(bytes) && bytes > 0) {
+              this.plugin.settings.server.maxStoredContentBytes = bytes;
+              await this.plugin.saveSettings();
+              if (this.plugin.getServerStatus().running) {
+                new Notice("Restart the server for this change to take effect.");
+              }
+            }
+          })
       );
 
     new Setting(containerEl)
@@ -193,13 +222,17 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
 
     for (const server of this.plugin.settings.servers) {
       const active = server.id === this.plugin.getActiveServer()?.id;
+      const embedded = server.id === this.plugin.ownEmbeddedServerId();
       const isRevoked = server.status === "revoked";
+      const discoveryHint = !embedded && server.securityMode !== "pinned-tls"
+        ? " Secure LAN discovery requires pinned TLS; use Update address for this legacy server."
+        : "";
       const setting = new Setting(containerEl)
         .setName(`${server.userDisplayName}${server.isServerOwner ? " (owner)" : ""}${active ? " - active" : ""}`)
         .setDesc(
           isRevoked
             ? `${server.baseUrl} (revoked) - this device's saved login no longer works on this server. Remove it below, then set up or join again.`
-            : `${server.baseUrl} (${server.status})`
+            : `${server.baseUrl} (${server.status}).${discoveryHint}`
         );
       setting.addButton((button) =>
         button.setButtonText("Use").setDisabled(active).onClick(async () => {
@@ -211,13 +244,35 @@ export class VaultRoomsSettingTab extends PluginSettingTab {
           }
         })
       );
-      setting.addButton((button) =>
-        button.setButtonText("Test").onClick(() => {
-          new ConnectionDiagnosticsModal(this.plugin, server.baseUrl, () =>
-            this.plugin.diagnoseConnection(server.baseUrl, pinnedInfoForServer(server), server.deviceToken)
-          ).open();
-        })
-      );
+      if (!embedded) {
+        setting.addButton((button) =>
+          button.setButtonText("Test").onClick(() => {
+            new ConnectionDiagnosticsModal(this.plugin, server.baseUrl, () =>
+              this.plugin.diagnoseConnection(server.baseUrl, pinnedInfoForServer(server), server.deviceToken)
+            ).open();
+          })
+        );
+        setting.addButton((button) =>
+          button.setButtonText("Update address").onClick(() => {
+            new UpdateServerAddressModal(this.plugin, server, () => this.refresh()).open();
+          })
+        );
+        if (server.securityMode === "pinned-tls" && server.serverId) {
+          setting.addButton((button) =>
+            button.setButtonText("Find on LAN").onClick(async () => {
+              button.setDisabled(true);
+              try {
+                await this.plugin.findServerOnLan(server.id);
+                this.refresh();
+              } catch (error) {
+                new Notice(userFacingError(error, "Could not find that server on this LAN."));
+              } finally {
+                button.setDisabled(false);
+              }
+            })
+          );
+        }
+      }
       setting.addButton((button) =>
         setDestructiveCompat(button.setButtonText("Forget"))
           .onClick(async () => {

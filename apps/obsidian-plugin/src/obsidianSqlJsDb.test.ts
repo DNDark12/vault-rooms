@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -6,6 +7,15 @@ import type { DataAdapter } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js/dist/sql-wasm-browser.js";
 import { runMigrations } from "../../relay-server/src/db/migrations.js";
 import { LEGACY_V01_SCHEMA, RELEASED_V01_SCHEMA } from "../../relay-server/test/fixtures/legacyV01.js";
+import {
+  createRelayCore,
+  reclaimDatabaseSpace,
+  scheduleStorageBackfill,
+  blobKeyForBytes,
+  type BlobStore,
+  type RelayDb,
+  type StorageMaintenanceTimerHost
+} from "vault-rooms-relay/embedded-core";
 import { openObsidianSqlJsDb, restoreObsidianLegacyV01Backup } from "./obsidianSqlJsDb.js";
 
 // obsidianSqlJsDb.ts calls window.setTimeout/clearTimeout directly (it only ever runs embedded,
@@ -547,5 +557,310 @@ describe("openObsidianSqlJsDb - flush serialization (A2)", () => {
       persisted.close();
       await db.close();
     }
+  });
+});
+
+describe("openObsidianSqlJsDb - withExclusiveAccess", () => {
+  it("does not mistake a concurrent call for a nested call", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary });
+    const order: string[] = [];
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+
+    const first = db.withExclusiveAccess(async () => {
+      order.push("first-start");
+      firstStarted();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      order.push("first-end");
+    });
+    await started;
+    const second = db.withExclusiveAccess(() => {
+      order.push("second");
+    });
+    await Promise.all([first, second]);
+
+    expect(order).toEqual(["first-start", "first-end", "second"]);
+    await db.close();
+  });
+
+  it("still serializes two independent (non-nested) withExclusiveAccess calls in submission order", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary });
+    const order: string[] = [];
+
+    const first = db.withExclusiveAccess(async () => {
+      order.push("first-start");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      order.push("first-end");
+    });
+    const second = db.withExclusiveAccess(async () => {
+      order.push("second-start");
+      order.push("second-end");
+    });
+    await Promise.all([first, second]);
+
+    expect(order).toEqual(["first-start", "first-end", "second-start", "second-end"]);
+    await db.close();
+  });
+});
+
+describe("openObsidianSqlJsDb - reclaimDatabaseSpace under exclusive access (Phase A Task 5)", () => {
+  it("queues reclaimDatabaseSpace's VACUUM behind an in-flight durable write instead of throwing, and still lets a write queued right after it land", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    const core = createRelayCore(db);
+    const room = core.repo.createRoom({
+      name: "Room",
+      type: "folder",
+      sourcePath: "/vault/room",
+      mountName: "room",
+      ownerUserId: "usr_owner",
+      capabilities: []
+    });
+    core.repo.writeFile({ roomId: room.id, relativePath: "a.md", baseVersion: 0, content: "before reclaim", actorUserId: "usr_owner" });
+    await db.flush();
+
+    // A durable() write (e.g. bootstrap/identity rotation) is in flight when reclaim is
+    // triggered. reclaimDatabaseSpace's VACUUM goes through withExclusiveAccess, which awaits
+    // durableTail before running its operation - so it must wait behind the durable write and
+    // then run cleanly, never hitting the raw "blocked until durable persistence completes"
+    // guard a write bypassing withExclusiveAccess would.
+    adapter.writeDelaysMs = [0, 100];
+    const durable = core.repo.durable(() => core.repo.getOrCreateServerId());
+
+    const reclaim = reclaimDatabaseSpace(core.repo, db);
+    // A normal write queued right behind reclaim (mirroring a sync message arriving mid-reclaim,
+    // which also goes through repo.withExclusiveAccess) must be serialized after it, not rejected.
+    const queuedWrite = core.repo.withExclusiveAccess(() =>
+      core.repo.writeFile({ roomId: room.id, relativePath: "a.md", baseVersion: 1, content: "after reclaim", actorUserId: "usr_owner" })
+    );
+
+    await expect(Promise.all([durable, reclaim, queuedWrite])).resolves.toBeDefined();
+    expect(core.repo.readFileContent(room.id, "a.md").content).toBe("after reclaim");
+    await db.close();
+  });
+});
+
+describe("Phase B migration under exclusive access", () => {
+  it("keeps blob I/O outside the DB queue and queues a content write behind migration", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary });
+    const blobs = new Map<string, Uint8Array>();
+    let releaseFirstPut!: () => void;
+    let markFirstPutStarted!: () => void;
+    const firstPutStarted = new Promise<void>((resolve) => {
+      markFirstPutStarted = resolve;
+    });
+    const firstPutGate = new Promise<void>((resolve) => {
+      releaseFirstPut = resolve;
+    });
+    let firstPut = true;
+    const store: BlobStore = {
+      async put(bytes) {
+        if (firstPut) {
+          firstPut = false;
+          markFirstPutStarted();
+          await firstPutGate;
+        }
+        const key = blobKeyForBytes(bytes);
+        blobs.set(key, Uint8Array.from(bytes));
+        return key;
+      },
+      async get(key) {
+        return blobs.get(key);
+      },
+      async has(key) {
+        return blobs.has(key);
+      },
+      async delete(key) {
+        blobs.delete(key);
+      },
+      async list() {
+        return [...blobs.keys()];
+      }
+    };
+    const core = createRelayCore(db, { blobStore: store });
+    const room = core.repo.createRoom({
+      name: "Room",
+      type: "folder",
+      sourcePath: "Room",
+      mountName: "Room",
+      ownerUserId: "usr_owner",
+      capabilities: []
+    });
+    core.repo.writeFile({ roomId: room.id, relativePath: "legacy.md", baseVersion: 0, content: "legacy", actorUserId: "usr_owner" });
+
+    const migration = core.contentWriteService.migrateLegacyContentBatch(10);
+    await firstPutStarted;
+    await expect(db.withExclusiveAccess(() => "DB remained available")).resolves.toBe("DB remained available");
+    const queuedWrite = core.contentWriteService.writeFile({
+      roomId: room.id,
+      relativePath: "new.bin",
+      baseVersion: 0,
+      content: "AQID",
+      actorUserId: "usr_owner"
+    });
+    expect(core.repo.getFile(room.id, "new.bin")).toBeNull();
+
+    releaseFirstPut();
+    await expect(Promise.all([migration, queuedWrite])).resolves.toHaveLength(2);
+    expect(core.repo.getFile(room.id, "new.bin")).not.toBeNull();
+    await db.close();
+  });
+});
+
+describe("embedded external storage amplification", () => {
+  it("keeps DataAdapter SQLite flushes flat across 100 near-limit replacements", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    const blobs = new Map<string, Uint8Array>();
+    const blobStore: BlobStore = {
+      async put(bytes) {
+        const key = blobKeyForBytes(bytes);
+        blobs.set(key, Uint8Array.from(bytes));
+        return key;
+      },
+      async get(key) {
+        return blobs.get(key);
+      },
+      async has(key) {
+        return blobs.has(key);
+      },
+      async delete(key) {
+        blobs.delete(key);
+      },
+      async list() {
+        return [...blobs.keys()];
+      }
+    };
+    const core = createRelayCore(db, { blobStore, maxFileBytes: 5 * 1024 * 1024 });
+    const room = core.repo.createRoom({
+      name: "Soak",
+      type: "folder",
+      sourcePath: "Soak",
+      mountName: "Soak",
+      ownerUserId: "usr_owner",
+      capabilities: []
+    });
+    const payload = Buffer.alloc(Math.floor(4.9 * 1024 * 1024), 0x5a);
+    const sizes: number[] = [];
+    let version = 0;
+
+    for (let index = 0; index < 100; index += 1) {
+      payload.writeUInt32BE(index, 0);
+      const result = await core.contentWriteService.writeFile({
+        roomId: room.id,
+        relativePath: "large.bin",
+        baseVersion: version,
+        content: payload.toString("base64"),
+        actorUserId: "usr_owner"
+      });
+      version = result.version;
+      await db.flush();
+      sizes.push(adapter.store.get(dbPath)?.byteLength ?? 0);
+    }
+
+    expect(Math.max(...sizes)).toBeLessThan(1024 * 1024);
+    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThan(256 * 1024);
+    await db.durable(() => core.repo.getOrCreateServerId());
+    expect(adapter.store.get(dbPath)?.byteLength ?? Infinity).toBeLessThan(1024 * 1024);
+    await db.close();
+  }, 30_000);
+});
+
+/** Seeds a files/file_versions/content_blobs row directly via SQL, bypassing repo.writeFile (which
+ *  always populates raw_size_bytes) - reproduces a pre-Phase-A-Task-1 row exactly like
+ *  storage-retention.test.ts's seedLegacyFileHistory, so scheduleStorageBackfill has real work to do. */
+function seedLegacyFileForBackfill(db: RelayDb, roomId: string, relativePath: string, content: string): void {
+  const now = new Date().toISOString();
+  const sha = createHash("sha256").update(content).digest("hex");
+  const storageKey = `sha256:${sha}`;
+  const fileId = `fil_test_${relativePath.replace(/[^a-z0-9]/gi, "_")}`;
+  const versionId = `${fileId}_v1`;
+  db.prepare(
+    "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', 'markdown', 1, ?, ?, null, null, 'usr_owner', ?, ?)"
+  ).run(fileId, roomId, relativePath, sha, Buffer.byteLength(content, "utf8"), now, now);
+  db.prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)").run(storageKey, content, now);
+  db.prepare(
+    "insert into file_versions(id, file_id, version, sha256, size_bytes, raw_size_bytes, content_storage_key, created_by_user_id, created_at) values (?, ?, 1, ?, ?, null, ?, 'usr_owner', ?)"
+  ).run(versionId, fileId, sha, Buffer.byteLength(content, "utf8"), storageKey, now);
+}
+
+function realTimerHost(): StorageMaintenanceTimerHost {
+  return {
+    setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+    clearTimeout: (handle) => window.clearTimeout(handle as number)
+  };
+}
+
+describe("scheduleStorageBackfill - timer lifecycle and exclusive access (Phase A review fix)", () => {
+  it("never runs a batch once cancelled before its first timer fires, and close() does not throw", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    const core = createRelayCore(db);
+    const batchSpy = vi.spyOn(core.repo, "backfillStorageBatch");
+
+    const handle = scheduleStorageBackfill(core.repo, realTimerHost());
+    // Cancel in the same tick the scheduler was created in - before its first (50ms) timer can
+    // fire - mirroring stop() racing start() in serverManager.ts. Idempotent: calling it twice
+    // must not throw.
+    handle.cancel();
+    handle.cancel();
+
+    // Longer than the internal batch delay: if cancellation didn't actually clear the timer, this
+    // would be enough time for a batch to run.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(batchSpy).not.toHaveBeenCalled();
+    await expect(db.close()).resolves.toBeUndefined();
+  });
+
+  it("queues a scheduled batch behind an in-flight durable write instead of throwing 'blocked until durable persistence completes'", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    const core = createRelayCore(db);
+    const room = core.repo.createRoom({
+      name: "Room",
+      type: "folder",
+      sourcePath: "/vault/room",
+      mountName: "room",
+      ownerUserId: "usr_owner",
+      capabilities: []
+    });
+    seedLegacyFileForBackfill(db, room.id, "legacy.md", "legacy content predating Phase A Task 1");
+    await db.flush();
+
+    // Make the durable write's own two flushes slow enough that the backfill scheduler's first
+    // (50ms) timer fires while the durable operation is still in flight. Before this fix,
+    // backfillStorageBatch ran outside withExclusiveAccess and would hit assertWritable's "blocked
+    // until durable persistence completes" guard here instead of waiting for it.
+    adapter.writeDelaysMs = [0, 150];
+    const durable = core.repo.durable(() => core.repo.getOrCreateServerId());
+
+    const handle = scheduleStorageBackfill(core.repo, realTimerHost());
+    try {
+      await durable;
+      await vi.waitFor(() => {
+        expect(core.repo.getFile(room.id, "legacy.md")?.raw_size_bytes).not.toBeNull();
+      });
+    } finally {
+      handle.cancel();
+    }
+
+    await db.close();
   });
 });

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 import * as Y from "yjs";
 import { createApp } from "../src/app.js";
@@ -6,16 +6,7 @@ import type { CrdtDocManager } from "../src/sync/crdtDocManager.js";
 import type { SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
-// Phase 6 of docs/superpowers/plans/2026-07-20-crdt-sync.md: coexistence between the CRDT lane and
-// the legacy whole-file CAS lane. Covers contract 1.4 (legacy write policy, decided as "reject")
-// and the room-toggle conversion (turning CRDT on for a room that already has existing .md files
-// must seed each one from its current text at a fresh epoch, never discarding content) plus the
-// explicit coexistence proof that a legacy/non-CRDT-capable subscriber only ever sees materialized
-// remote_file_change fanout for a CRDT-enabled room, never remote_crdt_update - Phase 4 already
-// built the mechanism (CrdtDocManager's onMaterialized callback + ConnectionRegistry.
-// broadcastToRoom's connectionFilter); this file is the dedicated test proving it, specifically for
-// the toggle-ON-with-existing-files case (Phase 3/4's own tests only covered a freshly-created CRDT
-// file, never a pre-existing one converted mid-flight).
+// Covers CRDT and whole-file lane coexistence.
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
 
@@ -222,12 +213,17 @@ describe("CRDT coexistence (Phase 6)", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     timers.runAllTimeouts();
 
-    const getResponse = await app.inject({
-      method: "GET",
-      url: `/api/rooms/${room.id}/files/content?path=note.md`,
-      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    // Materialization is now async (Phase B's write seam adds a real await point before the
+    // metadata transaction), so the timer firing synchronously no longer guarantees it has landed
+    // by the time a GET request would observe it.
+    await vi.waitFor(async () => {
+      const getResponse = await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/files/content?path=note.md`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      });
+      expect(getResponse.json().content).toBe("materialized content");
     });
-    expect(getResponse.json().content).toBe("materialized content");
   });
 
   it("[toggle-ON conversion] turning CRDT on for a room with existing .md files seeds each from its current text at a fresh (bumped) epoch, never discarding content", async () => {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AppError, contentTypeForPath, createId } from "@vault-rooms/protocol";
+import { AppError, contentTypeForPath, createId, type ContentType } from "@vault-rooms/protocol";
 import type { CrdtOperationReceiptRow, FileRow, FileVersionWithContentRow, RoomRow } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
 
@@ -9,12 +9,14 @@ export type FileWriteResult = {
   version: number;
   sha256: string;
   content: string;
+  orphanedBlobKeys?: string[];
 };
 
 export type FileDeleteResult = {
   ok: true;
   relativePath: string;
   version: number;
+  orphanedBlobKeys?: string[];
 };
 
 export type FileRenameResult = {
@@ -68,17 +70,25 @@ export type AuditInput = {
   ipAddress?: string;
 };
 
+export type LegacyContentReference = {
+  versionId: string;
+  fileId: string;
+  fileVersion: number;
+  contentStorageKey: string;
+  contentType: ContentType;
+  content: string;
+};
+
 /** Owns file metadata, content versions, tombstones, and file audit events. */
 export class RelayFileRepository {
   constructor(
     private readonly db: RelayDb,
     private readonly audit: (input: AuditInput) => void,
     private readonly getRoom: (roomId: string) => RoomRow | null,
-    /** Bumps `files.crdt_epoch` and purges the old epoch's CRDT update log/snapshots, as plain
-     *  statements (no transaction of its own) so `deleteFile` can call it atomically with its own
-     *  tombstone update (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.5 "delete wins,
-     *  bump immediately"). Safe and inert to call on a file that never had any CRDT document. */
-    private readonly bumpCrdtEpochStatements: (fileId: string) => void
+    /** Bumps the CRDT epoch and purges prior state within the caller's transaction. */
+    private readonly bumpCrdtEpochStatements: (fileId: string) => void,
+    /** Stored-content ceiling enforced inside write transactions. */
+    private readonly maxStoredContentBytes: number
   ) {}
 
   listFiles(roomId: string): FileRow[] {
@@ -91,16 +101,12 @@ export class RelayFileRepository {
     );
   }
 
-  /** Looks up a file by its stable id alone, without knowing (roomId, relativePath) up front -
-   *  needed by the CRDT lane (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 4), which keys
-   *  its in-memory doc cache by `(fileId, epoch)` and only discovers which room/path that maps to
-   *  when it needs to materialize or fan out (e.g. from an async debounce timer with no request
-   *  context at hand). */
+  /** Looks up a file by stable ID for CRDT materialization and fanout. */
   getFileById(fileId: string): FileRow | null {
     return (this.db.prepare("select * from files where id = ?").get(fileId) as FileRow | undefined) ?? null;
   }
 
-  readFileContent(roomId: string, relativePath: string): { file: FileRow; content: string } {
+  readFileContent(roomId: string, relativePath: string): { file: FileRow; content: string | null; blobKey: string | null } {
     const file = this.getFile(roomId, relativePath);
     if (!file) {
       throw new AppError("NOT_FOUND", "File not found.", 404);
@@ -112,16 +118,27 @@ export class RelayFileRepository {
     if (!version) {
       throw new AppError("NOT_FOUND", "File content not found.", 404);
     }
-    return { file, content: version.content };
+    return { file, content: version.content, blobKey: version.blob_key };
   }
 
-  writeFile(input: { roomId: string; relativePath: string; baseVersion: number; content: string; actorUserId: string }): FileWriteResult {
+  writeFile(input: {
+    roomId: string;
+    relativePath: string;
+    baseVersion: number;
+    content: string;
+    actorUserId: string;
+    /** Raw-byte key already finalized by ContentWriteService. */
+    blobKey?: string;
+  }): FileWriteResult {
     const write = this.db.transaction(() => {
       const existing = this.getFile(input.roomId, input.relativePath);
       const sha256 = sha256Text(input.content);
       const sizeBytes = Buffer.byteLength(input.content, "utf8");
+      const contentType = contentTypeForPath(input.relativePath);
+      const rawSizeBytes = this.decodedByteLength(input.content, contentType);
       const now = new Date().toISOString();
-      const storageKey = `sha256:${sha256}`;
+      const storageKey = input.blobKey ? `blob:${input.blobKey}` : `sha256:${sha256}`;
+      const storedBytes = input.blobKey ? rawSizeBytes : sizeBytes;
 
       if (input.baseVersion === 0) {
         if (existing && !existing.deleted_at) {
@@ -129,20 +146,23 @@ export class RelayFileRepository {
         }
         const version = existing ? existing.version + 1 : 1;
         const fileId = existing?.id ?? createId("fil");
+        this.assertQuotaAllows(existing?.id ?? null, version, storageKey, input.blobKey ?? null, storedBytes);
         if (existing) {
           this.db
-            .prepare("update files set version = ?, sha256 = ?, size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ? where id = ?")
-            .run(version, sha256, sizeBytes, input.actorUserId, now, existing.id);
+            .prepare(
+              "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ? where id = ?"
+            )
+            .run(version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, existing.id);
         } else {
           this.db
             .prepare(
-              "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, ?, ?, null, ?, ?, ?)"
+              "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, ?, ?, ?, null, ?, ?, ?)"
             )
-            .run(fileId, input.roomId, input.relativePath, contentTypeForPath(input.relativePath), version, sha256, sizeBytes, input.actorUserId, now, now);
+            .run(fileId, input.roomId, input.relativePath, contentType, version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, now);
         }
-        this.insertFileVersion({ fileId, version, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
+        const orphanedBlobKeys = this.insertFileVersion({ fileId, version, sha256, sizeBytes, rawSizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now, blobKey: input.blobKey });
         this.auditFileEvent(input.roomId, input.actorUserId, version === 1 ? "file.created" : "file.updated", fileId, input.relativePath, version);
-        return { ok: true as const, relativePath: input.relativePath, version, sha256, content: input.content };
+        return { ok: true as const, relativePath: input.relativePath, version, sha256, content: input.content, ...(orphanedBlobKeys.length ? { orphanedBlobKeys } : {}) };
       }
 
       if (!existing || existing.deleted_at) {
@@ -162,12 +182,15 @@ export class RelayFileRepository {
       }
 
       const version = existing.version + 1;
+      this.assertQuotaAllows(existing.id, version, storageKey, input.blobKey ?? null, storedBytes);
       this.db
-        .prepare("update files set version = ?, sha256 = ?, size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
-        .run(version, sha256, sizeBytes, input.actorUserId, now, existing.id);
-      this.insertFileVersion({ fileId: existing.id, version, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
+        .prepare(
+          "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?"
+        )
+        .run(version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, existing.id);
+      const orphanedBlobKeys = this.insertFileVersion({ fileId: existing.id, version, sha256, sizeBytes, rawSizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now, blobKey: input.blobKey });
       this.auditFileEvent(input.roomId, input.actorUserId, "file.updated", existing.id, input.relativePath, version);
-      return { ok: true as const, relativePath: input.relativePath, version, sha256, content: input.content };
+      return { ok: true as const, relativePath: input.relativePath, version, sha256, content: input.content, ...(orphanedBlobKeys.length ? { orphanedBlobKeys } : {}) };
     });
     return write();
   }
@@ -177,16 +200,7 @@ export class RelayFileRepository {
     relativePath: string;
     baseVersion: number;
     actorUserId: string;
-    /** Set for a path whose content the CRDT lane owns, which makes the compare-and-swap
-     *  `baseVersion` gate below meaningless and actively harmful: `materializeCrdtContent` bumps
-     *  `files.version` on its own debounce, with no `file_change_ack`/`remote_file_change` carrying
-     *  that new version back to the deleting client's per-file tracking. So a client's `serverVersion`
-     *  for a CRDT file is stale by design the moment anyone types, and every delete it attempts fails
-     *  `VERSION_CONFLICT` *forever* - the file becomes locally undeletable, which is what surfaced on
-     *  real hardware as repeated "The file changed on the server before your edit was applied" errors
-     *  (eighth hardware-testing round, 2026-07-24). Skipping the check restores the same intent the
-     *  CAS lane has - "delete what's there" - for a lane where `version` is not the client's to track.
-     *  Deletion remains fully permission-gated (`sync:push` + `file:delete`) at both call sites. */
+    /** Skips CAS version checks when CRDT owns the content version. */
     crdtAuthoritative?: boolean;
   }): FileDeleteResult {
     const remove = this.db.transaction(() => {
@@ -200,30 +214,19 @@ export class RelayFileRepository {
       const version = existing.version + 1;
       const now = new Date().toISOString();
       this.db
-        .prepare("update files set version = ?, sha256 = null, size_bytes = null, deleted_at = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
+        .prepare("update files set version = ?, sha256 = null, size_bytes = null, raw_size_bytes = null, deleted_at = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
         .run(version, now, input.actorUserId, now, existing.id);
-      // Contract 1.5: delete wins - bump the CRDT epoch and purge the old epoch's state
-      // immediately, in the same transaction as the tombstone, not deferred to a later recreate.
-      // Inert (but harmless) for a file that never had a CRDT document.
+      // Deletion invalidates the current CRDT epoch before removing version data.
       this.bumpCrdtEpochStatements(existing.id);
+      // Tombstones retain no history; shared blobs remain reference-checked.
+      const orphanedBlobKeys = this.deleteAllVersionsAndCollectBlobs(existing.id);
       this.auditFileEvent(input.roomId, input.actorUserId, "file.deleted", existing.id, input.relativePath, version);
-      return { ok: true as const, relativePath: input.relativePath, version };
+      return { ok: true as const, relativePath: input.relativePath, version, ...(orphanedBlobKeys.length ? { orphanedBlobKeys } : {}) };
     });
     return remove();
   }
 
-  /**
-   * Atomic rename for a file in a CRDT-enabled room (fourth hardware-testing round, 2026-07-23):
-   * updates only `relative_path` (+ `content_type`, recomputed from the new extension) - `id`,
-   * `crdt_epoch`, `version`, and all `file_versions`/CRDT history stay untouched. Replaces the old
-   * client-side delete-old+create-new translation, which discarded the file's identity (a fresh
-   * `fileId`/epoch) and left every other subscriber with a multi-second, uncorrelated gap between
-   * "old file deleted" and "new file created" (see this repo's fourth-hardware-testing-round
-   * notes). `CrdtDocManager` caches by `(fileId, epoch)`, never by path (see `crdtDocManager.ts`'s
-   * `key()`), so a caller needs no doc-cache/materialize-timer bookkeeping around this at all - the
-   * cache stays valid across the rename automatically. Does not bump `version`: content is
-   * unchanged, only the path is, so no new `file_versions` row is written either.
-   */
+  /** Renames a CRDT file without changing its identity, epoch, or content version. */
   renameFile(input: CrdtRenameInput): FileRenameResult {
     return this.db.transaction(() => this.renameFileStatements(input))();
   }
@@ -256,14 +259,7 @@ export class RelayFileRepository {
       if (!existing || existing.deleted_at) {
         throw new AppError(existing?.deleted_at ? "FILE_DELETED" : "NOT_FOUND", existing?.deleted_at ? "The file has been deleted." : "File not found.", 404);
       }
-      // A rename's target is NEVER auto-disambiguated, unlike a colliding create. The name a user
-      // typed is authoritative: silently filing their note under a machine-picked name is both worse
-      // UX and - as a real-hardware run proved - unstable, because each rewritten name collides again
-      // and drives an unbounded rename loop (twelfth hardware-testing round, 2026-07-24; the eleventh
-      // round's attempt to share one policy between create and rename was simply wrong). A create's
-      // name is machine-generated ("Untitled") and therefore safe to adjust; a rename's is not. A
-      // genuine conflict is reported so the client can tell the user to pick another name - and the
-      // client's handling of that rejection is non-destructive (it forks nothing).
+      // User-authored rename targets are never auto-disambiguated.
       const targetPath = input.relativePath;
       if (input.oldRelativePath !== targetPath) {
         const conflict = this.getFile(input.roomId, targetPath);
@@ -271,15 +267,9 @@ export class RelayFileRepository {
           throw new AppError("FILE_EXISTS", "A file already exists at the new path.", 409, { serverVersion: conflict.version });
         }
         if (conflict) {
-          // A *tombstoned* row is not a logical conflict (the path is free as far as users are
-          // concerned) but it still occupies the `unique(room_id, relative_path)` slot - so the update
-          // below would fail the constraint with a raw SQLite error, which `sendCrdtRejection` could
-          // only report as the useless generic "CRDT message could not be applied." That is exactly
-          // what renaming a note onto a previously-deleted name produced on real hardware (tenth
-          // hardware-testing round, 2026-07-24). Retire the dead row so the rename can land: its
-          // content is already unreachable, and the rename's own broadcast tells peers the new state.
+          // Remove the tombstone occupying the unique path slot.
           this.bumpCrdtEpochStatements(conflict.id);
-          this.db.prepare("delete from file_versions where file_id = ?").run(conflict.id);
+          this.deleteAllVersionsAndCollectBlobs(conflict.id);
           this.db.prepare("delete from files where id = ?").run(conflict.id);
         }
       }
@@ -291,17 +281,7 @@ export class RelayFileRepository {
       return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: targetPath, epoch: existing.crdt_epoch };
   }
 
-  /** First-create flow for the CRDT lane (contract 1.10). Distinct from `writeFile`'s
-   *  `baseVersion === 0` branch: a CRDT document has no whole-file `content` to write up front (its
-   *  content lives in the Y.Doc / `crdt_updates`, not `file_versions`, until the first
-   *  materialization) - but an initial empty `file_versions` row is still written here so a REST
-   *  `GET` immediately after `crdt_create` (before any edit/materialize) reads "" instead of 404ing.
-   *  Reviving a tombstoned path reuses `existing.crdt_epoch` as-is, without bumping it again:
-   *  `deleteFile` already bumped it once and purged that epoch's CRDT rows (contract 1.5 "delete
-   *  wins, bump immediately"), so there is nothing left at that epoch to collide with - a second
-   *  bump here would just burn an epoch number on every delete+recreate cycle for no reason, and
-   *  would be inconsistent with `writeFile`'s own tombstone-revival path (contract 1.9), which also
-   *  does not bump. */
+  /** Creates an empty CRDT file row or revives its already-bumped epoch. */
   createCrdtFile(input: CrdtCreateInput): CrdtCreateResult {
     return this.db.transaction(() => this.createCrdtFileStatements(input))();
   }
@@ -355,22 +335,7 @@ export class RelayFileRepository {
   }
 
   private createCrdtFileStatements(input: CrdtCreateInput): CrdtCreateResult {
-      // Two devices creating a note at the same path are creating two *different* notes - each has
-      // its own identity - not one shared note (seventh hardware-testing round, 2026-07-24). This is
-      // the single most ordinary case there is, because Obsidian names every new note with the same
-      // default ("Untitled"/"Chưa đặt tên.md"), so both devices pressing Ctrl+N collide immediately.
-      // Rejecting the second one with FILE_EXISTS was an unrecoverable dead end (the client's session
-      // never opened, so that note never synced at all), and merging them into one document would
-      // interleave two unrelated notes' text. Instead the colliding creator gets its own distinct
-      // path, disambiguated by who created it - mirroring how Obsidian itself resolves a local name
-      // clash. The caller relays the assigned path back to the client, which renames its local file
-      // to match (see syncServer.ts / CrdtSessionManager.ensureEpoch).
-      // Reopening a note this client already has must attach to the existing document, never fork a
-      // renamed copy of it. Without this distinction, an unmount/remount cycle (which clears the
-      // client's known epochs) re-sent crdt_create for every file it already had, each collided, each
-      // was handed a disambiguated name, and the client renamed its local file to match - so every
-      // remount duplicated the room's notes as "… (DNDark)", "… (huynd2)", … (fifteenth
-      // hardware-testing round, 2026-07-24).
+      // New-note collisions disambiguate; existing notes adopt their document.
       const live = this.getFile(input.roomId, input.relativePath);
       if (input.adoptIfExists && live && !live.deleted_at) {
         return { fileId: live.id, epoch: live.crdt_epoch, relativePath: input.relativePath };
@@ -379,32 +344,27 @@ export class RelayFileRepository {
       const existing = this.getFile(input.roomId, relativePath);
       const now = new Date().toISOString();
       const version = existing ? existing.version + 1 : 1;
-      // Reviving a tombstone reuses the epoch as-is - do NOT bump again here. `deleteFile` already
-      // bumped it once (contract 1.5 "delete wins, bump immediately") and purged that epoch's rows,
-      // so there is nothing left at `existing.crdt_epoch` to collide with; a second bump on top of
-      // that would make a plain delete+recreate cycle skip an epoch number for no reason, which
-      // would break a client that expects the same code path deleteFile's own contract 1.5 test
-      // already established for the CAS lane (writeFile's baseVersion===0 revival also does not
-      // bump - see crdt-persistence.test.ts's "stayed at the epoch delete already bumped to").
+      // Deletion already bumped the epoch before tombstone revival.
       const epoch = existing ? existing.crdt_epoch : 0;
       const fileId = existing?.id ?? createId("fil");
       const sha256 = sha256Text("");
       const sizeBytes = 0;
+      const rawSizeBytes = 0;
       const storageKey = `sha256:${sha256}`;
       if (existing) {
         this.db
           .prepare(
-            "update files set version = ?, sha256 = ?, size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ?, crdt_epoch = ? where id = ?"
+            "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ?, crdt_epoch = ? where id = ?"
           )
-          .run(version, sha256, sizeBytes, input.actorUserId, now, epoch, existing.id);
+          .run(version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, epoch, existing.id);
       } else {
         this.db
           .prepare(
-            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, crdt_epoch) values (?, ?, ?, 'file', ?, ?, ?, ?, null, ?, ?, ?, ?)"
+            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, crdt_epoch) values (?, ?, ?, 'file', ?, ?, ?, ?, ?, null, ?, ?, ?, ?)"
           )
-          .run(fileId, input.roomId, relativePath, contentTypeForPath(relativePath), version, sha256, sizeBytes, input.actorUserId, now, now, epoch);
+          .run(fileId, input.roomId, relativePath, contentTypeForPath(relativePath), version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, now, epoch);
       }
-      this.insertFileVersion({ fileId, version, sha256, sizeBytes, storageKey, content: "", actorUserId: input.actorUserId, now });
+      this.insertFileVersion({ fileId, version, sha256, sizeBytes, rawSizeBytes, storageKey, content: "", actorUserId: input.actorUserId, now });
       this.auditFileEvent(input.roomId, input.actorUserId, "file.crdt_created", fileId, relativePath, version);
       return { fileId, epoch, relativePath };
   }
@@ -497,17 +457,7 @@ export class RelayFileRepository {
       );
   }
 
-  /**
-   * Resolves `relativePath` to a path with no *live* file at it, disambiguating a collision with the
-   * creator's name (`Untitled.md` -> `Untitled (B laptop).md`, then ` (B laptop) 2`, ...) - see
-   * `createCrdtFile`'s doc comment for why a collision means "a second, different note" rather than
-   * "the same note". A tombstoned path is NOT a collision: reviving it in place is the established
-   * delete-then-recreate behavior (contract 1.5/1.9), so only `deleted_at === null` rows block.
-   * The suffix goes before the extension so the result stays CRDT-eligible (`.md`), and the display
-   * name is stripped of path separators/control characters so it can never escape the room subtree or
-   * produce an unwritable filename. Bounded: after enough taken candidates it falls back to the file
-   * id-shaped unique suffix rather than looping.
-   */
+  /** Disambiguates a new CRDT path while allowing tombstone revival. */
   private freeCrdtPath(roomId: string, relativePath: string, actorDisplayName?: string): string {
     const isTaken = (candidate: string): boolean => {
       const row = this.getFile(roomId, candidate);
@@ -520,21 +470,9 @@ export class RelayFileRepository {
     const lastSlash = relativePath.lastIndexOf("/");
     const hasExtension = lastDot > lastSlash + 1;
     const extension = hasExtension ? relativePath.slice(lastDot) : "";
-    // Deliberately NOT stripping any pre-existing " (name)"/" (name) 2" looking suffix. An earlier
-    // attempt to do that (as belt-and-braces against suffix accumulation) could not tell a
-    // machine-added suffix from a name the user genuinely typed, so it rewrote real titles like
-    // "Report12 (DNDark) 27" back to the "Report12" stem and then picked an arbitrary free number -
-    // renames swapped names chaotically and drove an unbounded loop on real hardware (twelfth
-    // hardware-testing round, 2026-07-24). Accumulation is prevented at the source instead: only a
-    // *create* disambiguates (a rename never does), and the client no longer re-submits an assigned
-    // name as a fresh request.
+    // Preserve user-authored suffixes; only creates are disambiguated.
     const base = hasExtension ? relativePath.slice(0, lastDot) : relativePath;
-    // A display name is user-chosen, so neutralize anything that shouldn't end up inside a filename:
-    // path separators, characters Windows rejects, and control characters. Done by code point rather
-    // than with a regex character class on purpose - a class spanning control characters trips
-    // `no-control-regex` however it is written (literal bytes or `\u` escapes), and literal bytes are
-    // worse still: they made git treat this file as binary and made `grep` render them as blanks, which
-    // is exactly what hid a real NUL-vs-space key mismatch elsewhere from a grep-based audit.
+    // Sanitize user-controlled display names for cross-platform filenames.
     const forbiddenInFilename = new Set([...'/\\:*?"<>|']);
     const safeName = [...(actorDisplayName ?? "")]
       .map((character) => {
@@ -560,13 +498,8 @@ export class RelayFileRepository {
     return `${base} (${label}) ${createId("fil").slice(-8)}${extension}`;
   }
 
-  /** Writes a CRDT-materialized text snapshot into `files`/`file_versions` (contract 1.6) - always
-   *  unconditional, never a compare-and-swap: the CRDT lane, not this row's `version` counter, is
-   *  authoritative for a CRDT-enabled document's content, so there is no "conflicting base version"
-   *  concept here the way there is for `writeFile`. Returns null if the file has since been deleted
-   *  or no longer exists (a materialize timer can fire after the file was removed - a no-op, not an
-   *  error, since there's nothing left to materialize into). */
-  materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string }): { version: number; sha256: string } | null {
+  /** Materializes CRDT text; deleted files return null. This path stays quota-exempt. */
+  materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string; blobKey?: string }): ({ version: number; sha256: string } & { orphanedBlobKeys?: string[] }) | null {
     const materialize = this.db.transaction(() => {
       const existing = this.db.prepare("select * from files where id = ?").get(input.fileId) as FileRow | undefined;
       if (!existing || existing.deleted_at) {
@@ -574,15 +507,18 @@ export class RelayFileRepository {
       }
       const sha256 = sha256Text(input.content);
       const sizeBytes = Buffer.byteLength(input.content, "utf8");
+      const rawSizeBytes = this.decodedByteLength(input.content, contentTypeForPath(existing.relative_path));
       const now = new Date().toISOString();
-      const storageKey = `sha256:${sha256}`;
+      const storageKey = input.blobKey ? `blob:${input.blobKey}` : `sha256:${sha256}`;
       const version = existing.version + 1;
       this.db
-        .prepare("update files set version = ?, sha256 = ?, size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
-        .run(version, sha256, sizeBytes, input.actorUserId, now, existing.id);
-      this.insertFileVersion({ fileId: existing.id, version, sha256, sizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now });
+        .prepare(
+          "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?"
+        )
+        .run(version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, existing.id);
+      const orphanedBlobKeys = this.insertFileVersion({ fileId: existing.id, version, sha256, sizeBytes, rawSizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now, blobKey: input.blobKey });
       this.auditFileEvent(existing.room_id, input.actorUserId, "file.crdt_materialized", existing.id, existing.relative_path, version);
-      return { version, sha256 };
+      return { version, sha256, ...(orphanedBlobKeys.length ? { orphanedBlobKeys } : {}) };
     });
     return materialize();
   }
@@ -594,7 +530,7 @@ export class RelayFileRepository {
           `
             select fv.*, cb.content
             from file_versions fv
-            join content_blobs cb on cb.storage_key = fv.content_storage_key
+            left join content_blobs cb on cb.storage_key = fv.content_storage_key
             where fv.file_id = ?
             order by fv.version desc
             limit 1
@@ -609,17 +545,362 @@ export class RelayFileRepository {
     version: number;
     sha256: string;
     sizeBytes: number;
+    rawSizeBytes: number;
     storageKey: string;
     content: string;
     actorUserId: string;
     now: string;
-  }): void {
-    this.db.prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)").run(input.storageKey, input.content, input.now);
+    /** Raw-byte key already finalized by ContentWriteService. */
+    blobKey?: string;
+  }): string[] {
+    if (input.blobKey) {
+      if (!this.isExternalBlobReferenced(input.blobKey)) {
+        this.adjustStorageUsage(input.rawSizeBytes);
+      }
+    } else {
+      const insertedBlob = this.db
+        .prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)")
+        .run(input.storageKey, input.content, input.now);
+      if (insertedBlob.changes > 0) {
+        this.adjustStorageUsage(this.storedByteLength(input.content));
+      }
+    }
     this.db
       .prepare(
-        "insert into file_versions(id, file_id, version, sha256, size_bytes, content_storage_key, created_by_user_id, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)"
+        "insert into file_versions(id, file_id, version, sha256, size_bytes, content_storage_key, created_by_user_id, created_at, raw_size_bytes, blob_key) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
-      .run(createId("ver"), input.fileId, input.version, input.sha256, input.sizeBytes, input.storageKey, input.actorUserId, input.now);
+      .run(
+        createId("ver"),
+        input.fileId,
+        input.version,
+        input.sha256,
+        input.sizeBytes,
+        input.storageKey,
+        input.actorUserId,
+        input.now,
+        input.rawSizeBytes,
+        input.blobKey ?? null
+      );
+    return this.pruneSupersededVersions(input.fileId, input.version);
+  }
+
+  /** Prunes older versions and their now-unreferenced blobs. */
+  private pruneSupersededVersions(fileId: string, currentVersion: number): string[] {
+    const superseded = this.db
+      .prepare("select distinct content_storage_key, blob_key, raw_size_bytes from file_versions where file_id = ? and version < ?")
+      .all(fileId, currentVersion) as Array<{ content_storage_key: string; blob_key: string | null; raw_size_bytes: number | null }>;
+    if (superseded.length === 0) {
+      return [];
+    }
+    this.db.prepare("delete from file_versions where file_id = ? and version < ?").run(fileId, currentVersion);
+    const orphanedBlobKeys = new Set<string>();
+    for (const { content_storage_key: storageKey, blob_key: blobKey, raw_size_bytes: rawSizeBytes } of superseded) {
+      this.collectBlobIfUnreferenced(storageKey);
+      if (blobKey && !this.isExternalBlobReferenced(blobKey)) {
+        this.adjustStorageUsage(-(rawSizeBytes ?? 0));
+        orphanedBlobKeys.add(blobKey);
+      }
+    }
+    return [...orphanedBlobKeys];
+  }
+
+  /** Deletes every version and collects now-unreferenced blobs. */
+  deleteAllVersionsAndCollectBlobs(fileId: string): string[] {
+    const versions = this.db
+      .prepare("select distinct content_storage_key, blob_key, raw_size_bytes from file_versions where file_id = ?")
+      .all(fileId) as Array<{ content_storage_key: string; blob_key: string | null; raw_size_bytes: number | null }>;
+    if (versions.length === 0) {
+      return [];
+    }
+    this.db.prepare("delete from file_versions where file_id = ?").run(fileId);
+    const orphanedBlobKeys = new Set<string>();
+    for (const { content_storage_key: storageKey, blob_key: blobKey, raw_size_bytes: rawSizeBytes } of versions) {
+      this.collectBlobIfUnreferenced(storageKey);
+      if (blobKey && !this.isExternalBlobReferenced(blobKey)) {
+        this.adjustStorageUsage(-(rawSizeBytes ?? 0));
+        orphanedBlobKeys.add(blobKey);
+      }
+    }
+    return [...orphanedBlobKeys];
+  }
+
+  /** Deletes a blob only after its final version reference is gone. */
+  private collectBlobIfUnreferenced(storageKey: string): void {
+    const blob = this.db.prepare("select length(cast(content as blob)) as len from content_blobs where storage_key = ?").get(storageKey) as
+      | { len: number }
+      | undefined;
+    if (!blob) {
+      return;
+    }
+    const deleted = this.db
+      .prepare("delete from content_blobs where storage_key = ? and not exists (select 1 from file_versions where content_storage_key = ?)")
+      .run(storageKey, storageKey);
+    if (deleted.changes > 0) {
+      this.adjustStorageUsage(-blob.len);
+    }
+  }
+
+  private storedByteLength(content: string): number {
+    return Buffer.byteLength(content, "utf8");
+  }
+
+  /** Returns real file bytes, not base64 transport bytes. */
+  private decodedByteLength(content: string, contentType: ContentType): number {
+    return contentType === "binary" ? Buffer.from(content, "base64").length : Buffer.byteLength(content, "utf8");
+  }
+
+  private adjustStorageUsage(deltaBytes: number): void {
+    if (deltaBytes === 0) {
+      return;
+    }
+    this.db.prepare("update storage_usage set blob_bytes = blob_bytes + ? where id = 1").run(deltaBytes);
+  }
+
+  getStorageUsageBytes(): number {
+    const row = this.db.prepare("select blob_bytes from storage_usage where id = 1").get() as { blob_bytes: number } | undefined;
+    return row?.blob_bytes ?? 0;
+  }
+
+  /** Current stored bytes for one room; shared blobs are counted in every referencing room. */
+  getRoomStorageBytes(roomId: string): number {
+    const row = this.db
+      .prepare(
+        `select coalesce(sum(case when fv.blob_key is null then f.size_bytes else f.raw_size_bytes end), 0) as total
+         from files f
+         left join file_versions fv on fv.file_id = f.id and fv.version = f.version
+         where f.room_id = ? and f.deleted_at is null`
+      )
+      .get(roomId) as
+      | { total: number }
+      | undefined;
+    return row?.total ?? 0;
+  }
+
+  listLegacyContentReferences(batchSize: number): LegacyContentReference[] {
+    return this.db
+      .prepare(
+        `select fv.id as version_id, fv.file_id, fv.version, fv.content_storage_key,
+                f.content_type, cb.content
+         from file_versions fv
+         join files f on f.id = fv.file_id
+         join content_blobs cb on cb.storage_key = fv.content_storage_key
+         where fv.blob_key is null
+         order by fv.id
+         limit ?`
+      )
+      .all(batchSize)
+      .map((row) => {
+        const value = row as {
+          version_id: string;
+          file_id: string;
+          version: number;
+          content_storage_key: string;
+          content_type: ContentType;
+          content: string;
+        };
+        return {
+          versionId: value.version_id,
+          fileId: value.file_id,
+          fileVersion: value.version,
+          contentStorageKey: value.content_storage_key,
+          contentType: value.content_type,
+          content: value.content
+        };
+      });
+  }
+
+  migrateLegacyContentReference(input: LegacyContentReference & { blobKey: string; rawSizeBytes: number }): boolean {
+    return this.db.transaction(() => {
+      const current = this.db
+        .prepare("select blob_key, content_storage_key from file_versions where id = ?")
+        .get(input.versionId) as { blob_key: string | null; content_storage_key: string } | undefined;
+      if (!current || current.blob_key !== null || current.content_storage_key !== input.contentStorageKey) {
+        return false;
+      }
+
+      const firstExternalReference = !this.isExternalBlobReferenced(input.blobKey);
+      this.db
+        .prepare("update file_versions set blob_key = ?, content_storage_key = ?, raw_size_bytes = ? where id = ?")
+        .run(input.blobKey, `blob:${input.blobKey}`, input.rawSizeBytes, input.versionId);
+      this.db
+        .prepare("update files set raw_size_bytes = ? where id = ? and version = ?")
+        .run(input.rawSizeBytes, input.fileId, input.fileVersion);
+      if (firstExternalReference) {
+        this.adjustStorageUsage(input.rawSizeBytes);
+      }
+      this.collectBlobIfUnreferenced(input.contentStorageKey);
+      return true;
+    })();
+  }
+
+  hasLegacyContentReferences(): boolean {
+    return Boolean(this.db.prepare("select 1 from file_versions where blob_key is null limit 1").get());
+  }
+
+  /** Backfills one resumable batch of legacy raw sizes and retention. */
+  backfillStorageBatch(batchSize: number): { processedCount: number; done: boolean } {
+    const rows = this.db.prepare("select id from files where raw_size_bytes is null limit ?").all(batchSize) as Array<{ id: string }>;
+    for (const { id } of rows) {
+      this.backfillOneFile(id);
+    }
+    const remaining = this.db.prepare("select 1 from files where raw_size_bytes is null limit 1").get();
+    return { processedCount: rows.length, done: !remaining };
+  }
+
+  private backfillOneFile(fileId: string): void {
+    const backfill = this.db.transaction(() => {
+      const file = this.db.prepare("select * from files where id = ?").get(fileId) as FileRow | undefined;
+      if (!file || file.raw_size_bytes !== null) {
+        // A delete or live write already resolved this row.
+        return;
+      }
+      if (file.deleted_at) {
+        // Legacy tombstones may still retain versions and must not be reselected.
+        this.deleteAllVersionsAndCollectBlobs(fileId);
+        this.db.prepare("update files set raw_size_bytes = 0 where id = ?").run(fileId);
+        return;
+      }
+      const latest = this.latestFileVersion(fileId);
+      const rawSizeBytes = latest?.content !== null && latest ? this.decodedByteLength(latest.content, contentTypeForPath(file.relative_path)) : 0;
+      this.db.prepare("update files set raw_size_bytes = ? where id = ?").run(rawSizeBytes, fileId);
+      if (latest) {
+        this.db.prepare("update file_versions set raw_size_bytes = ? where id = ?").run(rawSizeBytes, latest.id);
+        this.pruneSupersededVersions(fileId, latest.version);
+      }
+    });
+    backfill();
+  }
+
+  /** Sweeps one resumable batch of unreferenced legacy blobs. */
+  sweepOrphanedBlobsBatch(batchSize: number): { processedCount: number; done: boolean } {
+    const sweep = this.db.transaction(() => {
+      const orphans = this.db
+        .prepare(
+          "select storage_key, length(cast(content as blob)) as len from content_blobs " +
+            "where not exists (select 1 from file_versions where content_storage_key = content_blobs.storage_key) limit ?"
+        )
+        .all(batchSize) as Array<{ storage_key: string; len: number }>;
+      for (const { storage_key: storageKey } of orphans) {
+        // Re-check the reference in the delete statement.
+        this.db
+          .prepare("delete from content_blobs where storage_key = ? and not exists (select 1 from file_versions where content_storage_key = ?)")
+          .run(storageKey, storageKey);
+      }
+      this.recomputeStorageUsage();
+      const remaining = this.db
+        .prepare(
+          "select 1 from content_blobs where not exists (select 1 from file_versions where content_storage_key = content_blobs.storage_key) limit 1"
+        )
+        .get();
+      return { processedCount: orphans.length, done: !remaining };
+    });
+    return sweep();
+  }
+
+  isBlobKeyReferenced(blobKey: string): boolean {
+    return Boolean(
+      this.db
+        .prepare("select 1 from file_versions where blob_key = ? or content_storage_key = ? or content_storage_key = ? limit 1")
+        .get(blobKey, blobKey, `blob:${blobKey}`)
+    );
+  }
+
+  private isExternalBlobReferenced(blobKey: string): boolean {
+    return Boolean(this.db.prepare("select 1 from file_versions where blob_key = ? limit 1").get(blobKey));
+  }
+
+  private recomputeStorageUsage(): void {
+    const row = this.db.prepare(`
+      select coalesce(sum(bytes), 0) as total
+      from (
+        select length(cast(cb.content as blob)) as bytes
+        from content_blobs cb
+        where exists (select 1 from file_versions fv where fv.content_storage_key = cb.storage_key)
+        union all
+        select max(raw_size_bytes) as bytes
+        from file_versions
+        where blob_key is not null
+        group by blob_key
+      )
+    `).get() as { total: number } | undefined;
+    this.db.prepare("update storage_usage set blob_bytes = ?, recomputed_at = ? where id = 1").run(row?.total ?? 0, new Date().toISOString());
+  }
+
+  listBlobKeysForFile(fileId: string): string[] {
+    return (this.db.prepare("select distinct blob_key from file_versions where file_id = ? and blob_key is not null").all(fileId) as Array<{ blob_key: string }>).map(
+      (row) => row.blob_key
+    );
+  }
+
+  /** Rejects writes that exceed the cap or worsen an over-limit store. */
+  private assertQuotaAllows(
+    fileId: string | null,
+    currentVersion: number,
+    storageKey: string,
+    blobKey: string | null,
+    storedBytes: number
+  ): void {
+    const currentUsage = this.getStorageUsageBytes();
+    const alreadyReferenced = blobKey ? this.isExternalBlobReferenced(blobKey) : this.blobAlreadyStored(storageKey);
+    const newlyAllocated = alreadyReferenced ? 0 : storedBytes;
+    const reclaimable = fileId ? this.computeReclaimableBytes(fileId, currentVersion, storageKey, blobKey) : 0;
+    const projectedUsage = currentUsage + newlyAllocated - reclaimable;
+    // Over-limit stores may accept non-growing writes.
+    const allowedCeiling = Math.max(currentUsage, this.maxStoredContentBytes);
+    if (projectedUsage > allowedCeiling) {
+      throw new AppError(
+        "STORAGE_QUOTA_EXCEEDED",
+        "The store on the hosting device is full. Delete files in this room, then run the reclaim command on the hosting device.",
+        413
+      );
+    }
+  }
+
+  private blobAlreadyStored(storageKey: string): boolean {
+    return Boolean(this.db.prepare("select 1 from content_blobs where storage_key = ?").get(storageKey));
+  }
+
+  /** Predicts bytes freed by the versions this write supersedes. */
+  private computeReclaimableBytes(
+    fileId: string,
+    currentVersion: number,
+    newStorageKey: string,
+    newBlobKey: string | null
+  ): number {
+    const candidates = this.db
+      .prepare("select distinct content_storage_key, blob_key, raw_size_bytes from file_versions where file_id = ? and version < ?")
+      .all(fileId, currentVersion) as Array<{ content_storage_key: string; blob_key: string | null; raw_size_bytes: number | null }>;
+    let reclaimable = 0;
+    for (const { content_storage_key: candidateKey, blob_key: candidateBlobKey, raw_size_bytes: rawSizeBytes } of candidates) {
+      if (candidateBlobKey) {
+        if (candidateBlobKey === newBlobKey) {
+          continue;
+        }
+        const stillReferencedElsewhere = this.db
+          .prepare("select 1 from file_versions where blob_key = ? and not (file_id = ? and version < ?) limit 1")
+          .get(candidateBlobKey, fileId, currentVersion);
+        if (!stillReferencedElsewhere) {
+          reclaimable += rawSizeBytes ?? 0;
+        }
+        continue;
+      }
+      if (candidateKey === newStorageKey) {
+        continue; // The new version keeps this blob.
+      }
+      const stillReferencedElsewhere = this.db
+        .prepare("select 1 from file_versions where content_storage_key = ? and not (file_id = ? and version < ?) limit 1")
+        .get(candidateKey, fileId, currentVersion);
+      if (stillReferencedElsewhere) {
+        continue;
+      }
+      const blob = this.db.prepare("select length(cast(content as blob)) as len from content_blobs where storage_key = ?").get(candidateKey) as
+        | { len: number }
+        | undefined;
+      if (blob) {
+        reclaimable += blob.len;
+      }
+    }
+    return reclaimable;
   }
 
   private versionConflict(file: FileRow): AppError {
@@ -627,7 +908,8 @@ export class RelayFileRepository {
     return new AppError("VERSION_CONFLICT", "The file changed on the server before your edit was applied.", 409, {
       serverVersion: file.version,
       serverSha256: file.sha256,
-      ...(latest ? { serverContent: latest.content } : {})
+      ...(latest?.content !== null && latest ? { serverContent: latest.content } : {}),
+      ...(latest?.blob_key ? { serverBlobKey: latest.blob_key, serverContentType: file.content_type } : {})
     });
   }
 

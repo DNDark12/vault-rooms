@@ -15,26 +15,22 @@ import { fileContentByteLength } from "../services/fileContentSize.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
 import type { CrdtDocManager } from "../sync/crdtDocManager.js";
 import type { PresenceService } from "../sync/presenceService.js";
+import type { ContentWriteService } from "../storage/contentWriteService.js";
+import { decodeTransportContent } from "../storage/contentWriteService.js";
+import { rawHttpResponse } from "../services/rawHttpResponse.js";
 
 export type FileRoutesOptions = {
   maxFileBytes: number;
   connectionRegistry?: ConnectionRegistry;
-  /** Phase 6: needed for the legacy-write-policy rejection (contract 1.4) and to evict a deleted
-   *  file's cached CRDT doc via this REST delete route - the WS file_delete branch already does
-   *  the same eviction (Phase 4); optional only so tests that don't exercise the CRDT lane can omit
-   *  it. */
+  /** Shared external-content read/write seam. */
+  contentWriteService: ContentWriteService;
+  /** Evicts CRDT state after REST deletion. */
   crdtDocManager?: CrdtDocManager;
-  /** Live cursors: this REST delete route is the second delete transport, so it needs the same
-   *  presence teardown the WS `file_delete` branch does - covering only one of them leaks a cursor
-   *  pinned to an epoch the delete just retired. */
+  /** Clears live cursors after REST deletion. */
   presenceService: PresenceService;
 };
 
-// Mixed-version compatibility (2026-08-03 sync-widening). REST has no persistent handshake to hang
-// a negotiated capability off of the way the WS "hello" message does, so a REST caller declares it
-// fresh on every request instead via `?capabilities=extendedBinarySync` - cheap to do since a
-// stateless request already restates everything else it needs (auth header, path, etc). Absent
-// means false, same safe default as the WS connection capability it mirrors.
+// REST clients declare binary-sync support on each request.
 function hasExtendedBinarySyncCapability(request: { query: unknown }): boolean {
   const query = request.query as Partial<{ capabilities: string | string[] }>;
   const raw = query.capabilities;
@@ -87,7 +83,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("NOT_FOUND", "File not found.", 404);
     }
     assertRoomPermission({ repo, principal, room, permission: "file:read", relativePath });
-    const { file, content } = repo.readFileContent(room.id, relativePath);
+    const { file, content } = await options.contentWriteService.readFileContent({ roomId: room.id, relativePath });
     return {
       relativePath,
       version: file.version,
@@ -95,6 +91,79 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       content,
       contentEncoding: contentTypeForPath(relativePath) === "binary" ? "base64" : "utf8"
     };
+  });
+
+  app.get("/api/rooms/:roomId/files/raw", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
+    const query = request.query as Partial<{ path: string }>;
+    const relativePath = normalizeRelativePath(query.path ?? "");
+    assertRoomPermission({ repo, principal, room, permission: "file:read", relativePath });
+    const { file, content } = await options.contentWriteService.readFileContent({ roomId: room.id, relativePath });
+    return rawHttpResponse(decodeTransportContent(content, contentTypeForPath(relativePath)), "application/octet-stream", {
+      "x-vault-rooms-version": String(file.version),
+      "x-vault-rooms-sha256": file.sha256 ?? ""
+    });
+  });
+
+  app.put("/api/rooms/:roomId/files/raw", async (request) => {
+    const principal = getActivePrincipal(repo, request);
+    const room = requireRoom(repo, (request.params as { roomId: string }).roomId);
+    const query = request.query as Partial<{ path: string; baseVersion: string }>;
+    const relativePath = normalizeRelativePath(query.path ?? "");
+    const baseVersion = Number(query.baseVersion ?? 0);
+    if (!Number.isSafeInteger(baseVersion) || baseVersion < 0 || !(request.body instanceof Uint8Array)) {
+      throw new AppError("VALIDATION_ERROR", "This raw sync request is invalid.", 422);
+    }
+    if (request.body.byteLength > options.maxFileBytes) {
+      throw new AppError(
+        "FILE_TOO_LARGE",
+        `This file is larger than this server accepts (limit ${formatFileLimit(options.maxFileBytes)}).`,
+        413
+      );
+    }
+    if (room.crdt_enabled && isCrdtEligiblePath(relativePath)) {
+      throw new AppError("CRDT_WRITE_UNSUPPORTED", "This note uses live editing - update the plugin to edit it.", 409);
+    }
+    assertRoomPermission({ repo, principal, room, permission: "sync:push", relativePath });
+    assertRoomPermission({
+      repo,
+      principal,
+      room,
+      permission: baseVersion === 0 ? "file:create" : "file:write",
+      relativePath
+    });
+    const contentType = contentTypeForPath(relativePath);
+    const content = Buffer.from(request.body).toString(contentType === "binary" ? "base64" : "utf8");
+    const result = await options.contentWriteService.writeFile({
+      roomId: room.id,
+      relativePath,
+      baseVersion,
+      content,
+      actorUserId: principal.userId
+    });
+    const aclRules = repo.listAclRulesForRoom(room.id);
+    options.connectionRegistry?.broadcastToRoom(
+      room.id,
+      {
+        type: "remote_file_change",
+        roomId: room.id,
+        relativePath,
+        version: result.version,
+        sha256: result.sha256,
+        content,
+        contentEncoding: contentType === "binary" ? "base64" : "utf8",
+        updatedBy: { userId: principal.userId, displayName: principal.userDisplayName },
+        updatedAt: new Date().toISOString()
+      },
+      {
+        excludeDeviceId: principal.deviceId,
+        canReceive: (recipient) =>
+          hasRoomPermission({ repo, principal: recipient, room, permission: "file:read", relativePath, aclRules }),
+        connectionFilter: (recipient) => recipient.capabilities.extendedBinarySync || isLegacyEligiblePath(relativePath)
+      }
+    );
+    return { ok: true, relativePath, version: result.version, sha256: result.sha256 };
   });
 
   app.put("/api/rooms/:roomId/files/content", async (request) => {
@@ -105,12 +174,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       throw new AppError("VALIDATION_ERROR", "This sync request was missing the file path or its contents.", 422);
     }
     const relativePath = normalizeRelativePath(body.relativePath);
-    // Every path that normalizes cleanly syncs now (2026-08-03: file-type sync widened to match
-    // Obsidian's own vault surface - see isEligiblePath in @vault-rooms/protocol).
-    // Legacy write policy (contract 1.4, decided as "reject") - see the identical check in
-    // syncServer.ts's file_change branch for the WS equivalent. GET (this route's read sibling)
-    // is unaffected: it keeps serving the materialized files/file_versions row CrdtDocManager's
-    // debounced materialize keeps fresh, for both CRDT-capable and legacy clients.
+    // Markdown in CRDT rooms cannot be written through the CAS lane.
     if (room.crdt_enabled && isCrdtEligiblePath(relativePath)) {
       throw new AppError(
         "CRDT_WRITE_UNSUPPORTED",
@@ -139,7 +203,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       permission: baseVersion === 0 ? "file:create" : "file:write",
       relativePath
     });
-    const result = repo.writeFile({
+    const result = await options.contentWriteService.writeFile({
       roomId: room.id,
       relativePath,
       baseVersion,
@@ -164,10 +228,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
         excludeDeviceId: principal.deviceId,
         canReceive: (recipient) =>
           hasRoomPermission({ repo, principal: recipient, room, permission: "file:read", relativePath, aclRules: fileChangeAclRules }),
-        // Mixed-version compatibility (2026-08-03 sync-widening) - same gate as syncServer.ts's WS
-        // file_change branch: a live WS connection that hasn't advertised extendedBinarySync never
-        // receives fanout for a path it wouldn't have understood before the widening, regardless of
-        // which transport (REST here, WS there) produced the write.
+        // Older clients receive only the original file types.
         connectionFilter: (recipient) => recipient.capabilities.extendedBinarySync || isLegacyEligiblePath(relativePath)
       }
     );
@@ -189,7 +250,7 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
     // the WS file_delete branch (Phase 4 left this REST route as a known memory-hygiene gap,
     // harmless but noted, closed here in Phase 6). Inert for a file that never had a CRDT document.
     const beforeDelete = repo.getFile(room.id, relativePath);
-    const result = repo.deleteFile({
+    const result = await options.contentWriteService.deleteFile({
       roomId: room.id,
       relativePath,
       baseVersion: body.baseVersion,

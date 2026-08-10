@@ -2,10 +2,7 @@ import * as Y from "yjs";
 import { AppError } from "@vault-rooms/protocol";
 import type { SyncTimerHost } from "./syncServer.js";
 
-/** Canonical Y.Text shared-type key. Both the relay's materialization (this file) and the Phase 5
- *  client editor binding (`crdtEditorBinding.ts`) must read/write the *same* shared type name
- *  inside a file's `Y.Doc`, or the two sides silently talk past each other - one writing into a
- *  `Y.Text` no one else looks at. Matches the name the Phase 0.3 persistence spike already used. */
+/** Shared Y.Text key used by client and relay. */
 export const CRDT_TEXT_KEY = "content";
 
 // Resource limits (contract 1.7).
@@ -16,24 +13,20 @@ export const MAX_CACHED_DOCS = 500;
 const IDLE_EVICTION_MS = 10 * 60 * 1000;
 const MATERIALIZE_DEBOUNCE_MS = 2_000;
 
-/** Origin tag for server-applied Yjs updates, so a future server-side `Y.Doc.on("update", ...)`
- *  listener (none yet in Phase 4 - fanout is driven explicitly from `applyUpdate`'s return, not an
- *  update-event listener) could distinguish "this update came from decoding a client's message"
- *  from any other origin without ambiguity. Kept even though nothing reads it yet, matching the
- *  origin-tagging convention the Phase 0.2/0.3 spikes already established for client-side code. */
 const INBOUND_UPDATE_ORIGIN = Symbol("crdt-inbound-update");
 
-/** The narrow slice of `RelayRepository` this manager actually calls - typed as its own interface
- *  (rather than the concrete `RelayRepository` class) so tests can substitute a fake/wrapped repo
- *  (e.g. one that injects a durable-append failure for contract 1.13's persistence-failure test)
- *  without implementing the entire repository surface. Any real `RelayRepository` instance already
- *  satisfies this structurally - no change needed at real call sites. */
+/** Repository surface required by the CRDT manager. */
 export type CrdtRepositoryPort = {
   writeCrdtSnapshot(fileId: string, epoch: number, stateVectorBase64: string, snapshotBase64: string, upToSeq: number): void;
   getLatestCrdtSnapshot(fileId: string, epoch: number): { stateVector: string; snapshot: string; upToSeq: number } | null;
   listCrdtUpdatesSince(fileId: string, epoch: number, sinceSeq: number): Array<{ seq: number; update: string }>;
   appendCrdtUpdate(fileId: string, epoch: number, updateBase64: string): number;
-  materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string }): { version: number; sha256: string } | null;
+  /** Production materialization is asynchronous; test doubles may remain synchronous. */
+  materializeCrdtContent(input: {
+    fileId: string;
+    content: string;
+    actorUserId: string;
+  }): { version: number; sha256: string } | null | Promise<{ version: number; sha256: string } | null>;
   getFileById(fileId: string): { room_id: string; relative_path: string } | null;
 };
 
@@ -72,12 +65,7 @@ function fromBase64(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64"));
 }
 
-/** Owns the in-process cache of live `Y.Doc`s for the CRDT lane (docs/superpowers/plans/
- *  2026-07-20-crdt-sync.md Phase 4) - one entry per `(fileId, epoch)`, lazily reconstructed from
- *  the latest compaction snapshot plus any updates since, and evicted (LRU by cache size, or by
- *  idle timeout) rather than kept forever. This class owns *document* state; ACL/epoch/capability
- *  checks and message-shape handling live in `syncServer.ts`, matching how the CAS lane keeps
- *  policy checks out of `RelayFileRepository`. */
+/** Caches live Y.Docs by file and epoch with size and idle eviction. */
 export class CrdtDocManager {
   private readonly cache = new Map<string, CachedDoc>();
   private readonly idleSweepHandle: unknown;
@@ -93,10 +81,7 @@ export class CrdtDocManager {
     this.idleSweepHandle = timerHost.setInterval(() => this.evictIdle(), IDLE_EVICTION_MS);
   }
 
-  /** Stops the idle-eviction sweep and cancels any pending materialize timers. Call once when the
-   *  owning app/server shuts down - otherwise a scheduled timer would keep the process alive past
-   *  `close()` (matters most for the standalone Node runtime; the embedded runtime's timers are
-   *  tied to the Obsidian window anyway). */
+  /** Stops eviction and pending materialization timers. */
   dispose(): void {
     this.disposed = true;
     this.timerHost.clearInterval(this.idleSweepHandle);
@@ -108,21 +93,12 @@ export class CrdtDocManager {
     this.cache.clear();
   }
 
-  /** First-create flow (contract 1.10): a brand-new empty document for a freshly allocated
-   *  `(fileId, epoch)`. Writes the initial (empty) compaction snapshot immediately so a cold
-   *  `crdt_sync_step1` for this epoch - even before any update has ever landed - has something to
-   *  reconstruct from, rather than a special-cased "no snapshot yet" branch in `load()`. */
+  /** Creates an empty document with an initial snapshot. */
   createDocument(fileId: string, epoch: number, createdBy: CrdtUpdatedBy): void {
     this.seedDocument(fileId, epoch, "", createdBy);
   }
 
-  /** Room-toggle conversion (docs/superpowers/plans/2026-07-20-crdt-sync.md Phase 6): seeds a
-   *  brand-new `(fileId, epoch)` document from a pre-existing file's *current* whole-file text,
-   *  rather than starting empty - used when a room with existing `.md` files turns CRDT on, so
-   *  converting never discards content. The caller (`room.routes.ts`'s PATCH handler) is
-   *  responsible for having already bumped the file to a fresh epoch (contract 1.5/1.9 - "since
-   *  bumpFileCrdtEpoch/purgeCrdtState semantics apply" even though nothing existed at the old
-   *  epoch to purge) before calling this. */
+  /** Seeds a fresh CRDT epoch from existing whole-file text. */
   createDocumentFromText(fileId: string, epoch: number, text: string, createdBy: CrdtUpdatedBy): void {
     this.seedDocument(fileId, epoch, text, createdBy);
   }
@@ -313,7 +289,7 @@ export class CrdtDocManager {
    * if needed (lazy reconstruction from snapshot + updates), and no-ops when the durable text already
    * matches, so a room of already-current files costs one hash comparison each.
    */
-  materializeNow(input: { fileId: string; epoch: number; materializedContent: string | null; fallbackActor: CrdtUpdatedBy }): void {
+  async materializeNow(input: { fileId: string; epoch: number; materializedContent: string | null; fallbackActor: CrdtUpdatedBy }): Promise<void> {
     if (this.disposed) return;
     const cached = this.load(input.fileId, input.epoch);
     const text = cached.doc.getText(CRDT_TEXT_KEY).toString();
@@ -331,7 +307,7 @@ export class CrdtDocManager {
       this.timerHost.clearTimeout(cached.materializeTimer);
       cached.materializeTimer = undefined;
     }
-    this.materialize(cached);
+    await this.materialize(cached);
   }
 
   private compact(cached: CachedDoc): void {
@@ -348,11 +324,12 @@ export class CrdtDocManager {
     cached.materializeTimer = this.timerHost.setTimeout(() => {
       cached.materializeTimer = undefined;
       if (this.withDbAccess) {
-        void this.withDbAccess(() => this.materialize(cached)).catch((error) => {
+        void this.withDbAccess(() => undefined).then(() => this.materialize(cached)).catch((error) => {
           console.error("Vault Rooms relay: CRDT materialization could not enter the database queue", error);
         });
       } else {
-        this.materialize(cached);
+        // materialize() catches and logs its own failures.
+        void this.materialize(cached);
       }
     }, MATERIALIZE_DEBOUNCE_MS);
   }
@@ -363,7 +340,7 @@ export class CrdtDocManager {
    *  was deleted before the debounce fired (`materializeCrdtContent` returns null), and silently
    *  skipped if the doc was evicted from cache in the meantime (nothing to materialize from - the
    *  next load will reconstruct current durable state anyway). */
-  private materialize(cached: CachedDoc): void {
+  private async materialize(cached: CachedDoc): Promise<void> {
     if (this.disposed) return;
     const key = this.key(cached.fileId, cached.epoch);
     if (this.cache.get(key) !== cached) {
@@ -375,7 +352,7 @@ export class CrdtDocManager {
     if (!updatedBy) return;
     const text = cached.doc.getText(CRDT_TEXT_KEY).toString();
     try {
-      const result = this.repo.materializeCrdtContent({ fileId: cached.fileId, content: text, actorUserId: updatedBy.userId });
+      const result = await this.repo.materializeCrdtContent({ fileId: cached.fileId, content: text, actorUserId: updatedBy.userId });
       if (!result) return;
       const file = this.repo.getFileById(cached.fileId);
       if (!file) return;

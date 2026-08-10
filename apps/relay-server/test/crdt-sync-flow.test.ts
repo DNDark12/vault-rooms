@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 import * as Y from "yjs";
 import { createApp } from "../src/app.js";
@@ -6,12 +6,7 @@ import { CRDT_TEXT_KEY } from "../src/sync/crdtDocManager.js";
 import type { SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
-// Phase 4 of docs/superpowers/plans/2026-07-20-crdt-sync.md: CrdtDocManager wiring through the
-// WS layer - ACL parity, the bidirectional handshake, epoch/capability gating, fanout partitioning
-// (CRDT-capable vs legacy), lifecycle (delete/recreate), and the materialization SLA. Pure
-// manager-internals coverage (compaction, resource limits, persistence-failure invariant, cache
-// eviction) lives in crdtDocManager.test.ts instead - this file only covers behavior that requires
-// the full ACL/policy/registry stack around the manager.
+// Covers CRDT behavior through the full WebSocket and policy stack.
 
 type JsonSocket = WebSocket & { sendJson: (payload: unknown) => void };
 
@@ -942,12 +937,16 @@ describe("CRDT sync flow (Phase 4)", () => {
 
     timers.runAllTimeouts(); // fast-forward the materialize debounce.
 
-    const afterDebounce = await app.inject({
-      method: "GET",
-      url: `/api/rooms/${room.id}/files/content?path=note.md`,
-      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    // Materialization is now async (Phase B's write seam adds a real await point before the
+    // metadata transaction), so the timer firing synchronously no longer guarantees it has landed.
+    await vi.waitFor(async () => {
+      const afterDebounce = await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/files/content?path=note.md`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      });
+      expect(afterDebounce.json().content).toBe("fresh text");
     });
-    expect(afterDebounce.json().content).toBe("fresh text");
   });
 
   it("[materialization SLA] legacy peers get the materialized remote_file_change once the debounce fires, not immediately", async () => {

@@ -494,6 +494,10 @@ describe("same-process embedded TLS ownership lifecycle", () => {
       running: false,
       error: "TLS enforcement listener shutdown failed; embedded relay stopped."
     });
+    // Re-review fix: this fatal cleanup path must cancel the backfill scheduler like every other
+    // shutdown path, not just null out this.app - otherwise a pending batch keeps firing against
+    // the now-closed DB.
+    expect((server as unknown as { storageBackfillHandle: unknown }).storageBackfillHandle).toBeNull();
     await expect(fetch(`http://127.0.0.1:${httpPort}/health`)).rejects.toThrow();
     await expect(
       pinnedGet(
@@ -632,6 +636,10 @@ describe("same-process embedded TLS ownership lifecycle", () => {
       running: false,
       error: "Identity rotation rollback failed; embedded relay stopped."
     });
+    // Re-review fix: this fatal cleanup path must cancel the backfill scheduler like every other
+    // shutdown path, not just null out this.app - otherwise a pending batch keeps firing against
+    // the now-closed DB.
+    expect((server as unknown as { storageBackfillHandle: unknown }).storageBackfillHandle).toBeNull();
     await expect(
       pinnedGet(settings.tlsPort, initial.pinnedInfo.tlsName, certDerBase64UrlToPem(initial.pinnedInfo.identityCertificateDer))
     ).rejects.toThrow();

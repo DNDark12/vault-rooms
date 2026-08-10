@@ -192,3 +192,36 @@ describe("TLS runtime config", () => {
     expect(() => transition!("tls_enforced", true, true)).toThrow("HTTPS-only");
   });
 });
+
+describe("byte-limit env var validation (Phase A review fix - P1)", () => {
+  it.each([
+    ["non-numeric", "garbage"],
+    ["trailing garbage after digits", "1junk"],
+    ["zero", "0"],
+    ["negative", "-5242880"],
+    ["a decimal", "5242880.5"],
+    ["empty string", ""]
+  ])("rejects MAX_STORED_CONTENT_BYTES=%s (%s) at startup instead of silently disabling the quota", async (_label, value) => {
+    // Number.parseInt(value, 10) alone would return NaN/a truncated number/a negative number for
+    // these, and Math.max(currentUsage, NaN) is NaN - every quota comparison against NaN is false,
+    // so the check would silently become a permanent no-op instead of failing loudly.
+    await expect(resolveRuntimeConfig({ MAX_STORED_CONTENT_BYTES: value }, undefined, async () => true)).rejects.toThrow(
+      `Invalid MAX_STORED_CONTENT_BYTES value: ${value}`
+    );
+  });
+
+  it("rejects an equally invalid MAX_FILE_BYTES the same way", async () => {
+    await expect(resolveRuntimeConfig({ MAX_FILE_BYTES: "garbage" }, undefined, async () => true)).rejects.toThrow(
+      "Invalid MAX_FILE_BYTES value: garbage"
+    );
+  });
+
+  it("still accepts a valid MAX_STORED_CONTENT_BYTES and leaves the default in place when unset", async () => {
+    const withEnv = await resolveRuntimeConfig({ MAX_STORED_CONTENT_BYTES: "1048576" }, undefined, async () => true);
+    expect(withEnv.maxStoredContentBytes).toBe(1048576);
+
+    const withoutEnv = await resolveRuntimeConfig({}, undefined, async () => true);
+    expect(withoutEnv.maxStoredContentBytes).toBe(268435456);
+    expect(withoutEnv.maxFileBytes).toBe(5242880);
+  });
+});

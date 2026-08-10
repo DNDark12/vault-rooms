@@ -54,6 +54,11 @@ export const PANEL_COPY = {
     stale: "The last update failed. Showing the most recent information saved on this screen.",
     retry: "Try again"
   },
+  /** Storage warnings shown near or over the configured limit. */
+  storage: {
+    nearLimit: "This server's storage is nearly full. Delete files you don't need, or ask whoever hosts it to free up space.",
+    overLimit: "This server's storage is full. New files and edits are rejected until whoever hosts it frees up space."
+  },
   /**
    * Which machine a connection is, in the user's terms. Two saved remote servers must not read the same,
    * so the owner's cached name is preferred and the port is the fallback; `someoneElse` remains only for

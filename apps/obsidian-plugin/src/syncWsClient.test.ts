@@ -300,7 +300,6 @@ describe("RoomSyncSocket security messages", () => {
     socket.disconnect();
   });
 
-  // User-facing error messages (docs/superpowers/plans/2026-07-29-user-facing-error-messages.md).
   // The relay's `hello_error` prose has to reach the notice, which means onRevoked needs a structured
   // reason rather than no arguments at all - otherwise the wording is parsed and then dropped.
   it("hands the relay's revocation reason to onRevoked, and stays callable for a code-only frame", async () => {
@@ -1083,7 +1082,6 @@ describe("RoomSyncSocket.reconcileSnapshot", () => {
   });
 });
 
-// Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
 // The socket's job for presence is narrow: advertise the capability, and route the three server
 // variants through the same mounted-room gate and ordering queue the CRDT lane already uses.
 describe("RoomSyncSocket presence negotiation", () => {

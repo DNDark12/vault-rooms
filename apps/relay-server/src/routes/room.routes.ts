@@ -9,6 +9,7 @@ import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
 import type { CrdtDocManager } from "../sync/crdtDocManager.js";
 import type { PresenceService } from "../sync/presenceService.js";
+import type { ContentWriteService } from "../storage/contentWriteService.js";
 import { toInviteResponse, type InviteSecurityContext } from "./inviteResponse.js";
 
 const LISTED_PERMISSIONS: Permission[] = [
@@ -35,6 +36,7 @@ export type RoomRoutesOptions = {
    *  re-checked per path whenever an ACL mutation lands (the existing room-level revalidation cannot
    *  see a single path losing `file:read`). */
   presenceService: PresenceService;
+  contentWriteService?: ContentWriteService;
 };
 
 export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, options: RoomRoutesOptions): void {
@@ -62,7 +64,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         crdtEnabled: body.crdtEnabled,
         capabilities: body.capabilities ?? []
       });
-      return { room: toRoomResponse(room) };
+      return { room: toRoomResponse(repo, room) };
     } catch (error) {
       if (error instanceof Error && error.message.includes("UNIQUE")) {
         throw new AppError("VALIDATION_ERROR", "You already have a room with that folder name.", 409);
@@ -102,7 +104,12 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         maxUses: body.maxUses ?? 1
       })
     );
-    return toInviteResponse(invite, options.publicUrl, repo.getSecurityState() === "plain_legacy" ? undefined : options.security);
+    return toInviteResponse(
+      invite,
+      options.publicUrl,
+      repo.getOrCreateServerId(),
+      repo.getSecurityState() === "plain_legacy" ? undefined : options.security
+    );
   });
 
   app.patch("/api/rooms/:roomId", async (request) => {
@@ -153,10 +160,17 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
         // its callback must stay synchronous (sqlJsAdapter.ts's durable() contract), so any async
         // read has to happen out here first.
         const filesToSeed = crdtEnabled
-          ? repo
-              .listFiles(roomId)
-              .filter((file) => !file.deleted_at && isCrdtEligiblePath(file.relative_path))
-              .map((file) => ({ file, content: repo.latestFileVersion(file.id)?.content ?? "" }))
+          ? await Promise.all(
+              repo
+                .listFiles(roomId)
+                .filter((file) => !file.deleted_at && isCrdtEligiblePath(file.relative_path))
+                .map(async (file) => ({
+                  file,
+                  content: options.contentWriteService
+                    ? (await options.contentWriteService.readFileContent({ roomId, relativePath: file.relative_path })).content
+                    : repo.latestFileVersion(file.id)?.content ?? ""
+                }))
+            )
           : [];
         updated = await repo.durable(() => {
           const room = repo.setRoomCrdtEnabled({ roomId, actorUserId: principal.userId, enabled: crdtEnabled });
@@ -271,7 +285,9 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     // once the room (and its cascaded ACL rules) are gone that is no longer possible - the retraction
     // would be dropped rather than delivered.
     options.presenceService.removeRoom(roomId);
+    const blobKeys = repo.listFiles(roomId).flatMap((file) => repo.listBlobKeysForFile(file.id));
     repo.deleteRoom({ roomId, actorUserId: principal.userId });
+    await options.contentWriteService?.collectOrphanedBlobKeys(blobKeys);
     options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_deleted", roomId });
     return { ok: true };
   });
@@ -362,7 +378,7 @@ function resourceFor(permission: Permission, room: RoomRow) {
 
 function managedRoomResponse(repo: RelayRepository, room: RoomRow) {
   return {
-    ...toRoomResponse(room),
+    ...toRoomResponse(repo, room),
     permissions: [] as Permission[],
     capabilities: repo.listCapabilities(room.id).map((capability) => ({
       pluginId: capability.plugin_id,
@@ -374,7 +390,7 @@ function managedRoomResponse(repo: RelayRepository, room: RoomRow) {
   };
 }
 
-function toRoomResponse(room: RoomRow) {
+function toRoomResponse(repo: RelayRepository, room: RoomRow) {
   return {
     id: room.id,
     name: room.name,
@@ -383,8 +399,9 @@ function toRoomResponse(room: RoomRow) {
     mountName: room.mount_name,
     ownerUserId: room.owner_user_id,
     conflictPolicy: room.conflict_policy,
-    // CRDT room-mode flag (docs/superpowers/plans/2026-07-20-crdt-sync.md contract 1.11).
-    crdtEnabled: Boolean(room.crdt_enabled)
+    crdtEnabled: Boolean(room.crdt_enabled),
+    // Shared blobs are counted in each referencing room.
+    storedBytes: repo.getRoomStorageBytes(room.id)
   };
 }
 

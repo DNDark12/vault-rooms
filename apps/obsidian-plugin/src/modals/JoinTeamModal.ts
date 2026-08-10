@@ -2,7 +2,7 @@ import { Modal, Notice, Setting } from "obsidian";
 import type VaultRoomsPlugin from "../main.js";
 import { defaultDeviceName } from "./deviceName.js";
 import { assertPinMaterial, type PinnedInviteInfo } from "../pinnedTransport.js";
-import { userFacingError } from "../errorMessages.js";
+import { isTransportFailure, userFacingError } from "../errorMessages.js";
 
 export class JoinTeamModal extends Modal {
   private inviteInput = "";
@@ -10,6 +10,8 @@ export class JoinTeamModal extends Modal {
   private inviteToken = "";
   private displayName = "";
   private deviceName = "";
+  private findingServer = false;
+  private showLanRecovery = false;
   /** True when we already have a real server+token (opened via an invite link) - in that case
    *  there's nothing to parse or re-enter, so the form only needs to ask for a display name. */
   private readonly hasKnownInvite: boolean;
@@ -60,6 +62,7 @@ export class JoinTeamModal extends Modal {
         await this.submit();
       })
     );
+    this.renderLanRecovery(contentEl);
     new Setting(contentEl).addButton((button) =>
       button.setButtonText("Use a different invite link").onClick(() => {
         this.showManualForm = true;
@@ -107,6 +110,7 @@ export class JoinTeamModal extends Modal {
         await this.submit();
       })
     );
+    this.renderLanRecovery(contentEl);
   }
 
   private async submit(): Promise<void> {
@@ -115,7 +119,36 @@ export class JoinTeamModal extends Modal {
       this.close();
     } catch (error) {
       new Notice(userFacingError(error, "Join failed"));
+      if (this.pin && isTransportFailure(error)) {
+        this.showLanRecovery = true;
+        this.onOpen();
+      }
     }
+  }
+
+  private renderLanRecovery(contentEl: HTMLElement): void {
+    if (!this.pin || !this.showLanRecovery) return;
+    new Setting(contentEl)
+      .setName("Address changed?")
+      .setDesc("Search this LAN for the same server without sending the invite yet.")
+      .addButton((button) =>
+        button
+          .setButtonText(this.findingServer ? "Searching..." : "Find server on LAN")
+          .setDisabled(this.findingServer)
+          .onClick(async () => {
+            this.findingServer = true;
+            this.onOpen();
+            try {
+              this.serverUrl = await this.plugin.findInviteServerOnLan(this.pin!, this.serverUrl);
+              new Notice(`Found the invite server at ${this.serverUrl}.`);
+            } catch (error) {
+              new Notice(userFacingError(error, "Could not find and verify this server on the LAN."));
+            } finally {
+              this.findingServer = false;
+              this.onOpen();
+            }
+          })
+      );
   }
 
   private applyInviteInput(render: boolean): boolean {

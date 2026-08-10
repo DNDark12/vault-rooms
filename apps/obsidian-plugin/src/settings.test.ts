@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isOwnEmbeddedServerConnection, migrateVaultRoomsSettings } from "./settings.js";
+import { DEFAULT_SERVER_SETTINGS, isOwnEmbeddedServerConnection, migrateVaultRoomsSettings } from "./settings.js";
 
 describe("embedded owner connection identity", () => {
   const owner = {
@@ -23,6 +23,36 @@ describe("embedded owner connection identity", () => {
 });
 
 describe("v0.1 plugin settings migration", () => {
+  it("marks one existing loopback owner connection as this device's embedded server", () => {
+    const result = migrateVaultRoomsSettings({
+      servers: [persistedOwner("dev_local", "https://127.0.0.1:8788")]
+    });
+
+    expect(result.settings.embeddedServerConnectionId).toBe("dev_local");
+    expect(result.migratedLegacy).toBe(true);
+  });
+
+  it("preserves an existing IP or hostname endpoint without inferring remote ownership", () => {
+    const ip = persistedOwner("dev_ip", "https://192.168.12.21:8788");
+    const hostname = persistedOwner("dev_host", "https://host-b.local:8788");
+
+    const result = migrateVaultRoomsSettings({ servers: [ip, hostname] });
+
+    expect(result.settings.servers.map((server) => server.baseUrl)).toEqual([ip.baseUrl, hostname.baseUrl]);
+    expect(result.settings.embeddedServerConnectionId).toBeUndefined();
+  });
+
+  it("preserves a valid explicit embedded connection marker", () => {
+    const local = persistedOwner("dev_local", "https://host-b.local:8788");
+
+    const result = migrateVaultRoomsSettings({
+      servers: [local],
+      embeddedServerConnectionId: local.id
+    });
+
+    expect(result.settings.embeddedServerConnectionId).toBe(local.id);
+  });
+
   it("leaves an absent CRDT journal absent", () => {
     const result = migrateVaultRoomsSettings({
       servers: [],
@@ -267,7 +297,8 @@ describe("v0.1 plugin settings migration", () => {
       ]
     });
 
-    expect(result.migratedLegacy).toBe(false);
+    expect(result.migratedLegacy).toBe(true);
+    expect(result.settings.embeddedServerConnectionId).toBe("dev_tls");
     expect(result.settings.servers[0]).toEqual(expect.objectContaining({
       securityMode: "pinned-tls",
       pinnedIdentitySpkiSha256: "pin",
@@ -340,4 +371,69 @@ describe("v0.1 plugin settings migration", () => {
     expect(migratedRoom).not.toHaveProperty("serverId");
     expect(migratedRoom?.mountPath).toBe("Vault Rooms/Unknown");
   });
+
+  it("normalizes a corrupted persisted maxStoredContentBytes back to the default and reports a migration (P1 review fix)", () => {
+    const result = migrateVaultRoomsSettings({
+      server: {
+        // A hand-edited or future/older-version data.json can contain anything here - the
+        // interactive Settings tab validates on entry, but this path has no such gate.
+        maxFileBytes: 123456,
+        maxStoredContentBytes: Number.NaN,
+        autoStart: true
+      }
+    });
+
+    expect(result.settings.server).toEqual(
+      expect.objectContaining({ maxFileBytes: 123456, maxStoredContentBytes: DEFAULT_SERVER_SETTINGS.maxStoredContentBytes, autoStart: true })
+    );
+    expect(result.migratedLegacy).toBe(true);
+  });
+
+  it("normalizes a positive-but-rounds-to-zero persisted maxStoredContentBytes to the default (re-review fix)", () => {
+    // 0.1 is finite and > 0, so it must be checked again *after* rounding: Math.round(0.1) is 0, and
+    // a 0-byte cap rejects every content write on the next server start.
+    const result = migrateVaultRoomsSettings({ server: { maxFileBytes: 5242880, maxStoredContentBytes: 0.1, autoStart: false } });
+
+    expect(result.settings.server.maxStoredContentBytes).toBe(DEFAULT_SERVER_SETTINGS.maxStoredContentBytes);
+    expect(result.migratedLegacy).toBe(true);
+  });
+
+  it.each([
+    ["zero", 0],
+    ["negative", -5],
+    ["non-finite", Number.POSITIVE_INFINITY],
+    ["non-numeric", "268435456" as unknown as number]
+  ])("normalizes a %s persisted maxStoredContentBytes to the default", (_label, invalidValue) => {
+    const result = migrateVaultRoomsSettings({ server: { maxFileBytes: 5242880, maxStoredContentBytes: invalidValue, autoStart: false } });
+
+    expect(result.settings.server.maxStoredContentBytes).toBe(DEFAULT_SERVER_SETTINGS.maxStoredContentBytes);
+    expect(result.migratedLegacy).toBe(true);
+  });
+
+  it("leaves a valid persisted maxStoredContentBytes untouched and does not report a migration on its own", () => {
+    const result = migrateVaultRoomsSettings({ server: { maxFileBytes: 5242880, maxStoredContentBytes: 1048576, autoStart: false } });
+
+    expect(result.settings.server.maxStoredContentBytes).toBe(1048576);
+    expect(result.migratedLegacy).toBe(false);
+  });
 });
+
+function persistedOwner(id: string, baseUrl: string) {
+  return {
+    id,
+    baseUrl,
+    userId: `usr_${id}`,
+    userDisplayName: "Owner",
+    deviceId: id,
+    deviceName: "Mac",
+    deviceToken: `token_${id}`,
+    isServerOwner: true,
+    status: "active" as const,
+    securityMode: "pinned-tls" as const,
+    serverId: "srv_local",
+    pinnedIdentitySpkiSha256: "pin",
+    identityCertificateDer: "cert",
+    tlsName: "srv-local.vault-rooms.internal",
+    appliedRotationIds: []
+  };
+}

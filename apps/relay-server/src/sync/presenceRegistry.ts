@@ -1,29 +1,7 @@
 import { AppError, type PresenceCursor, type RemotePresenceState } from "@vault-rooms/protocol";
 import type { SyncConnection } from "./connectionRegistry.js";
 
-/**
- * Live cursors / note presence v1 (docs/superpowers/specs/2026-07-28-live-cursors-design.md).
- *
- * The in-memory ownership layer for presence, deliberately kept free of I/O: no sockets, no policy
- * evaluation, no repository, no SQLite. Presence is ephemeral by contract, so a relay restart
- * legitimately forgets every cursor - there is nothing here to persist or migrate. Authorization,
- * validation, fanout, and rate limiting all live in PresenceService.
- *
- * Keying is `(connection, roomId, relativePath, epoch)` with `clientId` held as a *value*, not part
- * of the key. That choice is what makes the client's Y.Doc churn self-healing: the plugin builds a
- * fresh Y.Doc (and therefore a fresh random clientID) on every epoch change, NOT_FOUND recovery,
- * and remount, so a connection's renderer key changes often while its identity does not. Keying by
- * connection means the new state simply *replaces* the old one and `set` hands back the retired
- * entry, letting the service emit remove-old then add-new instead of accumulating ghosts.
- *
- * `clientId` still has to be unique among live states for one document, though, and that is enforced
- * here for a reason that lives entirely on the client: `y-codemirror.next` consumes `getStates()` as
- * a `Map<number, State>` keyed by clientId and skips whichever entry matches its own
- * `doc.clientID`. Two connections sharing a live key therefore collide in the renderer - one remote
- * caret overwrites the other in the map, and it disappears entirely for the peer whose own clientID
- * happens to equal it. Connection keying protects this registry; per-document clientId uniqueness
- * protects the thing downstream of it.
- */
+/** Ephemeral presence keyed by connection and document. */
 
 export type PresenceTarget = {
   roomId: string;
@@ -44,41 +22,28 @@ export type PresenceSetInput = {
 };
 
 export type PresenceSetResult = {
-  /** `true` when this connection had no prior state for this document - the service uses it to
-   *  decide whether the sender is owed a one-time `presence_snapshot` of its peers. */
+  /** Whether the sender needs its initial peer snapshot. */
   firstForConnectionDocument: boolean;
-  /** The state this call displaced, when the same connection changed its renderer key. Must be
-   *  broadcast as a null-cursor removal *before* `current`, or peers keep the stale caret. */
+  /** Replaced state to remove before broadcasting the current one. */
   retired: PresenceEntry | null;
   current: PresenceEntry;
-  /** The other connections' live states for this document, excluding the caller's own. */
+  /** Other live states for this document. */
   snapshot: RemotePresenceState[];
 };
 
-/**
- * Room-session hue leases (docs/superpowers/plans/2026-07-28-room-session-presence-colors.md).
- *
- * Hues are held as integer *milli-degrees* rather than floats. Two reasons, both practical: a Set of
- * integers makes "is this colour already taken" an exact question (float equality on a golden-angle
- * accumulation is not), and it makes probing for a free slot terminate in a bounded number of steps.
- * The wire value is `slot / 1000`, so 137508 crosses as 137.508.
- */
+/** Assigns stable, unique hues per user within one room session. */
 const HUE_SLOTS = 360_000;
-/** The golden angle (137.50776...°), rounded to the slot resolution. Successive multiples of it stay
- *  far apart on the colour wheel for any number of users, which is why it beats even spacing: even
- *  spacing has to know the final count up front, and a room's population changes as people join. */
+/** Golden angle rounded to milli-degrees. */
 const GOLDEN_ANGLE_SLOTS = 137_508;
 
-/** One human's colour in one room, shared by every connection they have open to it. Keyed by userId,
- *  never by connection or device, so a laptop and a desktop are one caret colour. */
+/** One user's color shared across their connections in a room. */
 type RoomHueLease = {
   hueSlot: number;
   connections: Set<SyncConnection>;
 };
 
 type RoomHueState = {
-  /** Randomised per room *session* so two rooms don't open on the same colour, and so a room that
-   *  empties out and refills doesn't deterministically reissue the previous session's assignments. */
+  /** Randomized for each room session. */
   startSlot: number;
   nextOrdinal: number;
   users: Map<string, RoomHueLease>;
