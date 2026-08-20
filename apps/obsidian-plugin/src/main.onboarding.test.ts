@@ -92,6 +92,26 @@ describe("VaultRoomsPlugin guided onboarding orchestration", () => {
     expect(harness.plugin.settings.server.autoStart).toBe(true);
   });
 
+  it("accepts a hostname after verifying this vault's embedded listener", async () => {
+    const harness = onboardingPlugin({ running: false });
+
+    await expect(harness.plugin.configureOnboardingConnection("HuyND.local")).resolves.toMatchObject({
+      class: "hostname",
+      usableForTeammates: true
+    });
+
+    expect(harness.events).toEqual([
+      "save:HuyND.local:false",
+      "start:false",
+      "assert-reachable",
+      "save:HuyND.local:true"
+    ]);
+    expect(harness.plugin.settings.server).toMatchObject({
+      publicUrlOverride: "HuyND.local",
+      autoStart: true
+    });
+  });
+
   it("keeps automatic startup off when the fresh LAN requirement fails", async () => {
     const harness = onboardingPlugin({
       running: false,

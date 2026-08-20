@@ -52,6 +52,28 @@ describe("probeLanShareTarget", () => {
     );
     expect(apiMocks.testConnection).toHaveBeenCalledOnce();
   });
+
+  it("connects through this vault's loopback listener while retaining its advertised hostname", async () => {
+    const pin = {
+      tlsName: "srv_vault_a.vault-rooms.internal",
+      identityCertificateDer: "certificate-a",
+      pinnedIdentitySpkiSha256: "fingerprint-a"
+    };
+
+    await probeLanShareTarget({
+      baseUrl: "https://HuyND.local:8788",
+      connectionBaseUrl: "https://127.0.0.1:8788",
+      pin
+    });
+
+    expect(RelayApiClient).toHaveBeenCalledWith(
+      "https://127.0.0.1:8788",
+      undefined,
+      undefined,
+      pin
+    );
+    expect(apiMocks.testConnection).toHaveBeenCalledOnce();
+  });
 });
 
 describe("LanShareReachabilityMonitor", () => {
@@ -136,6 +158,30 @@ describe("LanShareReachabilityMonitor", () => {
 
     monitor.check(pinnedTarget("fingerprint-b"));
     await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(3));
+  });
+
+  it("does not reuse a hostname result for another vault's loopback listener", async () => {
+    const probe = vi.fn().mockResolvedValue(undefined);
+    const monitor = new LanShareReachabilityMonitor(probe, vi.fn());
+    const advertised = "https://HuyND.local:8788";
+
+    await monitor.require({
+      baseUrl: advertised,
+      connectionBaseUrl: "https://127.0.0.1:8788",
+      pin: pinnedTarget("fingerprint-a").pin
+    });
+    await monitor.require({
+      baseUrl: advertised,
+      connectionBaseUrl: "https://127.0.0.1:8790",
+      pin: pinnedTarget("fingerprint-a").pin
+    });
+
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(monitor.getState()).toMatchObject({
+      baseUrl: advertised,
+      status: "reachable",
+      warning: expect.stringMatching(/teammates.*resolve.*hostname/i)
+    });
   });
 
   it("keeps missing targets unavailable and explains how to configure one", async () => {

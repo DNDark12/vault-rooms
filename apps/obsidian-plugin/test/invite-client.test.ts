@@ -3,6 +3,7 @@ import { requestUrl } from "obsidian";
 import { certPemToDerBase64Url, generateServerIdentity } from "vault-rooms-relay/embedded-core";
 import { RelayApiClient } from "../src/apiClient.js";
 import {
+  embeddedLanShareProbeTarget,
   normalizeReplacementServerUrl,
   pinnedInfoForServer,
   ServerConnectionManager
@@ -57,6 +58,46 @@ describe("invite API client", () => {
 });
 
 describe("pinned invite connection updates", () => {
+  it("keeps same-hostname vault probes bound to each vault's own port and TLS identity", () => {
+    const vaultA = embeddedStatus({
+      localUrl: "https://127.0.0.1:8788",
+      lanUrl: "https://huynd.local:8788",
+      serverId: "srv_a",
+      pinnedInfo: embeddedPin("srv_a", "pin-a")
+    });
+    const vaultB = embeddedStatus({
+      localUrl: "https://127.0.0.1:8790",
+      lanUrl: "https://huynd.local:8790",
+      serverId: "srv_b",
+      pinnedInfo: embeddedPin("srv_b", "pin-b")
+    });
+
+    expect(embeddedLanShareProbeTarget(vaultA)).toEqual({
+      baseUrl: vaultA.lanUrl,
+      connectionBaseUrl: vaultA.localUrl,
+      pin: vaultA.pinnedInfo
+    });
+    expect(embeddedLanShareProbeTarget(vaultB)).toEqual({
+      baseUrl: vaultB.lanUrl,
+      connectionBaseUrl: vaultB.localUrl,
+      pin: vaultB.pinnedInfo
+    });
+  });
+
+  it("keeps IP advertisements on the existing direct probe path", () => {
+    const status = embeddedStatus({
+      localUrl: "https://127.0.0.1:8788",
+      lanUrl: "https://192.168.12.16:8788"
+    });
+
+    expect(embeddedLanShareProbeTarget(status)).toEqual({
+      baseUrl: status.lanUrl,
+      pin: status.pinnedInfo
+    });
+    expect(embeddedLanShareProbeTarget({ running: false })).toBeUndefined();
+    expect(embeddedLanShareProbeTarget(embeddedStatus({ lanUrl: undefined }))).toBeUndefined();
+  });
+
   it("starts and stops LAN discovery with the embedded relay without making discovery a hosting dependency", async () => {
     const embedded = connection({ isServerOwner: true, securityMode: "pinned-tls", serverId: "srv_local" });
     const responder = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
@@ -764,4 +805,31 @@ function createManager(servers: ServerConnection[], contextOverrides: Record<str
     ...contextOverrides
   } as never);
   return { manager, settings, saveSettings };
+}
+
+function embeddedPin(serverId: string, fingerprint: string) {
+  return {
+    serverId,
+    tlsName: `${serverId}.vault-rooms.internal`,
+    identityCertificateDer: `certificate-${serverId}`,
+    pinnedIdentitySpkiSha256: fingerprint
+  };
+}
+
+function embeddedStatus(overrides: Record<string, unknown> = {}) {
+  const serverId = typeof overrides.serverId === "string" ? overrides.serverId : "srv_local";
+  return {
+    running: true,
+    host: "0.0.0.0",
+    port: 8787,
+    localUrl: "https://127.0.0.1:8788",
+    lanUrl: "https://huynd.local:8788",
+    securityMode: "pinned-tls",
+    bootstrapped: true,
+    serverId,
+    legacyV01BackupAvailable: false,
+    securityState: "pinned_tls",
+    pinnedInfo: embeddedPin(serverId, `pin-${serverId}`),
+    ...overrides
+  } as const;
 }

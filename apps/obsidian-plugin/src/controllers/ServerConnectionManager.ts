@@ -9,6 +9,7 @@ import {
   type LanShareProbeTarget,
   type LanShareReachability
 } from "../lanShareReachability.js";
+import { classifyLanAddress } from "../lanAddress.js";
 import {
   assertPinMaterial,
   fetchRotationProbe,
@@ -204,14 +205,7 @@ export class ServerConnectionManager {
   }
 
   private getLanShareProbeTarget(): LanShareProbeTarget | undefined {
-    const status = this.getServerStatus();
-    if (!status.running || !status.lanUrl) {
-      return undefined;
-    }
-    return {
-      baseUrl: status.lanUrl,
-      pin: status.pinnedInfo
-    };
+    return embeddedLanShareProbeTarget(this.getServerStatus());
   }
 
   private getOrCreateEmbeddedServer(): EmbeddedRelayServer {
@@ -744,6 +738,21 @@ export class ServerConnectionManager {
     this.ctx.settings.servers = [...this.ctx.settings.servers.filter((server) => server.id !== config.id), config];
     this.ctx.settings.activeServerId = config.id;
   }
+}
+
+/** Builds one probe from one vault's running relay status. Hostname self-checks use that exact
+ *  listener's loopback URL; no process-wide hostname/port lookup can cross vault boundaries. */
+export function embeddedLanShareProbeTarget(status: EmbeddedServerStatus): LanShareProbeTarget | undefined {
+  if (!status.running || !status.lanUrl) {
+    return undefined;
+  }
+  return {
+    baseUrl: status.lanUrl,
+    ...(classifyLanAddress(status.lanUrl).class === "hostname"
+      ? { connectionBaseUrl: status.localUrl }
+      : {}),
+    pin: status.pinnedInfo
+  };
 }
 
 export function pinnedInfoForServer(server: ServerConnection): PinnedServerInfo | undefined {

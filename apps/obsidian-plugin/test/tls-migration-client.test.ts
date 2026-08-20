@@ -22,7 +22,11 @@ import { openObsidianSqlJsDb } from "../src/obsidianSqlJsDb.js";
 import { EmbeddedRelayServer } from "../src/serverManager.js";
 import { migrateServerConnectionSettings, type EmbeddedServerSettings } from "../src/settings.js";
 import { RelayApiClient } from "../src/apiClient.js";
-import { ServerConnectionManager } from "../src/controllers/ServerConnectionManager.js";
+import {
+  embeddedLanShareProbeTarget,
+  ServerConnectionManager
+} from "../src/controllers/ServerConnectionManager.js";
+import { probeLanShareTarget } from "../src/lanShareReachability.js";
 import { openSyncSocket } from "../src/syncWsClient.js";
 import type { ServerConnection, VaultRoomsSettings } from "../src/settings.js";
 import sqlWasmBinary from "sql.js/dist/sql-wasm-browser.wasm";
@@ -103,6 +107,48 @@ describe("embedded TLS listeners", () => {
 });
 
 describe("embedded TLS startup state", () => {
+  it("keeps three concurrent vault relays isolated when they advertise the same hostname", async () => {
+    const vaultA = new EmbeddedRelayServer(
+      asDataAdapter(new FakeDataAdapter()),
+      "plugins/vault-rooms/server-data/relay.sqlite"
+    );
+    const vaultB = new EmbeddedRelayServer(
+      asDataAdapter(new FakeDataAdapter()),
+      "plugins/vault-rooms/server-data/relay.sqlite"
+    );
+    const vaultC = new EmbeddedRelayServer(
+      asDataAdapter(new FakeDataAdapter()),
+      "plugins/vault-rooms/server-data/relay.sqlite"
+    );
+    embeddedServers.push(vaultA, vaultB, vaultC);
+
+    const statuses = await Promise.all([
+      vaultA.start({ maxFileBytes: 1024, autoStart: false, publicUrlOverride: "HuyND.local" }),
+      vaultB.start({ maxFileBytes: 1024, autoStart: false, publicUrlOverride: "HuyND.local" }),
+      vaultC.start({ maxFileBytes: 1024, autoStart: false, publicUrlOverride: "HuyND.local" })
+    ]);
+
+    expect(statuses.every((status) => status.running)).toBe(true);
+    if (statuses.some((status) => !status.running)) throw new Error("Expected all three vault relays to run");
+    const running = statuses as Array<Extract<(typeof statuses)[number], { running: true }>>;
+    expect(running.map((status) => new URL(status.lanUrl!).hostname)).toEqual([
+      "huynd.local",
+      "huynd.local",
+      "huynd.local"
+    ]);
+    expect(new Set(running.map((status) => status.localUrl)).size).toBe(3);
+    expect(new Set(running.map((status) => status.lanUrl)).size).toBe(3);
+    expect(new Set(running.map((status) => status.serverId)).size).toBe(3);
+    expect(new Set(running.map((status) => status.pinnedInfo?.pinnedIdentitySpkiSha256)).size).toBe(3);
+    await Promise.all(
+      running.map((status) => {
+        const target = embeddedLanShareProbeTarget(status);
+        if (!target) throw new Error("Expected a LAN probe target for each running vault");
+        return probeLanShareTarget(target);
+      })
+    );
+  });
+
   it("keeps the stored identity serverId when automatic v0.1 recovery replaces an empty database", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";

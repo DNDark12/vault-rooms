@@ -198,7 +198,10 @@ export class GuidedOnboardingModal extends Modal {
       });
       this.contentEl.createEl("p", {
         cls: "setting-item-description",
-        text: "This computer can reach the saved address. A teammate's firewall or Wi-Fi settings can still block their connection."
+        text:
+          this.connectionVerdict.class === "hostname"
+            ? copy.hostnameReadyDetail
+            : copy.readyDetail
       });
     }
     this.renderError();

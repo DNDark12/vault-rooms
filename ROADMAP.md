@@ -49,7 +49,7 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   SQLite in both standalone and embedded relays. Writes retain only the latest version, collect unreferenced
   legacy and external blobs, enforce a projected 256 MiB stored-content ceiling, migrate old content resumably,
   expose storage usage and explicit SQLite compaction, and provide authenticated raw HTTP bytes for future chat
-  attachments. File sync itself still uses base64-over-JSON; optional raw framing remains Phase C.
+  attachments. File sync itself still uses base64-over-JSON; raw framing is the next transport milestone.
 - **DHCP-safe connection recovery.** Hosts are guided toward stable `.local` names. A teammate can verify and
   replace a stale saved endpoint through a bounded, user-triggered LAN multicast/broadcast search, without changing device identity,
   credentials, rooms, mounts, teams, friendships, or access. Discovery is bounded, user-triggered, and available
@@ -61,13 +61,19 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
 
 ## Next up
 
-- **Chat v1.** Direct, ad-hoc group (1-n), team, and room threads share the authenticated
-  `/sync` connection but keep their own authorization and presence state. The release is staged: text/Markdown,
-  emoji reactions, unread state, presence, sender deletion, and a built-in sticker catalog form the chat core;
-  image messages then reference either an existing authorized room file or an external chat blob. No chat
-  attachment folder is created in any Vault. Message metadata stays in a separately-pruned `chat.db`; blob bytes
-  reuse Phase B's external store and raw HTTP seam. General file-sync raw transport in Phase C does not block
-  chat.
+- **Raw binary sync framing (Phase C).** Replace base64-over-JSON for capable peers with raw WebSocket frames and
+  the existing authenticated raw HTTP seam. Base64 remains the tested fallback for older peers. Hash versions
+  stay explicit so an upgrade produces no conflict copies, re-pushes, or re-downloads. The first release keeps
+  the current whole-payload model; chunking, resume, and backpressure remain deferred until the per-file ceiling
+  is raised.
+- **Phase C mixed-version soak.** Test Phase B and Phase C clients and relays in both directions on real hardware.
+  Release only after every combination converges with no conflict copies and the base64 fallback remains live.
+- **Chat v1 core.** Direct, ad-hoc group (1-n), team, and room threads share the authenticated `/sync` connection
+  but keep separate authorization and presence state. Text/Markdown, emoji reactions, unread state, presence,
+  sender deletion, and the built-in sticker catalog ship before attachments. Message metadata stays in a
+  separately-pruned `chat.db`.
+- **Chat attachments.** Image messages reference either an existing authorized room file or an external chat
+  blob. Blob bytes reuse the external store and raw HTTP seam. No chat attachment folder is created in any Vault.
 - **Continue CRDT soak.** Live editing is the default for new rooms and remains the newest, most
   integrity-sensitive part of the plugin. Continue broadening the real-machine and mixed-version soak beyond
   the 0.2.5 and 0.2.6 release checks; the two new surfaces are journal replay across a full restart and the
@@ -80,9 +86,6 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
 
 ## Bigger efforts - each needs its own design pass
 
-- **Raw binary sync framing (optional Phase C).** Remove base64's transient frame/RAM overhead without changing
-  the hash domain for old peers or producing conflict-copy storms. Phase B already fixed persistent storage and
-  flush amplification, so this does not block chat.
 - **Selective sync / partial mounts.** Mounting a room is all-or-nothing per folder today.
 - **Conflict resolution UI beyond keep-both.** A real diff/merge view for the whole-file lane.
 - **Multi-server rooms.** A room lives on exactly one relay; there is no federation.

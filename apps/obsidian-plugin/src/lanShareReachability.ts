@@ -4,9 +4,15 @@ import { classifyLanAddress } from "./lanAddress.js";
 import type { PinnedServerInfo } from "./pinnedTransport.js";
 
 export type LanShareProbeTarget = {
+  /** Address advertised to teammates and judged for LAN suitability. */
   baseUrl: string;
+  /** Same embedded relay instance's loopback URL, used only when the host cannot resolve its own hostname. */
+  connectionBaseUrl?: string;
   pin?: PinnedServerInfo;
 };
+
+export const HOSTNAME_SELF_PROBE_WARNING =
+  "This relay is running on this computer, but teammates still need to be able to resolve this hostname on the LAN.";
 
 export type LanShareReachability =
   | { status: "unavailable" }
@@ -44,7 +50,7 @@ export function lanSharePresentation(state: LanShareReachability): LanSharePrese
 }
 
 export async function probeLanShareTarget(target: LanShareProbeTarget): Promise<void> {
-  await new RelayApiClient(target.baseUrl, undefined, undefined, target.pin).testConnection();
+  await new RelayApiClient(target.connectionBaseUrl ?? target.baseUrl, undefined, undefined, target.pin).testConnection();
 }
 
 export class LanShareReachabilityMonitor {
@@ -119,7 +125,11 @@ export class LanShareReachabilityMonitor {
       }
       // Carry the classifier's warning through: an address can be reachable *and* still worth flagging, and
       // dropping it here is why "allowed but flagged" previously rendered as an ordinary green badge.
-      this.state = { key, baseUrl: target.baseUrl, status: "reachable", ...(verdict.warning ? { warning: verdict.warning } : {}) };
+      const warning =
+        target.connectionBaseUrl && target.connectionBaseUrl !== target.baseUrl
+          ? HOSTNAME_SELF_PROBE_WARNING
+          : verdict.warning;
+      this.state = { key, baseUrl: target.baseUrl, status: "reachable", ...(warning ? { warning } : {}) };
       this.onChange();
     } catch (error) {
       if (generation !== this.generation) {
@@ -149,6 +159,7 @@ export class LanShareReachabilityMonitor {
 function targetKey(target: LanShareProbeTarget): string {
   return JSON.stringify([
     target.baseUrl,
+    target.connectionBaseUrl ?? "",
     target.pin?.tlsName ?? "",
     target.pin?.identityCertificateDer ?? "",
     target.pin?.pinnedIdentitySpkiSha256 ?? ""

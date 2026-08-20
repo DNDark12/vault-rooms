@@ -115,6 +115,10 @@ describe("guided onboarding policy", () => {
       pendingAction: "Checking connection…",
       helpAction: "Where do I find this?",
       readyStatus: "Connection ready",
+      readyDetail:
+        "This computer can reach the saved address. A teammate's firewall or Wi-Fi settings can still block their connection.",
+      hostnameReadyDetail:
+        "The relay is running on this computer. Teammates still need to be able to resolve this hostname on the LAN.",
       continueAction: "Continue",
       cautiousContinueAction: "Continue with this address",
       errorFallback: "Connection check failed"
