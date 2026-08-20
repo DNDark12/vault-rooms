@@ -54,6 +54,9 @@ export class ServerConnectionManager {
   private suppressLanShareRender = false;
   private lanDiscoveryResponder: Pick<LanDiscoveryResponder, "start" | "stop"> | null = null;
   private lanDiscoveryState: { available: boolean; error?: string } = { available: false };
+  /** Connection ids whose pin-mismatch prompt is being raised right now - see the catch in
+   *  handlePinnedConnectionFailure. */
+  private readonly pinMismatchPromptsInFlight = new Set<string>();
 
   constructor(private readonly ctx: ServerConnectionManagerContext) {
     this.lanShareReachability = new LanShareReachabilityMonitor(probeLanShareTarget, () => {
@@ -456,36 +459,39 @@ export class ServerConnectionManager {
     candidate.deviceToken = completed.deviceToken;
     candidate.securityState = "ok";
     candidate.lastSuccessfulConnectionAt = new Date().toISOString();
-    await this.persistConnectionReplacement(server, candidate);
-    return candidate;
+    return await this.persistConnectionReplacement(server, candidate);
   }
 
   async handlePinnedConnectionFailure(server: ServerConnection, originalError: Error): Promise<ServerConnection | null> {
+    // Every read below comes from the saved connection, never from the (possibly pre-replacement)
+    // object the caller happens to hold: deriving the next state from stale fields is what rolled
+    // settings back onto a superseded pin, rotation history, or an already-invalidated device token.
+    const current = this.currentConnection(server);
     let probe: Awaited<ReturnType<typeof fetchRotationProbe>>;
     try {
-      probe = await fetchRotationProbe(server.baseUrl);
+      probe = await fetchRotationProbe(current.baseUrl);
     } catch {
       throw originalError;
     }
-    if (probe.presentedSpkiSha256 === server.pinnedIdentitySpkiSha256) {
+    if (probe.presentedSpkiSha256 === current.pinnedIdentitySpkiSha256) {
       throw originalError;
     }
 
     try {
-      if (!server.serverId || !server.pinnedIdentitySpkiSha256 || !server.identityCertificateDer) {
+      if (!current.serverId || !current.pinnedIdentitySpkiSha256 || !current.identityCertificateDer) {
         throw new Error("Saved pinned server identity is incomplete.");
       }
       const body = probe.body as { serverId?: unknown; rotations?: unknown };
-      if (body.serverId !== server.serverId || !Array.isArray(body.rotations)) {
+      if (body.serverId !== current.serverId || !Array.isArray(body.rotations)) {
         throw new Error("Rotation response belongs to a different server.");
       }
-      let workingPin = server.pinnedIdentitySpkiSha256;
-      let workingCertificate = server.identityCertificateDer;
-      const applied = new Set(server.appliedRotationIds ?? []);
+      let workingPin = current.pinnedIdentitySpkiSha256;
+      let workingCertificate = current.identityCertificateDer;
+      const applied = new Set(current.appliedRotationIds ?? []);
       const responseIds = new Set<string>();
       const rotations = body.rotations.map((value) => {
         const record = value as IdentityRotationRecord;
-        if (!record?.rotationId || record.serverId !== server.serverId || responseIds.has(record.rotationId)) {
+        if (!record?.rotationId || record.serverId !== current.serverId || responseIds.has(record.rotationId)) {
           throw new Error("Identity rotation replay detected.");
         }
         responseIds.add(record.rotationId);
@@ -521,27 +527,44 @@ export class ServerConnectionManager {
         throw new Error("No valid signed rotation reaches the presented server identity.");
       }
       const candidate: ServerConnection = {
-        ...server,
+        ...current,
         pinnedIdentitySpkiSha256: workingPin,
         identityCertificateDer: workingCertificate,
         appliedRotationIds: [...applied],
         securityState: "ok"
       };
-      await this.persistConnectionReplacement(server, candidate);
-      Object.assign(server, candidate);
-      return candidate;
+      // Derived from `current`, persisted against `server`: the saved connection is the source of
+      // truth, and the caller's own object is mirrored so it stops retrying with stale material.
+      return await this.persistConnectionReplacement(server, candidate);
     } catch {
-      const candidate: ServerConnection = { ...server, securityState: "pin_mismatch" };
-      await this.persistConnectionReplacement(server, candidate);
-      Object.assign(server, candidate);
+      // A single user action can produce many failing requests against the same unverifiable
+      // identity (mountRoom pushes one pre-existing file at a time), and each one lands here. The
+      // prompt is per-connection, not per-request: raise it only on the transition into
+      // pin_mismatch. The in-flight set covers the await below, because concurrent failures would
+      // otherwise all read the pre-persistence state and each open a modal; afterwards the
+      // persisted state itself is the guard. markSuccessfulPinnedConnection and a verified rotation
+      // both clear it, so a later genuine mismatch still prompts.
+      const alreadyPrompted = current.securityState === "pin_mismatch" || this.pinMismatchPromptsInFlight.has(current.id);
+      this.pinMismatchPromptsInFlight.add(current.id);
+      let persisted: ServerConnection;
+      try {
+        persisted = await this.persistConnectionReplacement(server, { ...current, securityState: "pin_mismatch" });
+      } finally {
+        // Cleared unconditionally: on a persistence failure the state is rolled back to whatever it
+        // was, and a later failure should be free to prompt again.
+        this.pinMismatchPromptsInFlight.delete(current.id);
+      }
+      if (alreadyPrompted) {
+        return null;
+      }
       if (this.ctx.showPinMismatch) {
-        this.ctx.showPinMismatch(server, probe.presentedSpkiSha256);
+        this.ctx.showPinMismatch(persisted, probe.presentedSpkiSha256);
       } else {
         const { PinMismatchModal } = await import("../modals/PinMismatchModal.js");
-        new PinMismatchModal(this.ctx.app, server, probe.presentedSpkiSha256, {
+        new PinMismatchModal(this.ctx.app, persisted, probe.presentedSpkiSha256, {
           onJoinWithNewInvite: this.ctx.openJoinServer,
           onRemoveSavedConnection: this.ctx.removeSavedConnection
-            ? () => this.ctx.removeSavedConnection!(server)
+            ? () => this.ctx.removeSavedConnection!(persisted)
             : undefined
         }).open();
       }
@@ -549,15 +572,35 @@ export class ServerConnectionManager {
     }
   }
 
-  private async persistConnectionReplacement(original: ServerConnection, candidate: ServerConnection): Promise<void> {
-    const previous = this.ctx.settings.servers;
-    this.ctx.settings.servers = previous.map((saved) => (saved.id === original.id ? candidate : saved));
+  /**
+   * Applies a replacement to the *one* object that represents this saved connection, in place.
+   * Swapping a fresh object into settings.servers stranded every holder of the previous one - the
+   * sync engine's callbacks, the live WebSocket, the panel - on superseded state, and a later write
+   * derived from such a holder rolled the saved connection back (worst case: onto the device token
+   * the relay invalidated during TLS migration). `original` is mirrored too, so a caller still
+   * holding a pre-replacement object converges instead of retrying with stale material.
+   */
+  private async persistConnectionReplacement(
+    original: ServerConnection,
+    candidate: ServerConnection
+  ): Promise<ServerConnection> {
+    const target = this.currentConnection(original);
+    const targetSnapshot: ServerConnection = { ...target };
+    const originalSnapshot: ServerConnection = { ...original };
+    applyConnectionState(target, candidate);
+    if (original !== target) {
+      applyConnectionState(original, candidate);
+    }
     try {
       await this.ctx.saveSettings();
     } catch (error) {
-      this.ctx.settings.servers = previous;
+      applyConnectionState(target, targetSnapshot);
+      if (original !== target) {
+        applyConnectionState(original, originalSnapshot);
+      }
       throw error;
     }
+    return target;
   }
 
   /** Same-process read, no network round-trip - see EmbeddedRelayServer.getBootstrapPin(). */
@@ -632,30 +675,33 @@ export class ServerConnectionManager {
   }
 
   apiFor(server: ServerConnection): RelayApiClient {
-    const pinned = pinnedInfoForServer(server);
     return new RelayApiClient(
       server.baseUrl,
       server.deviceToken,
       () => this.markServerRevoked(server),
-      pinned,
+      // Resolved per request, and resolved against *live settings by id* rather than the captured
+      // `server` object: persistConnectionReplacement stores a brand-new object in settings.servers
+      // and only patches the one object handed to it, so a closure over an older object would go
+      // stale again on the next rotation. Snapshotting here is what stranded the long-lived
+      // VaultSyncEngine client on a superseded identity - see RelayApiClient's `pinned` parameter.
+      () => pinnedInfoForServer(this.currentConnection(server)),
       server.securityMode === "pinned-tls" ? () => this.markSuccessfulPinnedConnection(server) : undefined,
-      server.securityMode === "pinned-tls"
-        ? async (error) => {
-            const decision = await this.recoverPinnedTransport(server, error);
-            if (decision === "retry" && pinned) {
-              const updatedPin = pinnedInfoForServer(server);
-              if (updatedPin) Object.assign(pinned, updatedPin);
-            }
-            return decision;
-          }
-        : undefined
+      server.securityMode === "pinned-tls" ? (error) => this.recoverPinnedTransport(server, error) : undefined
     );
   }
 
+  private currentConnection(server: ServerConnection): ServerConnection {
+    return this.ctx.settings.servers.find((saved) => saved.id === server.id) ?? server;
+  }
+
   markSuccessfulPinnedConnection(server: ServerConnection): void {
-    if (server.securityMode !== "pinned-tls") return;
-    server.lastSuccessfulConnectionAt = new Date().toISOString();
-    server.securityState = "ok";
+    const current = this.currentConnection(server);
+    if (current.securityMode !== "pinned-tls") return;
+    const state = { lastSuccessfulConnectionAt: new Date().toISOString(), securityState: "ok" } as const;
+    Object.assign(current, state);
+    // A caller may still hold a pre-replacement object; without this its own view stays stale even
+    // though the connection just verified successfully.
+    if (server !== current) Object.assign(server, state);
     void this.ctx.saveSettings();
   }
 
@@ -685,10 +731,12 @@ export class ServerConnectionManager {
    * be removed and set up/joined again rather than retried.
    */
   private markServerRevoked(server: ServerConnection): void {
-    if (server.status === "revoked") {
+    const current = this.currentConnection(server);
+    if (current.status === "revoked") {
       return;
     }
-    server.status = "revoked";
+    current.status = "revoked";
+    if (server !== current) server.status = "revoked";
     void this.ctx.saveSettings();
     this.ctx.renderOpenRoomsViews();
     new Notice(`"${server.baseUrl}" - saved login is no longer valid on this server. Remove it and set up/join again from Settings → Vault Rooms → Servers.`);
@@ -753,6 +801,18 @@ export function embeddedLanShareProbeTarget(status: EmbeddedServerStatus): LanSh
       : {}),
     pin: status.pinnedInfo
   };
+}
+
+/** Replaces `target`'s fields with `source`'s, in place. Keys absent from `source` are dropped, so a
+ *  replacement that stops being pinned cannot leave stale pin material behind on the object every
+ *  holder shares. */
+function applyConnectionState(target: ServerConnection, source: ServerConnection): void {
+  for (const key of Object.keys(target)) {
+    if (!(key in source)) {
+      delete (target as Record<string, unknown>)[key];
+    }
+  }
+  Object.assign(target, source);
 }
 
 export function pinnedInfoForServer(server: ServerConnection): PinnedServerInfo | undefined {

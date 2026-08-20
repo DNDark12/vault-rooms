@@ -6,14 +6,17 @@ import type { DataAdapter } from "obsidian";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import initSqlJs from "sql.js/dist/sql-wasm-browser.js";
+import type { IdentityRotationRecord } from "@vault-rooms/protocol";
 import {
   certDerBase64UrlToPem,
   certPemToDerBase64Url,
   createRelayCore,
+  createRotationRecord,
   generateServerIdentity,
   spkiSha256FromCertDer,
   tlsCertificateChainPem,
-  type IdentityStore
+  type IdentityStore,
+  type ServerIdentity
 } from "vault-rooms-relay/embedded-core";
 import { openRelayDb } from "../../relay-server/src/db/db.js";
 import { LEGACY_V01_DATA, LEGACY_V01_SCHEMA } from "../../relay-server/test/fixtures/legacyV01.js";
@@ -731,7 +734,11 @@ describe("member TLS migration", () => {
     const migrated = await manager.migrateConnection(original);
 
     await oldSocketClosed;
-    expect(original.baseUrl).toBe(`http://127.0.0.1:${httpPort}`);
+    // The old HTTP credential stays valid until completion returns a rotated one (asserted by the
+    // 401 below), but the saved connection itself is a single object updated in place - holders of
+    // the pre-migration object must not be left pointing at the plaintext listener.
+    expect(migrated).toBe(original);
+    expect(original.baseUrl).toBe(`https://127.0.0.1:${hostSettings.tlsPort}`);
     expect(settings.servers).toEqual([migrated]);
     expect(migrated).toMatchObject({
       baseUrl: `https://127.0.0.1:${hostSettings.tlsPort}`,
@@ -884,6 +891,119 @@ describe("member TLS migration", () => {
     expect(showPinMismatch).not.toHaveBeenCalled();
   });
 
+  it("derives recovery from the saved connection, not from a caller's superseded object", async () => {
+    // Audit finding: only the pin resolver looked the saved connection up by id. Everything else -
+    // recovery, markSuccessfulPinnedConnection, markServerRevoked - kept mutating and reading the
+    // object the caller captured. Settings objects are rebuilt whenever the plugin reloads its data,
+    // so a live holder legitimately diverges from settings.servers; deriving the next state from
+    // that holder rolled the saved connection back, worst case onto a superseded device token.
+    let savedIdentity!: ServerIdentity;
+    let currentIdentity!: ServerIdentity;
+    let rotation!: IdentityRotationRecord;
+    const remote = await startDualStackEmbeddedApp(
+      async (serverId) => {
+        savedIdentity = await generateServerIdentity(serverId);
+        currentIdentity = await generateServerIdentity(serverId);
+        rotation = await createRotationRecord({ serverId, oldIdentity: savedIdentity, newIdentity: currentIdentity });
+        return currentIdentity;
+      },
+      () => [rotation]
+    );
+    const unrelatedIdentity = await generateServerIdentity(remote.serverId);
+    const current: ServerConnection = {
+      id: "dev_stale_holder",
+      baseUrl: `https://127.0.0.1:${remote.tlsPort}`,
+      userId: "usr_1",
+      userDisplayName: "Member",
+      deviceId: "dev_stale_holder",
+      deviceName: "Laptop",
+      deviceToken: "tr_dev_current",
+      isServerOwner: false,
+      status: "active",
+      securityMode: "pinned-tls",
+      serverId: remote.serverId,
+      tlsName: savedIdentity.tlsName,
+      identityCertificateDer: certPemToDerBase64Url(savedIdentity.identityCertPem),
+      pinnedIdentitySpkiSha256: savedIdentity.identitySpkiSha256,
+      appliedRotationIds: [],
+      securityState: "ok"
+    };
+    // What a client captured before the last replacement: same id, superseded pin and credential.
+    const stale: ServerConnection = {
+      ...current,
+      deviceToken: "tr_dev_superseded",
+      identityCertificateDer: certPemToDerBase64Url(unrelatedIdentity.identityCertPem),
+      pinnedIdentitySpkiSha256: unrelatedIdentity.identitySpkiSha256
+    };
+    const showPinMismatch = vi.fn();
+    const { manager, settings } = createConnectionManager(current, showPinMismatch);
+    let tlsFailure: Error;
+    try {
+      await new RelayApiClient(current.baseUrl, current.deviceToken, undefined, pinnedInfo(current)).me();
+      throw new Error("Expected the pre-rotation pin to fail");
+    } catch (error) {
+      tlsFailure = error instanceof Error ? error : new Error(String(error));
+    }
+
+    const recovered = await manager.handlePinnedConnectionFailure(stale, tlsFailure);
+
+    expect(recovered).toBe(settings.servers[0]);
+    expect(recovered).toMatchObject({
+      // Verified from the saved pin's rotation chain, which the stale object's pin cannot reach.
+      pinnedIdentitySpkiSha256: currentIdentity.identitySpkiSha256,
+      appliedRotationIds: [rotation.rotationId],
+      securityState: "ok",
+      // Never rolled back to whatever credential the stale holder was carrying.
+      deviceToken: "tr_dev_current"
+    });
+    expect(showPinMismatch).not.toHaveBeenCalled();
+    // The stale holder converges too, so its next attempt does not retry with superseded material.
+    expect(stale.pinnedIdentitySpkiSha256).toBe(currentIdentity.identitySpkiSha256);
+
+    manager.markSuccessfulPinnedConnection(stale);
+
+    expect(settings.servers[0]?.lastSuccessfulConnectionAt).toBeTruthy();
+    expect(settings.servers[0]?.securityState).toBe("ok");
+  });
+
+  it("raises one pin-mismatch prompt for concurrent failures against the same unverifiable identity", async () => {
+    // The dedupe cannot rely on state written after an await: concurrent transport failures all read
+    // the pre-persistence state and each opened its own modal.
+    const { identity: presentedIdentity, serverId, tlsPort } = await startDualStackEmbeddedApp();
+    const savedIdentity = await generateServerIdentity(serverId);
+    const saved: ServerConnection = {
+      id: "dev_concurrent_mismatch",
+      baseUrl: `https://127.0.0.1:${tlsPort}`,
+      userId: "usr_1",
+      userDisplayName: "Member",
+      deviceId: "dev_concurrent_mismatch",
+      deviceName: "Laptop",
+      deviceToken: "tr_dev_never_sent",
+      isServerOwner: false,
+      status: "active",
+      securityMode: "pinned-tls",
+      serverId,
+      tlsName: savedIdentity.tlsName,
+      identityCertificateDer: certPemToDerBase64Url(savedIdentity.identityCertPem),
+      pinnedIdentitySpkiSha256: savedIdentity.identitySpkiSha256,
+      appliedRotationIds: [],
+      securityState: "ok"
+    };
+    const showPinMismatch = vi.fn();
+    const { manager, settings } = createConnectionManager(saved, showPinMismatch);
+    const tlsFailure = new Error("certificate signature failure");
+
+    const results = await Promise.all([
+      manager.handlePinnedConnectionFailure(saved, tlsFailure),
+      manager.handlePinnedConnectionFailure(saved, tlsFailure)
+    ]);
+
+    expect(results).toEqual([null, null]);
+    expect(showPinMismatch).toHaveBeenCalledTimes(1);
+    expect(showPinMismatch).toHaveBeenCalledWith(saved, presentedIdentity.identitySpkiSha256);
+    expect(settings.servers[0]?.securityState).toBe("pin_mismatch");
+  });
+
   it("leaves settings and token unchanged when strict mode denies HTTP upgrade info", async () => {
     const adapter = new FakeDataAdapter();
     const dbPath = "plugins/vault-rooms/server-data/relay.sqlite";
@@ -921,13 +1041,14 @@ describe("server connection settings migration", () => {
 });
 
 async function startDualStackEmbeddedApp(
-  identityFactory: (serverId: string) => ReturnType<typeof generateServerIdentity> = generateServerIdentity
+  identityFactory: (serverId: string) => ReturnType<typeof generateServerIdentity> = generateServerIdentity,
+  rotationsFactory: () => IdentityRotationRecord[] = () => []
 ) {
   const db = await openRelayDb(":memory:");
   const core = createRelayCore(db);
   const serverId = core.repo.getOrCreateServerId();
   const identity = await identityFactory(serverId);
-  const persisted = { serverId, identity, rotations: [] };
+  const persisted = { serverId, identity, rotations: rotationsFactory() };
   const httpPort = await findAvailablePortBlock();
   const tlsPort = httpPort + 1;
   const app = await createEmbeddedRelayApp(db, {

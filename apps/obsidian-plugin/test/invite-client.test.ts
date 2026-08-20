@@ -637,7 +637,10 @@ describe("pinned invite connection updates", () => {
 
     await manager.acceptInviteForServer(existing, "tr_invite", "https://127.0.0.1:8788", pin);
 
-    expect(existing.baseUrl).toBe("http://127.0.0.1:8787");
+    // One object per saved connection, updated in place: a caller (or a long-lived client) holding
+    // the pre-acceptance object must not keep seeing the superseded URL/token/pin.
+    expect(settings.servers[0]).toBe(existing);
+    expect(existing.baseUrl).toBe("https://127.0.0.1:8788");
     expect(settings.servers).toHaveLength(1);
     expect(settings.servers[0]).toMatchObject({
       id: existing.id,

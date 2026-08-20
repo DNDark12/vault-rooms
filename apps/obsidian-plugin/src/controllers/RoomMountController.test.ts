@@ -261,6 +261,76 @@ describe("RoomMountController", () => {
     consoleError.mockRestore();
   });
 
+  it("stops pushing pre-existing files once the connection itself is unusable, and counts the untried ones", async () => {
+    // Real-device regression: an identity change made every push fail the TLS handshake, so mounting
+    // a room logged one `certificate signature failure` (and raised one pin-mismatch prompt) per
+    // file. Nothing recoverable remains once the connection is terminal - report the whole remainder.
+    notices.length = 0;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const settings: { mountedRooms: Record<string, MountedRoomState>; roomMountPaths: Record<string, string>; mountRoot: string } = {
+      mountedRooms: {},
+      roomMountPaths: {},
+      mountRoot: "Vault Rooms"
+    };
+    const room: RoomSummary = {
+      id: "room_1",
+      name: "Diagrams",
+      type: "folder",
+      sourcePath: "Notes",
+      mountName: "Diagrams",
+      ownerUserId: "user_1",
+      conflictPolicy: "keep_both",
+      permissions: ["sync:push"],
+      capabilities: [],
+      crdtEnabled: false,
+      storedBytes: 0
+    };
+    // Mutated in place the way ServerConnectionManager.handlePinnedConnectionFailure does.
+    const server = { id: "server_1", userId: "user_1", deviceName: "Owner", securityState: "ok" };
+    const attempted: string[] = [];
+    const deps: RoomMountControllerDeps = {
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: settings as RoomMountControllerDeps["settings"],
+      visibleRooms: [room],
+      vaultAdapter: {
+        async list() {
+          return ["Notes/a.canvas", "Notes/b.canvas", "Notes/c.canvas"];
+        }
+      } as unknown as VaultAdapter,
+      getSyncEngine: () =>
+        ({
+          async reconcileLocalEdits() {},
+          async pushLocalChange(_state: MountedRoomState, relativePath: string) {
+            attempted.push(relativePath);
+            server.securityState = "pin_mismatch";
+            throw new Error("certificate signature failure");
+          }
+        }) as unknown as VaultSyncEngine,
+      ensureCrdtSession: vi.fn(async () => undefined),
+      apiFor: () =>
+        ({
+          async listFiles() {
+            return { files: [] };
+          }
+        }) as unknown as ReturnType<RoomMountControllerDeps["apiFor"]>,
+      requireActiveServer: () => server as ReturnType<RoomMountControllerDeps["requireActiveServer"]>,
+      saveSettings: vi.fn(async () => undefined),
+      renderOpenRoomsViews: vi.fn(),
+      stopWatchingRoom: vi.fn(),
+      watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(),
+      unsubscribeRoom: vi.fn(),
+      unbindCrdtRoom: vi.fn()
+    };
+
+    await new RoomMountController(deps).mountRoom(room);
+
+    expect(attempted).toEqual(["a.canvas"]);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(notices.at(-1)).toBe("Mounted Diagrams, but 3 files couldn't sync. Check the console for details.");
+    consoleError.mockRestore();
+  });
+
   it("[third-hardware-testing-round item 1] does not attempt pushLocalChange for an untracked pre-existing local file when the room can't push (no sync:push permission)", async () => {
     const pushes: string[] = [];
     const settings: { mountedRooms: Record<string, MountedRoomState>; roomMountPaths: Record<string, string>; mountRoot: string } = {

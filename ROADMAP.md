@@ -59,6 +59,22 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
 - **Obsidian 1.13 settings compatibility.** Vault Rooms settings render as a normal vertical list instead of one
   overflowing horizontal row.
 
+## Shipped in 0.2.8
+
+- **Pinned-TLS identity changes no longer strand a live client.** A client that outlives one request now reads
+  the saved connection's pinned certificate per request instead of snapshotting it, so an applied identity
+  rotation reaches every client. Previously the sync engine's client kept presenting a superseded certificate
+  and every file push failed the TLS handshake with `certificate signature failure` - unrecoverably, because by
+  then the server's presented identity already matched the saved pin.
+- **One object per saved connection.** Replacements (rotation recovery, TLS migration, invite acceptance) now
+  update that object in place rather than swapping a new one into settings, so recovery, revocation, and
+  success state can no longer be derived from - or written back onto - a superseded copy. The worst case this
+  removes is a stale holder restoring the device token the relay invalidated during migration.
+- **A terminal identity failure stops once.** Mounting a room with pre-existing files no longer logs one TLS
+  error and raises one pin-mismatch prompt per file: the push loop stops when the connection itself becomes
+  unusable, reports how many files went unsynced, and the prompt is raised once per connection even when
+  requests fail concurrently.
+
 ## Next up
 
 - **Raw binary sync framing (Phase C).** Replace base64-over-JSON for capable peers with raw WebSocket frames and

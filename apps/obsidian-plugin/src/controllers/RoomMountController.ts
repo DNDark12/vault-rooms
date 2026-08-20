@@ -122,6 +122,7 @@ export class RoomMountController {
     if (canPushLocalEdits) {
       const localPaths = await this.deps.vaultAdapter.list(mountPath);
       const configDir = this.deps.app.vault.configDir.replace(/\/+$/, "");
+      const pushablePaths: string[] = [];
       for (const localPath of localPaths) {
         if (!mountPath && (localPath === configDir || localPath.startsWith(`${configDir}/`))) {
           continue;
@@ -130,6 +131,9 @@ export class RoomMountController {
         if (!isSyncableRelativePath(relativePath, configDir) || knownRelativePaths.has(relativePath)) {
           continue;
         }
+        pushablePaths.push(relativePath);
+      }
+      for (const [index, relativePath] of pushablePaths.entries()) {
         try {
           if (room.crdtEnabled && isCrdtEligiblePath(relativePath)) {
             await this.deps.ensureCrdtSession(room.id, relativePath, true);
@@ -139,6 +143,14 @@ export class RoomMountController {
         } catch (error) {
           failedInitialFileCount += 1;
           console.error(`Vault Rooms: failed to push existing file "${relativePath}" to room ${room.name}`, error);
+          // Once the connection itself is unusable - an unverifiable server identity or a revoked
+          // credential - every remaining file fails the same way, one console error (and, before
+          // this, one pin-mismatch prompt) per file. That storm is what a real pinned-TLS identity
+          // change looked like; stop and report the whole remainder instead.
+          if (server.securityState === "pin_mismatch" || server.status === "revoked") {
+            failedInitialFileCount += pushablePaths.length - index - 1;
+            break;
+          }
         }
       }
     }

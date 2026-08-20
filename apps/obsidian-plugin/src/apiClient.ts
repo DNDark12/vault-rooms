@@ -132,10 +132,26 @@ export class RelayApiClient implements RelayFileApi {
      * flag the saved team as needing to be re-set-up/re-joined instead of just failing silently.
      */
     private readonly onUnauthorized?: () => void,
-    private readonly pinned?: PinnedServerInfo,
+    /**
+     * A resolver, not a fixed value, for any client that outlives a single request: the saved
+     * connection's pinned identity changes underneath it whenever an identity rotation is applied
+     * (see ServerConnectionManager.handlePinnedConnectionFailure). A snapshot taken at construction
+     * left the long-lived VaultSyncEngine client one identity behind every other client, so every
+     * push failed the TLS handshake with `certificate signature failure` - same issuer subject,
+     * different key - and could never recover, because by then the probe agrees with the *saved*
+     * pin. Callers with genuinely fixed material (invite acceptance, TLS migration, diagnostics)
+     * still pass a plain object.
+     */
+    private readonly pinned?: PinnedServerInfo | (() => PinnedServerInfo | undefined),
     private readonly onAuthenticated?: () => void,
     private readonly onPinnedTransportFailure?: (error: Error) => Promise<"retry" | "normal" | "stop">
   ) {}
+
+  /** Never read `this.pinned` directly - a resolver is always truthy, which would route an
+   *  unpinned server away from `requestUrl` into the pinned transport with undefined material. */
+  private resolvePinned(): PinnedServerInfo | undefined {
+    return typeof this.pinned === "function" ? this.pinned() : this.pinned;
+  }
 
   async testConnection(): Promise<{ ok: true; version: string }> {
     return this.testConnectionAttempt(true);
@@ -147,8 +163,9 @@ export class RelayApiClient implements RelayFileApi {
    *  recovery is deliberately not attempted here - diagnostics should surface a pin failure as a
    *  finding, not silently repair it mid-test. */
   async fetchHealthRaw(timeoutMs = 3_000): Promise<{ status: number; body: unknown }> {
-    const response = this.pinned
-      ? await pinnedRequest(this.pinned, { url: `${this.baseUrl}/health`, timeoutMs })
+    const pinned = this.resolvePinned();
+    const response = pinned
+      ? await pinnedRequest(pinned, { url: `${this.baseUrl}/health`, timeoutMs })
       : await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, timeoutMs);
     let body: unknown;
     try {
@@ -161,13 +178,15 @@ export class RelayApiClient implements RelayFileApi {
 
   private async testConnectionAttempt(allowPinnedRecovery: boolean): Promise<{ ok: true; version: string }> {
     let response: Awaited<ReturnType<typeof pinnedRequest>> | Awaited<ReturnType<typeof requestUrlWithTimeout>>;
+    let pinned: PinnedServerInfo | undefined;
     try {
-      response = this.pinned
-        ? await pinnedRequest(this.pinned, { url: `${this.baseUrl}/health`, timeoutMs: 3_000 })
+      pinned = this.resolvePinned();
+      response = pinned
+        ? await pinnedRequest(pinned, { url: `${this.baseUrl}/health`, timeoutMs: 3_000 })
         : await requestUrlWithTimeout({ url: `${this.baseUrl}/health`, throw: false }, 3_000);
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
-      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+      if (allowPinnedRecovery && pinned && this.onPinnedTransportFailure) {
         const decision = await this.onPinnedTransportFailure(normalized);
         if (decision === "retry") {
           return this.testConnectionAttempt(false);
@@ -451,9 +470,11 @@ export class RelayApiClient implements RelayFileApi {
       ...(options.body ? { "content-type": "application/json" } : {})
     };
     let response: Awaited<ReturnType<typeof pinnedRequest>> | Awaited<ReturnType<typeof requestUrl>>;
+    let pinned: PinnedServerInfo | undefined;
     try {
-      response = this.pinned
-        ? await pinnedRequest(this.pinned, {
+      pinned = this.resolvePinned();
+      response = pinned
+        ? await pinnedRequest(pinned, {
             url: `${this.baseUrl}${path}`,
             method: options.method ?? "GET",
             headers,
@@ -468,7 +489,7 @@ export class RelayApiClient implements RelayFileApi {
           });
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
-      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+      if (allowPinnedRecovery && pinned && this.onPinnedTransportFailure) {
         const decision = await this.onPinnedTransportFailure(normalized);
         if (decision === "retry") {
           return this.request(path, options, false);
@@ -512,13 +533,15 @@ export class RelayApiClient implements RelayFileApi {
       ? (body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer)
       : undefined;
     let response: Awaited<ReturnType<typeof pinnedRawRequest>> | Awaited<ReturnType<typeof requestUrl>>;
+    let pinned: PinnedServerInfo | undefined;
     try {
-      response = this.pinned
-        ? await pinnedRawRequest(this.pinned, { url: `${this.baseUrl}${path}`, method, headers, body: requestBody })
+      pinned = this.resolvePinned();
+      response = pinned
+        ? await pinnedRawRequest(pinned, { url: `${this.baseUrl}${path}`, method, headers, body: requestBody })
         : await requestUrl({ url: `${this.baseUrl}${path}`, method, headers, throw: false, body: requestBody });
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
-      if (allowPinnedRecovery && this.pinned && this.onPinnedTransportFailure) {
+      if (allowPinnedRecovery && pinned && this.onPinnedTransportFailure) {
         const decision = await this.onPinnedTransportFailure(normalized);
         if (decision === "retry") {
           return this.rawRequest(path, method, body, false);

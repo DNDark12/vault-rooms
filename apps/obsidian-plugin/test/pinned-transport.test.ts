@@ -143,6 +143,30 @@ describe("pinned REST transport", () => {
     await expect(fetchRotationProbe(remote.baseUrl)).rejects.toThrow("response is too large");
   });
 
+  it("keeps a client built before an identity rotation working once the saved connection is updated", async () => {
+    // Regression (real-device): every mountRoom push failed with `certificate signature failure`
+    // while the same mount's reads succeeded. Two identities for the *same* serverId share a subject
+    // DN, so OpenSSL picks the pinned certificate as issuer and then fails the signature check -
+    // which is what a client holding a superseded pin sees. The long-lived VaultSyncEngine client
+    // snapshotted its pin at construction, so a rotation applied through any other client never
+    // reached it and nothing could repair it.
+    const supersededIdentity = await generateServerIdentity("srv_rotated_identity");
+    const currentIdentity = await generateServerIdentity("srv_rotated_identity");
+    const remote = await startServer(currentIdentity, { name: "vault-rooms", version: "0.1.0" });
+    const connection = serverConnection(remote.baseUrl, supersededIdentity);
+    const client = new RelayApiClient(remote.baseUrl, connection.deviceToken, undefined, () => livePinnedInfo(connection));
+
+    await expect(client.testConnection()).rejects.toThrow("certificate signature failure");
+    expect(remote.requests()).toBe(0);
+
+    // A verified rotation applied through some other client updates the saved connection in place.
+    connection.identityCertificateDer = certPemToDerBase64Url(currentIdentity.identityCertPem);
+    connection.pinnedIdentitySpkiSha256 = currentIdentity.identitySpkiSha256;
+
+    await expect(client.testConnection()).resolves.toEqual({ ok: true, version: "0.1.0" });
+    expect(remote.requests()).toBe(1);
+  });
+
   it("reports the same identity pin when only the leaf is expired", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2020-01-01T00:00:00.000Z"));
@@ -193,6 +217,17 @@ describe("pinned WSS transport", () => {
     expect(remote.frames()).toHaveLength(0);
   });
 });
+
+/** Mirrors ServerConnectionManager.pinnedInfoForServer, which cannot be imported here: it pulls in
+ *  the embedded server (sql.js/wasm). What matters for this test is only that the pin is read from
+ *  the saved connection at call time rather than snapshotted. */
+function livePinnedInfo(server: ServerConnection): PinnedServerInfo {
+  return {
+    tlsName: server.tlsName!,
+    identityCertificateDer: server.identityCertificateDer!,
+    pinnedIdentitySpkiSha256: server.pinnedIdentitySpkiSha256!
+  };
+}
 
 function pinnedInfo(identity: ServerIdentity): PinnedServerInfo {
   return {
