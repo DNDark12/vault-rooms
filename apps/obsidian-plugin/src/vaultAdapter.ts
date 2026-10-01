@@ -1,4 +1,5 @@
 import { normalizePath } from "obsidian";
+import { isValidUtf8 } from "@vault-rooms/protocol";
 import type { Plugin, TFile } from "obsidian";
 import type { VaultAdapter, VaultChangeEvent } from "./syncClient.js";
 import { isFile, listFiles } from "./vaultTraversal.js";
@@ -35,6 +36,14 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async readBinary(path: string): Promise<ArrayBuffer> {
     return this.app.vault.readBinary(this.getFile(normalizePath(path)));
+  }
+
+  async readStrictUtf8(path: string): Promise<string> {
+    const file = this.getFile(normalizePath(path));
+    if (!isValidUtf8(new Uint8Array(await this.app.vault.readBinary(file)))) {
+      throw Object.assign(new Error("This file isn't UTF-8 text, so syncing it would damage it."), { code: "VALIDATION_ERROR" });
+    }
+    return this.app.vault.read(file);
   }
 
   async writeBinary(path: string, data: ArrayBuffer): Promise<void> {

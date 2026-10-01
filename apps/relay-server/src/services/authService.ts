@@ -1,4 +1,3 @@
-import type { FastifyRequest } from "fastify";
 import { AppError } from "@vault-rooms/protocol";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import { isActivePrincipal } from "../db/repositories/relayRepository.js";
@@ -14,7 +13,10 @@ export function authenticateActiveDeviceToken(repo: RelayRepository, token: stri
   return principal;
 }
 
-export function getActivePrincipal(repo: RelayRepository, request: FastifyRequest): DevicePrincipal {
+export function getActivePrincipal(
+  repo: RelayRepository,
+  request: { headers: { authorization?: string | undefined } }
+): DevicePrincipal {
   const authorization = request.headers.authorization;
   if (!authorization?.startsWith("Bearer ")) {
     throw new AppError("UNAUTHORIZED", "Invalid or expired credentials.", 401);

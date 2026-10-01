@@ -7,6 +7,9 @@ export interface VaultAdapter {
   write(path: string, content: string): Promise<void>;
   /** Byte-accurate read for images/PDFs - `read()` decodes as UTF-8 text and corrupts these. */
   readBinary(path: string): Promise<ArrayBuffer>;
+  /** Text read that rejects a file which is not UTF-8 instead of decoding it with replacement
+   *  characters. Used for text about to be pushed; adapters without it fall back to `read()`. */
+  readStrictUtf8?(path: string): Promise<string>;
   writeBinary(path: string, data: ArrayBuffer): Promise<void>;
   delete(path: string): Promise<void>;
   /** Moves a file in place. */
@@ -227,9 +230,13 @@ export class VaultSyncEngine {
    * it silently corrupts binary files - `isEligibleBinaryPath` (keyed off the room-relative path,
    * which shares the conflict copy's extension) picks the byte-accurate path instead.
    */
-  private async readContent(path: string, relativePath: string): Promise<string> {
+  private async readContent(path: string, relativePath: string, options: { forPush?: boolean } = {}): Promise<string> {
     if (isEligibleBinaryPath(relativePath)) {
       return arrayBufferToBase64(await this.vault.readBinary(path));
+    }
+    // Pushed text has to be UTF-8: other bytes would arrive on every device as replacement characters.
+    if (options.forPush && this.vault.readStrictUtf8) {
+      return this.vault.readStrictUtf8(path);
     }
     return this.vault.read(path);
   }
@@ -315,7 +322,7 @@ export class VaultSyncEngine {
     if (!(await this.vault.exists(path))) {
       return;
     }
-    const content = await this.readContent(path, relativePath);
+    const content = await this.readContent(path, relativePath, { forPush: true });
     const current = room.files[relativePath];
     const localSha = await VaultSyncEngine.sha256(content);
     if (current?.serverSha256 === localSha) {
@@ -475,5 +482,12 @@ function isVersionConflict(error: unknown): error is {
   serverSha256: string;
   serverContent: string;
 } {
-  return typeof error === "object" && error !== null && (error as { code?: string }).code === "VERSION_CONFLICT";
+  // The relay leaves the copy out for a caller who may not read the file; there is nothing to
+  // resolve against then, so the push fails and the local file stays as it is.
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: string }).code === "VERSION_CONFLICT" &&
+    typeof (error as { serverContent?: unknown }).serverContent === "string"
+  );
 }

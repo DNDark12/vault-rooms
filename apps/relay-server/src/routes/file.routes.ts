@@ -5,6 +5,7 @@ import {
   isCrdtEligiblePath,
   isLegacyEligiblePath,
   isValidBase64,
+  isValidUtf8,
   normalizeRelativePath
 } from "@vault-rooms/protocol";
 import type { RelayRepository } from "../db/repositories/relayRepository.js";
@@ -134,13 +135,18 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       relativePath
     });
     const contentType = contentTypeForPath(relativePath);
+    if (contentType !== "binary" && !isValidUtf8(request.body)) {
+      throw new AppError("VALIDATION_ERROR", "This file isn't UTF-8 text, so syncing it would damage it.", 422);
+    }
     const content = Buffer.from(request.body).toString(contentType === "binary" ? "base64" : "utf8");
     const result = await options.contentWriteService.writeFile({
       roomId: room.id,
       relativePath,
       baseVersion,
       content,
-      actorUserId: principal.userId
+      actorUserId: principal.userId,
+      revealServerContent: hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath }),
+      wholeFileLane: true
     });
     const aclRules = repo.listAclRulesForRoom(room.id);
     options.connectionRegistry?.broadcastToRoom(
@@ -208,7 +214,9 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       relativePath,
       baseVersion,
       content: body.content,
-      actorUserId: principal.userId
+      actorUserId: principal.userId,
+      revealServerContent: hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath }),
+      wholeFileLane: true
     });
     const fileChangeAclRules = repo.listAclRulesForRoom(room.id);
     options.connectionRegistry?.broadcastToRoom(

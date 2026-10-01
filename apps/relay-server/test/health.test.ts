@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 import { PRODUCT_VERSION } from "@vault-rooms/protocol";
 import { createApp } from "../src/app.js";
 
+// Plugin releases before 0.1.4 call the relay with renderer fetch() from this origin.
+const OBSIDIAN_ORIGIN = "app://obsidian.md";
+
 describe("health", () => {
   it("returns Vault Rooms identity", async () => {
     const app = await createApp({ dbPath: ":memory:" });
-    const response = await app.inject({ method: "GET", url: "/health" });
+    const response = await app.inject({ method: "GET", url: "/health", headers: { origin: OBSIDIAN_ORIGIN } });
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers["access-control-allow-origin"]).toBe("*");
+    expect(response.headers["access-control-allow-origin"]).toBe(OBSIDIAN_ORIGIN);
     // Asserted against PRODUCT_VERSION rather than a hardcoded number: clients use /health to confirm
     // they reached a Vault Rooms server, so this response must track the shipped version automatically
     // instead of needing a manual edit at every release (it was missed once, leaving the relay reporting
@@ -18,7 +21,7 @@ describe("health", () => {
 
   it("handles browser preflight requests", async () => {
     const app = await createApp({ dbPath: ":memory:" });
-    const response = await app.inject({ method: "OPTIONS", url: "/api/bootstrap" });
+    const response = await app.inject({ method: "OPTIONS", url: "/api/bootstrap", headers: { origin: OBSIDIAN_ORIGIN } });
 
     expect(response.statusCode).toBe(204);
     expect(response.headers["access-control-allow-methods"]).toContain("POST");
@@ -33,7 +36,7 @@ describe("health", () => {
     // unless asserted explicitly. PATCH is used by PUT /api/rooms/:roomId's update-room-settings
     // flow (apiClient.updateRoom); keep this list in sync with every app.<method>(...) registered.
     const app = await createApp({ dbPath: ":memory:" });
-    const response = await app.inject({ method: "OPTIONS", url: "/api/rooms/room_x" });
+    const response = await app.inject({ method: "OPTIONS", url: "/api/rooms/room_x", headers: { origin: OBSIDIAN_ORIGIN } });
 
     for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
       expect(response.headers["access-control-allow-methods"]).toContain(method);

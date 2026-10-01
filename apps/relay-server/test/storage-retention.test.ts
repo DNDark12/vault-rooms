@@ -253,7 +253,7 @@ describe("raw_size_bytes and storage_usage bookkeeping on write (Phase A Task 1)
     // The globally deduplicated empty blob may already exist.
     expect(repo.getStorageUsageBytes()).toBeGreaterThanOrEqual(before);
 
-    repo.materializeCrdtContent({ fileId: created.result.fileId, content: "typed content", actorUserId: "usr_owner" });
+    repo.materializeCrdtContent({ fileId: created.result.fileId, epoch: created.result.epoch, content: "typed content", actorUserId: "usr_owner" });
     const afterMaterialize = repo.getFileById(created.result.fileId);
     expect(afterMaterialize?.raw_size_bytes).toBe(Buffer.byteLength("typed content", "utf8"));
   });
@@ -416,7 +416,7 @@ describe("latest-only retention and reference-checked blob collection (Phase A T
       deviceId: "dev_1"
     });
     for (let i = 0; i < 20; i++) {
-      repo.materializeCrdtContent({ fileId: created.result.fileId, content: `typed content #${i}`, actorUserId: "usr_owner" });
+      repo.materializeCrdtContent({ fileId: created.result.fileId, epoch: created.result.epoch, content: `typed content #${i}`, actorUserId: "usr_owner" });
     }
 
     expect(fileVersionCount(db, created.result.fileId)).toBe(1);
@@ -740,6 +740,7 @@ describe("projected quota inside writeFile's transaction (Phase A Task 4)", () =
     expect(() =>
       repo.materializeCrdtContent({
         fileId: created.result.fileId,
+        epoch: created.result.epoch,
         content: "this typed content is deliberately far longer than the twenty byte ceiling",
         actorUserId: "usr_owner"
       })

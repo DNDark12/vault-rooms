@@ -696,7 +696,7 @@ describe("CRDT two-client: offline structural journal", () => {
   it("does not resurrect an open session's old path after an offline rename reconnects", { timeout: 30_000 }, async () => {
     const { app, room, a } = await setupCrdtRoomWithTwoDevices();
     const repo = (app as unknown as {
-      testRepo: { getFile: (roomId: string, relativePath: string) => { id: string; crdt_epoch: number } | null };
+      testRepo: { getFile: (roomId: string, relativePath: string) => { id: string; crdt_epoch: number; deleted_at: string | null } | null };
     }).testRepo;
 
     a.vault.files.set(vaultPath, "existing note");
@@ -709,14 +709,15 @@ describe("CRDT two-client: offline structural journal", () => {
 
     await waitFor(() => a.pendingOperationIds().length === 0, "the offline rename receipt to clear the journal");
     expect(repo.getFile(room.id, "renamed.md")).not.toBeNull();
-    expect(repo.getFile(room.id, NOTE)).toBeNull();
+    // The rename leaves a tombstone at the old path; a resurrected session would revive it.
+    expect(repo.getFile(room.id, NOTE)).toMatchObject({ deleted_at: expect.any(String) });
   });
 
   it("preserves an existing note's document identity and epoch across offline rename and restart", { timeout: 30_000 }, async () => {
     const { app, room, a: originalA } = await setupCrdtRoomWithTwoDevices();
     let a = originalA;
     const repo = (app as unknown as {
-      testRepo: { getFile: (roomId: string, relativePath: string) => { id: string; crdt_epoch: number } | null };
+      testRepo: { getFile: (roomId: string, relativePath: string) => { id: string; crdt_epoch: number; deleted_at: string | null } | null };
     }).testRepo;
 
     a.vault.files.set(vaultPath, "existing note");
@@ -733,7 +734,7 @@ describe("CRDT two-client: offline structural journal", () => {
     await waitFor(() => a.pendingOperationIds().length === 0, "the offline rename receipt to clear the journal");
     const after = repo.getFile(room.id, "renamed.md");
     expect(after).toMatchObject({ id: before.id, crdt_epoch: before.crdt_epoch });
-    expect(repo.getFile(room.id, NOTE)).toBeNull();
+    expect(repo.getFile(room.id, NOTE)).toMatchObject({ deleted_at: expect.any(String) });
   });
 
   it("replays an offline create/rename once after a full client restart", { timeout: 30_000 }, async () => {

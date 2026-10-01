@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import type WebSocket from "ws";
+import * as Y from "yjs";
+import { EDITOR_PERMISSIONS, READER_PERMISSIONS } from "@vault-rooms/policy";
 import { createApp } from "../src/app.js";
+import { runMigrations } from "../src/db/migrations.js";
+import { openSqlJsDb } from "../src/db/sqlJsAdapter.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
 
 async function bootstrapOwnerAndMember() {
@@ -269,5 +274,203 @@ describe("rooms and ACL", () => {
     });
     expect(traversalUpdate.statusCode).toBe(422);
     expect(traversalUpdate.json().error.code).toBe("INVALID_PATH");
+  });
+});
+
+type App = Awaited<ReturnType<typeof createApp>>;
+const openApps: App[] = [];
+const openSockets: WebSocket[] = [];
+
+afterEach(async () => {
+  for (const socket of openSockets.splice(0)) socket.close();
+  for (const app of openApps.splice(0)) await app.close();
+});
+
+async function roomWithMember(options: { crdtEnabled?: boolean } = {}) {
+  const { app, owner, member } = await bootstrapOwnerAndMember();
+  openApps.push(app);
+  const room = (
+    await app.inject({
+      method: "POST",
+      url: "/api/rooms",
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { name: "Shared", type: "folder", sourcePath: "Shared", mountName: "Shared", capabilities: [], crdtEnabled: options.crdtEnabled ?? false }
+    })
+  ).json().room;
+  const acl = (token: string, payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", url: `/api/rooms/${room.id}/acl`, headers: { authorization: `Bearer ${token}` }, payload });
+  const rulesFor = async (userId: string) =>
+    (
+      (await app.inject({ method: "GET", url: `/api/rooms/${room.id}/acl`, headers: { authorization: `Bearer ${owner.deviceToken}` } })).json()
+        .aclRules as Array<{ subjectId: string; effect: string; permissions: string[]; pathPattern: string }>
+    ).filter((rule) => rule.subjectId === userId);
+  const put = (token: string, payload: Record<string, unknown>) =>
+    app.inject({ method: "PUT", url: `/api/rooms/${room.id}/files/content`, headers: { authorization: `Bearer ${token}` }, payload });
+  return { app, owner, member, room, acl, rulesFor, put };
+}
+
+async function syncSocket(app: App, token: string, roomId: string) {
+  await app.ready();
+  const socket = (await app.injectWS("/sync")) as unknown as WebSocket;
+  openSockets.push(socket);
+  const queue: Array<Record<string, any>> = [];
+  socket.on("message", (raw: WebSocket.RawData) => queue.push(JSON.parse(raw.toString())));
+  const send = (message: unknown) => socket.send(JSON.stringify(message));
+  const next = async (types: string[]) => {
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      const index = queue.findIndex((message) => types.includes(message.type));
+      if (index !== -1) return queue.splice(index, 1)[0]!;
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${types.join("/")}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  send({ type: "hello", requestId: "h", token, client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "d" }, capabilities: { crdt: true } });
+  await next(["hello_ok"]);
+  send({ type: "subscribe_room", requestId: "s", roomId });
+  await next(["room_snapshot"]);
+  return { send, next };
+}
+
+describe("Blocked access", () => {
+  it("stores an older client's Blocked choice - a deny of the reader preset - as a full block", async () => {
+    const { member, owner, acl, rulesFor } = await roomWithMember();
+
+    expect((await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "deny", preset: "reader", pathPattern: "secret/**/*" })).statusCode).toBe(200);
+
+    const [rule] = await rulesFor(member.user.id);
+    expect(new Set(rule!.permissions)).toEqual(new Set(EDITOR_PERMISSIONS));
+  });
+
+  it("rejects an unknown preset, and the blocked preset on an allow rule", async () => {
+    const { member, owner, acl } = await roomWithMember();
+
+    const unknown = await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "admin", pathPattern: "**/*" });
+    const blockedAllow = await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "blocked", pathPattern: "**/*" });
+
+    expect(unknown.statusCode).toBe(422);
+    expect(blockedAllow.statusCode).toBe(422);
+  });
+
+  it("closes a Blocked folder to reading, creating, writing, deleting and renaming, on both lanes", async () => {
+    const { app, owner, member, room, acl, put } = await roomWithMember({ crdtEnabled: true });
+    expect((await put(owner.deviceToken, { relativePath: "secret/plan.txt", baseVersion: 0, content: "plan" })).statusCode).toBe(200);
+    const ownerSocket = await syncSocket(app, owner.deviceToken, room.id);
+    ownerSocket.send({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "secret/notes.md" });
+    const created = await ownerSocket.next(["crdt_created"]);
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "editor", pathPattern: "**/*" });
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "deny", preset: "blocked", pathPattern: "secret/**/*" });
+
+    const token = member.deviceToken;
+    const read = await app.inject({ method: "GET", url: `/api/rooms/${room.id}/files/content?path=secret/plan.txt`, headers: { authorization: `Bearer ${token}` } });
+    const write = await put(token, { relativePath: "secret/plan.txt", baseVersion: 1, content: "changed" });
+    const create = await put(token, { relativePath: "secret/new.txt", baseVersion: 0, content: "new" });
+    const remove = await app.inject({ method: "POST", url: `/api/rooms/${room.id}/files/delete`, headers: { authorization: `Bearer ${token}` }, payload: { relativePath: "secret/plan.txt", baseVersion: 1 } });
+    for (const response of [read, write, create, remove]) {
+      expect(response.statusCode).toBe(403);
+    }
+
+    const memberSocket = await syncSocket(app, token, room.id);
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "changed");
+    const update = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64");
+    const attempts = [
+      { type: "crdt_update", requestId: "u", roomId: room.id, relativePath: "secret/notes.md", epoch: created.epoch, update },
+      { type: "crdt_create", requestId: "c", roomId: room.id, relativePath: "secret/other.md" },
+      { type: "crdt_rename", requestId: "r", roomId: room.id, oldRelativePath: "secret/notes.md", relativePath: "open/notes.md" },
+      { type: "file_change", requestId: "f", roomId: room.id, relativePath: "secret/plan.txt", baseVersion: 1, content: "changed" },
+      { type: "file_delete", requestId: "d", roomId: room.id, relativePath: "secret/plan.txt", baseVersion: 1 }
+    ];
+    for (const attempt of attempts) {
+      memberSocket.send(attempt);
+      const answer = await memberSocket.next(["crdt_rejected", "file_change_rejected", "crdt_created", "crdt_renamed", "file_change_ack", "file_delete_ack"]);
+      expect(answer).toMatchObject({ code: "PERMISSION_DENIED" });
+    }
+
+    // Outside the blocked scope the editor grant still applies.
+    expect((await put(token, { relativePath: "open/readme.txt", baseVersion: 0, content: "hello" })).statusCode).toBe(200);
+  });
+
+  it("replaces a Block when Can view is granted for the same person and scope", async () => {
+    const { member, owner, acl, rulesFor } = await roomWithMember();
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "deny", preset: "blocked", pathPattern: "secret/**/*" });
+
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "reader", pathPattern: "secret/**/*" });
+
+    const rules = await rulesFor(member.user.id);
+    expect(rules.filter((rule) => rule.effect === "deny")).toEqual([]);
+    expect(rules).toEqual([expect.objectContaining({ effect: "allow", pathPattern: "secret/**/*" })]);
+  });
+
+  it("replaces a whole-room Block when the person accepts a new room invite", async () => {
+    const { app, member, owner, room, acl, rulesFor } = await roomWithMember();
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "editor", pathPattern: "**/*" });
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "deny", preset: "blocked", pathPattern: "**/*" });
+    const invite = (
+      await app.inject({ method: "POST", url: `/api/rooms/${room.id}/invites`, headers: { authorization: `Bearer ${owner.deviceToken}` }, payload: { preset: "reader" } })
+    ).json();
+
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/invites/accept",
+      headers: { authorization: `Bearer ${member.deviceToken}` },
+      payload: { inviteToken: invite.inviteToken }
+    });
+
+    expect(accepted.statusCode).toBe(200);
+    expect((await rulesFor(member.user.id)).filter((rule) => rule.effect === "deny")).toEqual([]);
+  });
+
+  it("returns a conflicting file's content only to callers who may read it", async () => {
+    const { app, owner, member, room, acl, put } = await roomWithMember();
+    expect((await put(owner.deviceToken, { relativePath: "inbox/report.txt", baseVersion: 0, content: "server copy" })).statusCode).toBe(200);
+    // A drop-box style grant: may write into inbox/, may not read it.
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "allow", preset: "editor", pathPattern: "**/*" });
+    await acl(owner.deviceToken, { subjectType: "user", subjectId: member.user.id, effect: "deny", permissions: ["file:read"], pathPattern: "inbox/**/*" });
+
+    const ownerConflict = await put(owner.deviceToken, { relativePath: "inbox/report.txt", baseVersion: 7, content: "stale" });
+    const memberConflict = await put(member.deviceToken, { relativePath: "inbox/report.txt", baseVersion: 7, content: "stale" });
+
+    expect(ownerConflict.json().error).toMatchObject({ code: "VERSION_CONFLICT", details: { serverContent: "server copy" } });
+    expect(memberConflict.json().error.code).toBe("VERSION_CONFLICT");
+    expect(memberConflict.json().error.details).not.toHaveProperty("serverContent");
+    expect(memberConflict.json().error.details).not.toHaveProperty("serverSha256");
+
+    const memberSocket = await syncSocket(app, member.deviceToken, room.id);
+    memberSocket.send({ type: "file_change", requestId: "f", roomId: room.id, relativePath: "inbox/report.txt", baseVersion: 7, content: "stale" });
+    const rejected = await memberSocket.next(["file_change_rejected"]);
+    expect(rejected.code).toBe("VERSION_CONFLICT");
+    expect(rejected).not.toHaveProperty("serverContent");
+    expect(rejected).not.toHaveProperty("serverSha256");
+  });
+});
+
+describe("Blocked access migration", () => {
+  it("widens denies that match the old reader-only Blocked, once, keeping a backup and an audit trail", async () => {
+    const db = await openSqlJsDb(":memory:");
+    runMigrations(db);
+    // Make the database look like one written before this migration existed.
+    db.prepare("delete from server_meta where key = 'acl_reader_denies_blocked'").run();
+    const insertRule = db.prepare(
+      "insert into acl_rules(id, room_id, subject_type, subject_id, effect, permissions_json, path_pattern, created_at) values (?, 'room_1', 'user', 'usr_b', 'deny', ?, ?, '2026-09-01T00:00:00.000Z')"
+    );
+    insertRule.run("acl_old_block", JSON.stringify([...READER_PERMISSIONS].reverse()), "secret/**/*");
+    insertRule.run("acl_custom", JSON.stringify(["file:read"]), "inbox/**/*");
+
+    runMigrations(db);
+
+    const permissionsOf = (id: string) =>
+      JSON.parse((db.prepare("select permissions_json from acl_rules where id = ?").get(id) as { permissions_json: string }).permissions_json) as string[];
+    expect(new Set(permissionsOf("acl_old_block"))).toEqual(new Set(EDITOR_PERMISSIONS));
+    expect(permissionsOf("acl_custom")).toEqual(["file:read"]);
+    const backup = db.prepare("select rule_id, permissions_json from acl_rule_migration_backup").all() as Array<{ rule_id: string; permissions_json: string }>;
+    expect(backup).toEqual([{ rule_id: "acl_old_block", permissions_json: JSON.stringify([...READER_PERMISSIONS].reverse()) }]);
+    expect(db.prepare("select resource_id from audit_events where action = 'acl.block_migrated'").all()).toEqual([{ resource_id: "room_1" }]);
+
+    // A later reader-only deny is someone's deliberate custom rule, not the old Blocked button.
+    insertRule.run("acl_later", JSON.stringify([...READER_PERMISSIONS]), "later/**/*");
+    runMigrations(db);
+    expect(permissionsOf("acl_later")).toEqual([...READER_PERMISSIONS]);
+    await db.close();
   });
 });

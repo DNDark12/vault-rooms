@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isTransportFailure, userFacingError } from "./errorMessages.js";
+import { isTransportFailure, lanDiscoveryUnavailableReason, userFacingError } from "./errorMessages.js";
 
 // This helper sits at display sinks only. Everything upstream of it - apiClient's error
 // normalization, pinned-TLS recovery, connectionDiagnostics' evidence, console logging - keeps the
@@ -113,6 +113,35 @@ describe("userFacingError", () => {
     expect(userFacingError(null, "Action failed.")).toBe("Action failed.");
     expect(userFacingError({ message: "   " }, "Action failed.")).toBe("Action failed.");
     expect(userFacingError(new Error(""), "Action failed.")).toBe("Action failed.");
+  });
+
+  it("treats a request timeout as a transport failure so recovery is offered", () => {
+    // The pinned transport and the requestUrl wrapper both raise "Request timed out." - prose, which
+    // without a code reads as a real relay answer and suppresses every transport affordance.
+    const timedOut = Object.assign(new Error("Request timed out."), { code: "ETIMEDOUT" });
+    expect(isTransportFailure(timedOut)).toBe(true);
+    expect(userFacingError(timedOut, "Join failed")).toBe(
+      "The server didn't respond in time - it may be busy or unreachable."
+    );
+  });
+
+  it("explains a failed discovery listener instead of printing its errno", () => {
+    expect(lanDiscoveryUnavailableReason(new Error("addMembership EADDRNOTAVAIL"))).toMatch(/discovery group/);
+    expect(lanDiscoveryUnavailableReason({ code: "EADDRINUSE", message: "bind EADDRINUSE" })).toMatch(
+      /discovery port/
+    );
+    for (const reason of [
+      lanDiscoveryUnavailableReason(new Error("addMembership EADDRNOTAVAIL")),
+      lanDiscoveryUnavailableReason(new Error("bind EACCES"))
+    ]) {
+      expect(reason, "the panel interpolates this mid-sentence").toMatch(/^[a-z]/);
+      expect(reason).not.toMatch(/E[A-Z]{3,}/);
+    }
+  });
+
+  it("passes an unrecognized discovery failure through rather than inventing a cause", () => {
+    expect(lanDiscoveryUnavailableReason(new Error("UDP blocked"))).toBe("UDP blocked");
+    expect(lanDiscoveryUnavailableReason(new Error(""))).toBe("the discovery listener could not be opened");
   });
 
   it("covers every ErrorCode the protocol defines", async () => {

@@ -19,6 +19,7 @@ import {
   createCrdtMaterializedHandler,
   createCrdtRepositoryPort,
   handleSyncSocket,
+  startInQueueTurn,
   assertTransportAllowed,
   registerAuditRoutes,
   registerAuthRoutes,
@@ -35,7 +36,13 @@ import {
   type SecurityRuntime,
   type SyncTimerHost
 } from "vault-rooms-relay/embedded-core";
-import { isRawHttpResponse } from "vault-rooms-relay/embedded-core";
+import {
+  authenticateBeforeBody,
+  bodyLimitFor,
+  bodyTooLargeError,
+  corsHeadersFor,
+  isRawHttpResponse
+} from "vault-rooms-relay/embedded-core";
 
 type SyncSocketLike = Parameters<typeof handleSyncSocket>[0];
 
@@ -144,6 +151,10 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
     if (request.method === "POST" && request.url === "/api/bootstrap" && !bootstrapRateLimiter.consume(request.ip)) {
       throw new AppError("RATE_LIMITED", "Too many bootstrap attempts. Try again later.", 429);
     }
+  });
+
+  app.beforeRoute((request, routePath) => {
+    authenticateBeforeBody(repo, request.method, routePath, request);
   });
 
   const routeApp = app as never;
@@ -290,7 +301,7 @@ export async function createEmbeddedRelayApp(db: RelayDb, options: EmbeddedRelay
 
 export class EmbeddedRelayApp {
   private readonly routes: Route[] = [];
-  private readonly beforeRouteHooks: Array<(request: EmbeddedRequest) => void> = [];
+  private readonly beforeRouteHooks: Array<(request: EmbeddedRequest, routePath: string) => void> = [];
   private readonly sockets = new Map<WebSocket, RequestTransport>();
   private readonly webSocketServer: WebSocketServer;
   private plainServer: HttpServer | null = null;
@@ -355,7 +366,8 @@ export class EmbeddedRelayApp {
     this.addRoute("DELETE", path, handler);
   }
 
-  beforeRoute(hook: (request: EmbeddedRequest) => void): void {
+  /** `routePath` is the matched route's pattern (`/api/rooms/:roomId`), not the request path. */
+  beforeRoute(hook: (request: EmbeddedRequest, routePath: string) => void): void {
     this.beforeRouteHooks.push(hook);
   }
 
@@ -443,7 +455,9 @@ export class EmbeddedRelayApp {
   }
 
   private async handleHttp(request: IncomingMessage, response: ServerResponse, transport: RequestTransport): Promise<void> {
-    applyCors(response);
+    for (const [name, value] of Object.entries(corsHeadersFor(request.headers.origin))) {
+      response.setHeader(name, value);
+    }
     if (request.method === "OPTIONS") {
       response.writeHead(204);
       response.end();
@@ -458,7 +472,7 @@ export class EmbeddedRelayApp {
         throw new AppError("NOT_FOUND", "Route not found.", 404);
       }
 
-      // Run beforeRouteHooks (e.g. the bootstrap rate limiter) against everything available
+      // Run beforeRouteHooks (the bootstrap rate limiter, protected-route authentication) against everything available
       // before reading the body, so a rejected request doesn't first pay the full body-read/parse
       // cost - matches the standalone Fastify path, where onRequest hooks run before body parsing.
       const baseRequest: EmbeddedRequest = {
@@ -473,15 +487,26 @@ export class EmbeddedRelayApp {
         transport
       };
       for (const hook of this.beforeRouteHooks) {
-        hook(baseRequest);
+        hook(baseRequest, match.route.path);
       }
       const embeddedRequest: EmbeddedRequest = {
         ...baseRequest,
-        body: await readRequestBody(request, this.maxFileBytes)
+        body: await readRequestBody(request, bodyLimitFor(method, match.route.path, this.maxFileBytes), () =>
+          bodyTooLargeError(method, match.route.path, this.maxFileBytes)
+        )
       };
-      await this.db.withExclusiveAccess(() => undefined);
-      sendResponse(response, 200, await match.route.handler(embeddedRequest));
+      // The handler's first writes run inside the queue turn, before any durable image can begin.
+      const result = await startInQueueTurn(
+        (operation) => this.db.withExclusiveAccess(operation),
+        async () => match.route.handler(embeddedRequest)
+      );
+      sendResponse(response, 200, result);
     } catch (error) {
+      // A refused body can still be arriving. Close instead of draining it or leaving a half-read
+      // message on a reused connection, which stalls the client's next request.
+      if (!request.complete) {
+        response.setHeader("connection", "close");
+      }
       sendError(response, error);
     }
   }
@@ -506,7 +531,7 @@ export class EmbeddedRelayApp {
         transport
       };
       for (const hook of this.beforeRouteHooks) {
-        hook(embeddedRequest);
+        hook(embeddedRequest, parsedUrl.pathname);
       }
       (request as IncomingMessage & { transport: RequestTransport }).transport = transport;
       this.webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
@@ -624,7 +649,7 @@ function splitPath(path: string): string[] {
   return path.split("/").filter(Boolean);
 }
 
-async function readRequestBody(request: IncomingMessage, maxFileBytes: number): Promise<unknown> {
+async function readRequestBody(request: IncomingMessage, limitBytes: number, tooLarge: () => AppError): Promise<unknown> {
   if (request.method === "GET" || request.method === "DELETE") {
     return {};
   }
@@ -635,8 +660,8 @@ async function readRequestBody(request: IncomingMessage, maxFileBytes: number): 
   for await (const chunk of requestBody) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.byteLength;
-    if (total > Math.max(maxFileBytes * 2, 5 * 1024 * 1024)) {
-      throw new AppError("FILE_TOO_LARGE", "The request body is too large.", 413);
+    if (total > limitBytes) {
+      throw tooLarge();
     }
     chunks.push(buffer);
   }
@@ -653,13 +678,6 @@ async function readRequestBody(request: IncomingMessage, maxFileBytes: number): 
   } catch {
     throw new AppError("VALIDATION_ERROR", "Request body must be valid JSON.", 400);
   }
-}
-
-function applyCors(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
-  response.setHeader("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  response.setHeader("access-control-allow-headers", "authorization,content-type");
-  response.setHeader("access-control-max-age", "86400");
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {

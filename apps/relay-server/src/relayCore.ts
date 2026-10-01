@@ -90,7 +90,8 @@ export function createCrdtRepositoryPort(repo: RelayRepository, contentWriteServ
     listCrdtUpdatesSince: (...args) => repo.listCrdtUpdatesSince(...args),
     appendCrdtUpdate: (...args) => repo.appendCrdtUpdate(...args),
     materializeCrdtContent: (input) => contentWriteService.materializeCrdtContent(input),
-    getFileById: (fileId) => repo.getFileById(fileId)
+    getFileById: (fileId) => repo.getFileById(fileId),
+    listFiles: (roomId) => repo.listFiles(roomId)
   };
 }
 

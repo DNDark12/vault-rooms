@@ -28,7 +28,23 @@ function normalizeParams(params: unknown[]): (number | string | Uint8Array | nul
   return params.map((value) => (value === undefined ? null : (value as number | string | Uint8Array | null)));
 }
 
-export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, locator?: SqlJsLocator): Promise<RelayDb> {
+/** How background saves report trouble. Durable operations, explicit flushes and close() reject instead. */
+export type BackgroundSaveOptions = {
+  /** Called for each failed background save; `willRetry` is false once the retries are used up. */
+  onPersistenceError?: (error: Error, retry: { attempt: number; willRetry: boolean }) => void;
+  /** Waits before each retry of a failed background save. */
+  retryDelaysMs?: readonly number[];
+};
+
+const BACKGROUND_SAVE_DELAY_MS = 25;
+const BACKGROUND_SAVE_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
+
+export async function openObsidianSqlJsDb(
+  adapter: DataAdapter,
+  dbPath: string,
+  locator?: SqlJsLocator,
+  saveOptions: BackgroundSaveOptions = {}
+): Promise<RelayDb> {
   const normalizedPath = normalizePath(dbPath);
   const SQL = await loadSqlJs(locator);
   await recoverDataAdapterFileReplacement(adapter, normalizedPath);
@@ -92,14 +108,41 @@ export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, 
     sqlDb = new SQL.Database(snapshot);
   }
 
-  function scheduleFlush(): void {
+  const retryDelaysMs = saveOptions.retryDelaysMs ?? BACKGROUND_SAVE_RETRY_DELAYS_MS;
+  const reportSaveError =
+    saveOptions.onPersistenceError ??
+    ((error: Error, retry: { attempt: number; willRetry: boolean }) => {
+      console.error(`Vault Rooms: the relay database could not be saved (attempt ${retry.attempt})`, error);
+    });
+  let failedBackgroundSaves = 0;
+
+  /** A failed save leaves the changes in memory and tries again after each retry delay; once those
+   *  are used up, the next change starts a new round. */
+  function scheduleFlush(delayMs = BACKGROUND_SAVE_DELAY_MS): void {
     if (flushTimer !== null) {
       return;
     }
     flushTimer = window.setTimeout(() => {
       flushTimer = null;
-      void flush();
-    }, 25);
+      flush().then(
+        () => {
+          failedBackgroundSaves = 0;
+        },
+        (error: unknown) => {
+          failedBackgroundSaves += 1;
+          const retryDelayMs = retryDelaysMs[failedBackgroundSaves - 1];
+          reportSaveError(error instanceof Error ? error : new Error(String(error)), {
+            attempt: failedBackgroundSaves,
+            willRetry: retryDelayMs !== undefined
+          });
+          if (retryDelayMs === undefined) {
+            failedBackgroundSaves = 0;
+            return;
+          }
+          scheduleFlush(retryDelayMs);
+        }
+      );
+    }, delayMs);
   }
 
   function prepare(sql: string): PreparedStatement {
@@ -147,7 +190,11 @@ export async function openObsidianSqlJsDb(adapter: DataAdapter, dbPath: string, 
 
   function withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T> {
     const run = accessTail.catch(() => undefined).then(async () => {
-      await durableTail;
+      // durable() does not queue here, so one can begin while this waited its turn. Start only in the
+      // tick that finds none pending - a durable cannot then begin before the operation's first writes.
+      do {
+        await durableTail;
+      } while (pendingDurableOperations > 0);
       return operation();
     });
     accessTail = run.then(

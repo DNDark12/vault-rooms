@@ -10,6 +10,8 @@ export const EDITOR_PERMISSION_SET = [
   "file:delete",
   "sync:push"
 ] as const;
+/** A Blocked rule denies everything a grant could give. */
+export const BLOCKED_PERMISSION_SET = EDITOR_PERMISSION_SET;
 
 export type AccessRulePresentation = {
   kind: "reader" | "editor" | "custom" | "deny";
@@ -20,11 +22,10 @@ export type AccessRulePresentation = {
 export function accessRulePresentation(rule: AclRuleSummary): AccessRulePresentation {
   const where = humanAccessScope(rule.pathPattern);
   if (rule.effect === "deny") {
-    return {
-      kind: "deny",
-      summary: `Blocked from ${where.startsWith("only ") ? where.slice("only ".length) : where}`,
-      rawPermissions: rule.permissions.join(", ")
-    };
+    // Only a full block reads as "Blocked"; any narrower deny names exactly what it blocks.
+    return samePermissionSet(rule.permissions, BLOCKED_PERMISSION_SET)
+      ? { kind: "deny", summary: `Blocked from ${where.startsWith("only ") ? where.slice("only ".length) : where}` }
+      : { kind: "deny", summary: `Partly blocked · ${where}`, rawPermissions: rule.permissions.join(", ") };
   }
   if (samePermissionSet(rule.permissions, EDITOR_PERMISSION_SET)) {
     return { kind: "editor", summary: `Can edit · ${where}` };

@@ -364,24 +364,9 @@ export default class VaultRoomsPlugin extends Plugin {
         .resolveInviteServer(inviteServer, pin?.serverId ?? inviteServerId)
         .then(async (existing) => {
           if (existing) {
-            try {
-              await this.acceptInviteForServer(existing, inviteToken, inviteServer, pin);
-            } catch (error) {
-              if (pin && isTransportFailure(error)) {
-                const recover = await confirmModal(
-                  this.app,
-                  "Server address may have changed",
-                  "Search this LAN for the same server? Vault Rooms verifies its identity before sending the invite.",
-                  "Find server on LAN",
-                  false
-                );
-                if (recover) {
-                  await this.recoverExistingInviteOnLan(existing.id, inviteToken, pin, inviteServer);
-                }
-                return;
-              }
-              throw error;
-            }
+            await this.withInviteLanRecovery(pin, inviteServer, (baseUrl) =>
+              this.acceptInviteForServer(existing, inviteToken, baseUrl, pin)
+            );
             return;
           }
           new JoinTeamModal(this, "join", inviteServer, inviteToken, pin).open();
@@ -766,13 +751,16 @@ export default class VaultRoomsPlugin extends Plugin {
     pin?: PinnedInviteInfo
   ): Promise<void> {
     if (pin) assertPinMaterial(pin);
-    const response = await new RelayApiClient(baseUrl, undefined, undefined, pin).join(inviteToken, displayName, deviceName);
-    this.upsertServer(baseUrl, response, pin);
+    const { baseUrl: joinedBaseUrl, response } = await this.withInviteLanRecovery(pin, baseUrl, async (url) => ({
+      baseUrl: url,
+      response: await new RelayApiClient(url, undefined, undefined, pin).join(inviteToken, displayName, deviceName)
+    }));
+    this.upsertServer(joinedBaseUrl, response, pin);
     await this.saveSettings();
     this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     this.renderOpenRoomsViews();
-    new Notice(inviteJoinNotice(response, baseUrl));
+    new Notice(inviteJoinNotice(response, joinedBaseUrl));
   }
 
   /** Accepts a Team/Room/Friend invite for an identity already active on this exact server. */
@@ -1067,7 +1055,7 @@ export default class VaultRoomsPlugin extends Plugin {
       subjectType: "user" | "team";
       subjectId: string;
       effect: "allow" | "deny";
-      preset?: "reader" | "editor";
+      preset?: "reader" | "editor" | "blocked";
       permissions?: string[];
       pathPattern: string;
     }
@@ -1195,20 +1183,36 @@ export default class VaultRoomsPlugin extends Plugin {
     new Notice(`Found the same server at ${updated.baseUrl}. Existing rooms and access were preserved.`);
   }
 
-  async findInviteServerOnLan(pin: PinnedInviteInfo, advertisedBaseUrl?: string): Promise<string> {
-    return this.serverConnectionManager.findInviteServerOnLan(pin, advertisedBaseUrl);
-  }
-
-  async recoverExistingInviteOnLan(
-    connectionId: string,
-    inviteToken: string,
-    pin: PinnedInviteInfo,
-    advertisedBaseUrl?: string
-  ): Promise<void> {
-    const server = this.settings.servers.find((candidate) => candidate.id === connectionId);
-    if (!server) throw new Error("Saved server not found.");
-    const baseUrl = await this.serverConnectionManager.findInviteServerOnLan(pin, advertisedBaseUrl);
-    await this.acceptInviteForServer(server, inviteToken, baseUrl, pin);
+  /**
+   * Invite acceptance only. A pinned invite carries a verifiable server identity, and the discovery
+   * query carries nothing the invitee does not already hold from the link, so when the advertised
+   * address does not answer we can find the same server on the LAN and continue without asking. The
+   * token is still never exposed to an unverified endpoint: `findInviteServerOnLan` completes a pinned
+   * TLS handshake against each candidate and rejects the rest before returning one.
+   *
+   * Ordinary reconnect deliberately keeps its manual **Find server on LAN** button and never scans -
+   * see the LAN discovery design doc.
+   */
+  private async withInviteLanRecovery<T>(
+    pin: PinnedInviteInfo | undefined,
+    advertisedBaseUrl: string,
+    attempt: (baseUrl: string) => Promise<T>
+  ): Promise<T> {
+    try {
+      return await attempt(advertisedBaseUrl);
+    } catch (error) {
+      if (!pin || !isTransportFailure(error)) throw error;
+      let recovered: string;
+      try {
+        recovered = await this.serverConnectionManager.findInviteServerOnLan(pin, advertisedBaseUrl);
+      } catch {
+        // Report the address the user was actually given. A discovery miss says nothing more
+        // actionable than the original transport failure already does.
+        throw error;
+      }
+      new Notice(`${advertisedBaseUrl} did not answer. Found the same server at ${recovered} and verified its identity.`);
+      return attempt(recovered);
+    }
   }
 
   async refreshRooms(options: { notify?: boolean } = {}): Promise<void> {

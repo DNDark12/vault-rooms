@@ -9,10 +9,30 @@ export const EDITOR_PERMISSIONS: Permission[] = [
   "sync:push"
 ];
 
-export type PermissionPreset = "reader" | "editor";
+/** "Blocked": every data permission a grant can give, denied together across the rule's scope. */
+export const BLOCKED_PERMISSIONS: Permission[] = [...EDITOR_PERMISSIONS];
+
+export type PermissionPreset = "reader" | "editor" | "blocked";
+
+export function isPermissionPreset(value: unknown): value is PermissionPreset {
+  return value === "reader" || value === "editor" || value === "blocked";
+}
 
 export function expandPreset(preset: PermissionPreset): Permission[] {
-  return preset === "reader" ? [...READER_PERMISSIONS] : [...EDITOR_PERMISSIONS];
+  switch (preset) {
+    case "reader":
+      return [...READER_PERMISSIONS];
+    case "editor":
+      return [...EDITOR_PERMISSIONS];
+    case "blocked":
+      return [...BLOCKED_PERMISSIONS];
+  }
+}
+
+/** Whether `permissions` is exactly `expected`, ignoring order and repeats. */
+export function isExactPermissionSet(permissions: readonly Permission[], expected: readonly Permission[]): boolean {
+  const actual = new Set(permissions);
+  return actual.size === new Set(expected).size && expected.every((permission) => actual.has(permission));
 }
 
 export type PolicyInput = {

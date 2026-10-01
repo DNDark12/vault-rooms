@@ -103,16 +103,28 @@ async function pinnedRequestBytes(
         });
       }
     );
-    const timeout = window.setTimeout(() => request.destroy(new Error("Request timed out.")), req.timeoutMs ?? 10_000);
+    // The `code` is load-bearing, not decoration: a bare "Request timed out." is prose, so
+    // `isTransportFailure` reads it as a real relay answer and no transport recovery is offered for
+    // the commonest LAN failure of all - an address that is routable but blackholed.
+    const timeout = window.setTimeout(
+      () => request.destroy(timedOutError()),
+      req.timeoutMs ?? 10_000
+    );
     request.once("error", (error: unknown) => {
       window.clearTimeout(timeout);
       reject(error instanceof Error ? error : new Error(String(error)));
     });
     if (req.body !== undefined) {
-      request.write(req.body);
+      // ClientRequest#write takes a string or a byte view, never the ArrayBuffer that `requestUrl`
+      // callers build - wrap that one without copying.
+      request.write(typeof req.body === "string" || ArrayBuffer.isView(req.body) ? req.body : Buffer.from(req.body));
     }
     request.end();
   });
+}
+
+function timedOutError(): Error {
+  return Object.assign(new Error("Request timed out."), { code: "ETIMEDOUT" });
 }
 
 export type RotationProbeResult = { body: unknown; presentedSpkiSha256: string };
@@ -182,7 +194,7 @@ export async function fetchRotationProbe(baseUrl: string, timeoutMs = 10_000): P
         response.once("error", rejectOnce);
       }
     );
-    timeout = window.setTimeout(() => request.destroy(new Error("Request timed out.")), timeoutMs);
+    timeout = window.setTimeout(() => request.destroy(timedOutError()), timeoutMs);
     request.once("error", rejectOnce);
     request.end();
   });

@@ -9,7 +9,7 @@ import {
   type SyncClientMessage
 } from "@vault-rooms/protocol";
 import { createId } from "@vault-rooms/protocol";
-import type { RelayRepository } from "../db/repositories/relayRepository.js";
+import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import type { RoomRow } from "../db/schema.js";
 import { requestTransport, type RequestTransport } from "../routes/security.routes.js";
 import { authenticateActiveDeviceToken } from "../services/authService.js";
@@ -106,7 +106,7 @@ export function handleSyncSocket(
     // message-type branch below also has its own try/catch for a clean client-facing
     // rejection; this is the last-resort backstop for anything that slips past those.
     const handle = () => handleMessage(repo, registry, connection, { ...options, onAuthenticated: clearHelloTimeout }, raw.toString());
-    const pending = options.withDbAccess ? options.withDbAccess(() => undefined).then(handle) : handle();
+    const pending = options.withDbAccess ? startInQueueTurn(options.withDbAccess, handle) : handle();
     pending.catch((error) => {
       console.error("Vault Rooms relay: unhandled error while processing a sync message", error);
       try {
@@ -142,6 +142,21 @@ export function handleSyncSocket(
     }
     registry.remove(connection);
   });
+}
+
+/**
+ * Runs `start` up to its first await inside a turn of the database queue, where no durable image can
+ * begin before those writes; awaiting the rest there would hold the queue against the message's own
+ * queued writes, so the remainder continues outside it.
+ */
+export function startInQueueTurn<T>(
+  withDbAccess: <R>(operation: () => R | Promise<R>) => Promise<R>,
+  start: () => Promise<T>
+): Promise<T> {
+  let started!: Promise<T>;
+  return withDbAccess(() => {
+    started = start();
+  }).then(() => started);
 }
 
 async function handleMessage(
@@ -427,7 +442,9 @@ async function handleMessage(
         relativePath,
         baseVersion: message.baseVersion,
         content: message.content,
-        actorUserId: connection.principal.userId
+        actorUserId: connection.principal.userId,
+        revealServerContent: hasRoomPermission({ repo, principal: connection.principal, room, permission: "file:read", relativePath }),
+        wholeFileLane: true
       });
       sendJson(connection.socket, {
         type: "file_change_ack",
@@ -710,7 +727,12 @@ async function handleMessage(
         epoch: result.epoch
       });
       if (!replayed) {
+        // remote_crdt_rename names both paths, so it only reaches subscribers who can read both. Anyone
+        // else gets what their ACL lets them see: the note leaving the old path, or appearing at the
+        // new one - never a path they cannot read. One ACL snapshot classifies all three.
         const renameAclRules = repo.listAclRulesForRoom(room.id);
+        const canRead = (principal: DevicePrincipal, path: string): boolean =>
+          hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: path, aclRules: renameAclRules });
         registry.broadcastToRoom(
           room.id,
           {
@@ -723,10 +745,54 @@ async function handleMessage(
           },
           {
             exclude: connection,
-            canReceive: (principal) =>
-              hasRoomPermission({ repo, principal, room, permission: "file:read", relativePath: normalizedNewPath, aclRules: renameAclRules })
+            canReceive: (principal) => canRead(principal, result.oldRelativePath) && canRead(principal, result.relativePath)
           }
         );
+        // The tombstone the rename left at the old path, so this reports what a snapshot would.
+        const leftBehind = repo.getFile(room.id, result.oldRelativePath);
+        if (leftBehind?.deleted_at) {
+          registry.broadcastToRoom(
+            room.id,
+            {
+              type: "remote_file_delete",
+              roomId: room.id,
+              relativePath: result.oldRelativePath,
+              version: leftBehind.version,
+              deletedBy: renamedBy,
+              deletedAt: leftBehind.deleted_at
+            },
+            {
+              exclude: connection,
+              canReceive: (principal) => canRead(principal, result.oldRelativePath) && !canRead(principal, result.relativePath)
+            }
+          );
+        }
+        try {
+          const { file, content } = await options.contentWriteService.readFileContent({ roomId: room.id, relativePath: result.relativePath });
+          registry.broadcastToRoom(
+            room.id,
+            {
+              type: "remote_file_change",
+              roomId: room.id,
+              relativePath: result.relativePath,
+              version: file.version,
+              sha256: file.sha256 ?? "",
+              content,
+              updatedBy: renamedBy,
+              // Lets receivers adopt the existing CRDT document.
+              crdtEpoch: result.epoch,
+              updatedAt: new Date().toISOString()
+            },
+            {
+              exclude: connection,
+              canReceive: (principal) => !canRead(principal, result.oldRelativePath) && canRead(principal, result.relativePath)
+            }
+          );
+        } catch (error) {
+          // The rename is already acknowledged, so this must not become a crdt_rejected. Those
+          // subscribers pick the note up from their next room_snapshot instead.
+          console.error(`Vault Rooms relay: could not read "${result.relativePath}" to announce its rename`, error);
+        }
       }
     } catch (error) {
       sendCrdtRejection(connection.socket, message.requestId, roomId, relativePath, error);

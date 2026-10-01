@@ -59,38 +59,36 @@ beforeEach(() => {
 });
 
 describe("JoinTeamModal LAN recovery", () => {
-  it("offers manual discovery only after a pinned invite endpoint fails", async () => {
+  it("never renders a manual discovery button - joinServer owns the recovery", async () => {
     const plugin = {
       app: {},
-      joinServer: vi.fn().mockRejectedValue(new Error("net::ERR_CONNECTION_REFUSED")),
-      findInviteServerOnLan: vi.fn().mockResolvedValue("https://192.168.1.40:8788")
+      joinServer: vi.fn().mockRejectedValue(new Error("net::ERR_CONNECTION_REFUSED"))
     };
     const modal = new JoinTeamModal(plugin as never, "join", "https://old.local:8788", "tr_inv_secret", pin);
 
     modal.onOpen();
     expect(ui.buttons.map((button) => button.text)).not.toContain("Find server on LAN");
 
+    // A failed join must not grow a second affordance: `joinServer` already searched the LAN itself,
+    // so a button here could only repeat the search that just failed.
     await ui.buttons.find((button) => button.text === "Join")!.click!();
-    expect(ui.buttons.map((button) => button.text)).toContain("Find server on LAN");
-    expect(plugin.findInviteServerOnLan).not.toHaveBeenCalled();
-
-    await ui.buttons.find((button) => button.text === "Find server on LAN")!.click!();
-    expect(plugin.findInviteServerOnLan).toHaveBeenCalledWith(pin, "https://old.local:8788");
+    expect(ui.buttons.map((button) => button.text)).not.toContain("Find server on LAN");
     expect(plugin.joinServer).toHaveBeenCalledOnce();
   });
 
-  it("never offers discovery for a plain invite", async () => {
-    const plugin = {
-      app: {},
-      joinServer: vi.fn().mockRejectedValue(new Error("net::ERR_CONNECTION_REFUSED")),
-      findInviteServerOnLan: vi.fn()
-    };
-    const modal = new JoinTeamModal(plugin as never, "join", "http://192.168.1.2:8787", "tr_inv_secret");
+  it("submits the invite exactly as the link supplied it, pin included", async () => {
+    const plugin = { app: {}, joinServer: vi.fn().mockResolvedValue(undefined) };
+    const modal = new JoinTeamModal(plugin as never, "join", "https://old.local:8788", "tr_inv_secret", pin);
 
     modal.onOpen();
     await ui.buttons.find((button) => button.text === "Join")!.click!();
 
-    expect(ui.buttons.map((button) => button.text)).not.toContain("Find server on LAN");
-    expect(plugin.findInviteServerOnLan).not.toHaveBeenCalled();
+    expect(plugin.joinServer).toHaveBeenCalledWith(
+      "https://old.local:8788",
+      "tr_inv_secret",
+      "",
+      "Obsidian desktop",
+      pin
+    );
   });
 });

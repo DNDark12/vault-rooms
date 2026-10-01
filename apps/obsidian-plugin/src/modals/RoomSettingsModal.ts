@@ -623,7 +623,7 @@ export class RoomSettingsModal extends Modal {
       pathPattern,
       ...(this.accessChoice === "custom"
         ? { permissions: [...this.customPermissions] }
-        : { preset: this.accessChoice === "deny" ? "reader" : this.accessChoice })
+        : { preset: this.accessChoice === "deny" ? "blocked" as const : this.accessChoice })
     };
     try {
       await this.plugin.grantRoomAccess(this.room.id, input);

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LanDiscoveryResponder,
+  resolveLanDiscoveryHostInterface,
   resolveLanDiscoveryInterface,
   startLanDiscovery,
   type LanDiscoveryDependencies,
@@ -30,13 +31,47 @@ describe("manual LAN discovery", () => {
     })).resolves.toBe("192.168.12.16");
   });
 
+  it("joins the host responder on the advertised hostname's own resolved address", async () => {
+    // The route towards the multicast group can select a VPN or bridge address that cannot join a
+    // group at all; the advertised name is this machine, so its own A record is the better answer.
+    await expect(
+      resolveLanDiscoveryHostInterface("https://sake.local:8788", {
+        lookupHostAddress: vi.fn().mockResolvedValue("192.168.1.9"),
+        resolveRouteInterface: vi.fn().mockResolvedValue("10.211.55.2")
+      })
+    ).resolves.toBe("192.168.1.9");
+  });
+
+  it("keeps an advertised IPv4 literal as the host interface without resolving anything", async () => {
+    const lookupHostAddress = vi.fn();
+    await expect(
+      resolveLanDiscoveryHostInterface("https://192.168.12.16:8788", { lookupHostAddress })
+    ).resolves.toBe("192.168.12.16");
+    expect(lookupHostAddress).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["loopback", "127.0.0.1"],
+    ["link-local", "169.254.4.7"],
+    ["unresolvable", undefined]
+  ])("falls back to the multicast route when the host name resolves to %s", async (_label, resolved) => {
+    await expect(
+      resolveLanDiscoveryHostInterface("https://sake.local:8788", {
+        lookupHostAddress: vi.fn().mockResolvedValue(resolved),
+        resolveRouteInterface: vi.fn().mockResolvedValue("192.168.12.16")
+      })
+    ).resolves.toBe("192.168.12.16");
+  });
+
   it("sends three bounded queries and returns only matching deduplicated responses", async () => {
     const socket = new FakeSocket();
     const search = startLanDiscovery("srv_target", "192.168.12.16", deps(socket));
     socket.listen();
 
+    // One round is a multicast query, plus a limited broadcast once an interface was picked.
+    const rounds = () => socket.sent.filter(({ address }) => address === LAN_DISCOVERY_GROUP).length;
     expect(socket.multicastInterface).toBe("192.168.12.16");
-    expect(socket.sent).toHaveLength(1);
+    expect(rounds()).toBe(1);
     expect(parseLanDiscoveryMessage(socket.sent[0]!.data)?.type).toBe("discover");
 
     socket.message(encodeLanDiscoveryResponse("srv_other", nonce, "https", 8788), "192.168.1.8");
@@ -44,9 +79,9 @@ describe("manual LAN discovery", () => {
     socket.message(encodeLanDiscoveryResponse("srv_target", nonce, "https", 8788), "192.168.1.9");
 
     await vi.advanceTimersByTimeAsync(750);
-    expect(socket.sent).toHaveLength(2);
+    expect(rounds()).toBe(2);
     await vi.advanceTimersByTimeAsync(750);
-    expect(socket.sent).toHaveLength(3);
+    expect(rounds()).toBe(3);
     await vi.advanceTimersByTimeAsync(1500);
 
     await expect(search.result).resolves.toEqual([
@@ -55,19 +90,13 @@ describe("manual LAN discovery", () => {
     expect(socket.closed).toBe(true);
   });
 
-  it("also queries the selected interface's directed broadcast address", async () => {
+  it("adds a limited broadcast, without reading interface details, once routing picked a local address", async () => {
     const socket = new FakeSocket();
-    const search = startLanDiscovery("srv_target", "192.168.12.16", {
-      ...deps(socket),
-      getBroadcastAddress: () => "192.168.12.255"
-    });
+    const search = startLanDiscovery("srv_target", "192.168.12.16", deps(socket));
     socket.listen();
 
     expect(socket.broadcastEnabled).toBe(true);
-    expect(socket.sent.map(({ address }) => address)).toEqual([
-      LAN_DISCOVERY_GROUP,
-      "192.168.12.255"
-    ]);
+    expect(socket.sent.map(({ address }) => address)).toEqual([LAN_DISCOVERY_GROUP, "255.255.255.255"]);
 
     search.cancel();
     await expect(search.result).resolves.toEqual([]);
@@ -76,10 +105,7 @@ describe("manual LAN discovery", () => {
   it("keeps multicast discovery when broadcast cannot be enabled", async () => {
     const socket = new FakeSocket();
     socket.broadcastError = new Error("broadcast unavailable");
-    const search = startLanDiscovery("srv_target", "192.168.12.16", {
-      ...deps(socket),
-      getBroadcastAddress: () => "192.168.12.255"
-    });
+    const search = startLanDiscovery("srv_target", "192.168.12.16", deps(socket));
     socket.listen();
 
     expect(socket.sent.map(({ address }) => address)).toEqual([LAN_DISCOVERY_GROUP]);
@@ -142,6 +168,43 @@ describe("LAN discovery responder", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("keeps answering on the default interface when the scoped group join is refused", async () => {
+    // The real failure this fixes: EADDRNOTAVAIL used to close the socket, so the host answered
+    // nothing at all for the rest of the session and every invitee's search came back empty.
+    const socket = new FakeSocket();
+    socket.scopedMembershipError = Object.assign(new Error("addMembership EADDRNOTAVAIL"), {
+      code: "EADDRNOTAVAIL"
+    });
+    const responder = new LanDiscoveryResponder(
+      { serverId: "srv_target", transport: "https", port: 8788, interfaceAddress: "10.211.55.2" },
+      deps(socket)
+    );
+    const started = responder.start();
+    socket.listen();
+    await expect(started).resolves.toBeUndefined();
+
+    expect(socket.memberships).toEqual([{ group: LAN_DISCOVERY_GROUP, interfaceAddress: undefined }]);
+    expect(socket.closed).toBe(false);
+
+    socket.message(encodeLanDiscoveryQuery("srv_target", nonce), "192.168.1.8", 50100);
+    expect(parseLanDiscoveryMessage(socket.sent[0]!.data)).toMatchObject({ type: "here", serverId: "srv_target" });
+  });
+
+  it("still reports discovery unavailable when the group cannot be joined at all", async () => {
+    const socket = new FakeSocket();
+    socket.scopedMembershipError = new Error("addMembership EADDRNOTAVAIL");
+    socket.membershipError = new Error("addMembership ENODEV");
+    const responder = new LanDiscoveryResponder(
+      { serverId: "srv_target", transport: "https", port: 8788, interfaceAddress: "10.211.55.2" },
+      deps(socket)
+    );
+    const started = responder.start();
+    socket.listen();
+
+    await expect(started).rejects.toThrow("ENODEV");
+    expect(socket.closed).toBe(true);
+  });
+
   it("limits each source to five replies in five seconds", async () => {
     const socket = new FakeSocket();
     const responder = new LanDiscoveryResponder(
@@ -169,8 +232,7 @@ function deps(socket: FakeSocket): LanDiscoveryDependencies {
     createSocket: () => socket as LanDiscoverySocket,
     randomBytes: () => Buffer.alloc(16, 1),
     setTimeout: (callback, delay) => setTimeout(callback, delay),
-    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-    getBroadcastAddress: () => undefined
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   };
 }
 
@@ -182,6 +244,8 @@ class FakeSocket {
   multicastInterface: string | undefined;
   broadcastEnabled = false;
   broadcastError: Error | undefined;
+  scopedMembershipError: Error | undefined;
+  membershipError: Error | undefined;
   private handlers = new Map<string, Array<(...args: never[]) => void>>();
 
   on(event: string, callback: (...args: never[]) => void): this {
@@ -222,6 +286,8 @@ class FakeSocket {
   }
 
   addMembership(group: string, interfaceAddress?: string): void {
+    if (interfaceAddress !== undefined && this.scopedMembershipError) throw this.scopedMembershipError;
+    if (interfaceAddress === undefined && this.membershipError) throw this.membershipError;
     this.memberships.push({ group, interfaceAddress });
   }
 

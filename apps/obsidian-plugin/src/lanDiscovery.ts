@@ -1,6 +1,6 @@
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { createSocket as nodeCreateSocket } from "node:dgram";
-import { networkInterfaces as nodeNetworkInterfaces } from "os";
+import { lookup as nodeLookup } from "node:dns/promises";
 import {
   LAN_DISCOVERY_GROUP,
   LAN_DISCOVERY_PORT,
@@ -12,6 +12,9 @@ import {
 
 type RemoteInfo = { address: string; port: number };
 type TimerHandle = unknown;
+
+/** Limited broadcast: delivered on the local link only, never forwarded by routers (RFC 5735). */
+const LIMITED_BROADCAST_ADDRESS = "255.255.255.255";
 
 export type LanDiscoverySocket = {
   on(event: "listening", callback: () => void): LanDiscoverySocket;
@@ -32,7 +35,6 @@ export type LanDiscoveryDependencies = {
   setTimeout?: (callback: () => void, delayMs: number) => TimerHandle;
   clearTimeout?: (handle: TimerHandle) => void;
   now?: () => number;
-  getBroadcastAddress?: (interfaceAddress?: string) => string | undefined;
 };
 
 export type LanDiscoveryCandidate = {
@@ -55,7 +57,9 @@ export function startLanDiscovery(
   const deps = resolvedDependencies(dependencies);
   const nonce = Buffer.from(deps.randomBytes()).toString("base64url");
   const query = encodeLanDiscoveryQuery(serverId, nonce);
-  let broadcastAddress = deps.getBroadcastAddress(interfaceAddress);
+  // Multicast is the main path. Once routing has picked a local address, a limited broadcast goes out
+  // too, for networks that drop multicast; it needs no netmask or interface listing.
+  let broadcastAddress = interfaceAddress ? LIMITED_BROADCAST_ADDRESS : undefined;
   const socket = deps.createSocket();
   const candidates = new Map<string, LanDiscoveryCandidate>();
   const timers: TimerHandle[] = [];
@@ -183,7 +187,7 @@ export class LanDiscoveryResponder {
       });
       socket.on("listening", () => {
         try {
-          socket.addMembership(LAN_DISCOVERY_GROUP, this.endpoint.interfaceAddress);
+          this.joinDiscoveryGroup(socket);
           started = true;
           resolve();
         } catch (error) {
@@ -198,6 +202,28 @@ export class LanDiscoveryResponder {
         reject(asError(error));
       }
     });
+  }
+
+  /**
+   * The interface-scoped join keeps a host that advertises one specific address answering on that
+   * address's interface. It can fail outright (`EADDRNOTAVAIL`) when the advertised address is not a
+   * multicast-capable local interface right now - a VPN `utun`, a container bridge, or a stale DHCP
+   * lease - and losing the whole responder for the session is far worse than joining the kernel's
+   * default multicast interface instead. The fallback costs nothing: the socket binds the wildcard
+   * address, so directed-broadcast queries arrive regardless of membership, and every reply is
+   * unicast back to the querier, which needs no membership at all.
+   */
+  private joinDiscoveryGroup(socket: LanDiscoverySocket): void {
+    const interfaceAddress = this.endpoint.interfaceAddress;
+    if (!interfaceAddress) {
+      socket.addMembership(LAN_DISCOVERY_GROUP);
+      return;
+    }
+    try {
+      socket.addMembership(LAN_DISCOVERY_GROUP, interfaceAddress);
+    } catch {
+      socket.addMembership(LAN_DISCOVERY_GROUP);
+    }
   }
 
   stop(): void {
@@ -228,18 +254,66 @@ type LanDiscoveryInterfaceDependencies = {
   resolveRouteInterface?: (target: string) => Promise<string | undefined>;
 };
 
+type LanDiscoveryHostInterfaceDependencies = LanDiscoveryInterfaceDependencies & {
+  lookupHostAddress?: (hostname: string) => Promise<string | undefined>;
+};
+
+const IPV4_LITERAL = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
 export async function resolveLanDiscoveryInterface(
   baseUrl: string,
   dependencies: LanDiscoveryInterfaceDependencies = {}
 ): Promise<string | undefined> {
-  let hostname: string;
+  const hostname = advertisedHostname(baseUrl);
+  if (hostname === undefined) return undefined;
+  if (IPV4_LITERAL.test(hostname)) return hostname;
+  return (dependencies.resolveRouteInterface ?? resolveRouteInterface)(LAN_DISCOVERY_GROUP);
+}
+
+/**
+ * The interface the host's own responder joins, which is not the same question the client asks. An
+ * advertised IPv4 literal *is* the interface. An advertised hostname names this machine, so its A
+ * record is one of this machine's own interface addresses - a far better multicast interface than
+ * whatever the route towards the multicast group happens to select, which on a machine with a VPN
+ * `utun` or a container bridge can be an address that cannot join a group at all. Loopback and
+ * link-local answers are skipped, because a local hostname commonly resolves to those ahead of the
+ * real LAN address, and an unresolvable name falls back to the multicast-route selection.
+ */
+export async function resolveLanDiscoveryHostInterface(
+  baseUrl: string,
+  dependencies: LanDiscoveryHostInterfaceDependencies = {}
+): Promise<string | undefined> {
+  const hostname = advertisedHostname(baseUrl);
+  if (hostname === undefined) return undefined;
+  if (IPV4_LITERAL.test(hostname)) return hostname;
+  const resolved = await (dependencies.lookupHostAddress ?? lookupHostAddress)(hostname);
+  if (resolved && IPV4_LITERAL.test(resolved) && isRoutableInterfaceAddress(resolved)) {
+    return resolved;
+  }
+  return (dependencies.resolveRouteInterface ?? resolveRouteInterface)(LAN_DISCOVERY_GROUP);
+}
+
+function advertisedHostname(baseUrl: string): string | undefined {
   try {
-    hostname = new URL(baseUrl).hostname.replace(/^\[|]$/g, "");
+    return new URL(baseUrl).hostname.replace(/^\[|]$/g, "");
   } catch {
     return undefined;
   }
-  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)) return hostname;
-  return (dependencies.resolveRouteInterface ?? resolveRouteInterface)(LAN_DISCOVERY_GROUP);
+}
+
+function isRoutableInterfaceAddress(address: string): boolean {
+  return !address.startsWith("127.") && !address.startsWith("169.254.");
+}
+
+async function lookupHostAddress(hostname: string): Promise<string | undefined> {
+  try {
+    const { address } = await nodeLookup(hostname, { family: 4 });
+    return address;
+  } catch {
+    // An advertised name that does not resolve on the host itself still leaves the caller's
+    // route-based selection, and ultimately the responder's unscoped join.
+    return undefined;
+  }
 }
 
 export async function resolveLanDiscoveryClientInterface(baseUrl: string): Promise<string | undefined> {
@@ -280,30 +354,8 @@ function resolvedDependencies(dependencies: LanDiscoveryDependencies): Required<
     randomBytes: dependencies.randomBytes ?? (() => nodeRandomBytes(16)),
     setTimeout: dependencies.setTimeout ?? ((callback, delayMs) => window.setTimeout(callback, delayMs)),
     clearTimeout: dependencies.clearTimeout ?? ((handle) => window.clearTimeout(handle as number)),
-    now: dependencies.now ?? Date.now,
-    getBroadcastAddress: dependencies.getBroadcastAddress ?? findDirectedBroadcastAddress
+    now: dependencies.now ?? Date.now
   };
-}
-
-function findDirectedBroadcastAddress(interfaceAddress?: string): string | undefined {
-  if (!interfaceAddress) return undefined;
-  for (const entries of Object.values(nodeNetworkInterfaces())) {
-    const entry = entries?.find((candidate) =>
-      candidate.address === interfaceAddress && candidate.family === "IPv4"
-    );
-    if (entry) return directedBroadcastAddress(entry.address, entry.netmask);
-  }
-  return undefined;
-}
-
-function directedBroadcastAddress(address: string, netmask: string): string | undefined {
-  const addressParts = address.split(".").map(Number);
-  const maskParts = netmask.split(".").map(Number);
-  if (addressParts.length !== 4 || maskParts.length !== 4) return undefined;
-  if ([...addressParts, ...maskParts].some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return undefined;
-  }
-  return addressParts.map((part, index) => part | (~maskParts[index]! & 255)).join(".");
 }
 
 function asError(error: unknown): Error {

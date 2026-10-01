@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
-import { AppError } from "@vault-rooms/protocol";
+import { AppError, isCrdtEligiblePath } from "@vault-rooms/protocol";
 import type { SyncTimerHost } from "./syncServer.js";
 
 /** Shared Y.Text key used by client and relay. */
@@ -21,13 +22,24 @@ export type CrdtRepositoryPort = {
   getLatestCrdtSnapshot(fileId: string, epoch: number): { stateVector: string; snapshot: string; upToSeq: number } | null;
   listCrdtUpdatesSince(fileId: string, epoch: number, sinceSeq: number): Array<{ seq: number; update: string }>;
   appendCrdtUpdate(fileId: string, epoch: number, updateBase64: string): number;
-  /** Production materialization is asynchronous; test doubles may remain synchronous. */
+  /** Production materialization is asynchronous; test doubles may remain synchronous. Writes nothing
+   *  (null) for a superseded epoch or a room that has left the CRDT lane. */
   materializeCrdtContent(input: {
     fileId: string;
+    epoch: number;
     content: string;
     actorUserId: string;
   }): { version: number; sha256: string } | null | Promise<{ version: number; sha256: string } | null>;
   getFileById(fileId: string): { room_id: string; relative_path: string } | null;
+  /** A room's file rows, tombstones included; `sha256` is that of the materialized content. */
+  listFiles(roomId: string): Array<{
+    id: string;
+    relative_path: string;
+    crdt_epoch: number;
+    sha256: string | null;
+    deleted_at: string | null;
+    updated_by_user_id: string | null;
+  }>;
 };
 
 export type CrdtUpdatedBy = { userId: string; displayName: string };
@@ -70,6 +82,10 @@ export class CrdtDocManager {
   private readonly cache = new Map<string, CachedDoc>();
   private readonly idleSweepHandle: unknown;
   private disposed = false;
+  /** Materializations that have started but not settled. */
+  private readonly materializing = new Set<Promise<void>>();
+  /** Rooms in the middle of `retireRoom`; their documents take no updates. */
+  private readonly retiringRooms = new Set<string>();
 
   constructor(
     private readonly repo: CrdtRepositoryPort,
@@ -158,6 +174,11 @@ export class CrdtDocManager {
    *  made here - the caller (`syncServer.ts`) only fans out after this method returns successfully,
    *  which by construction means the update already landed durably. */
   applyUpdate(fileId: string, epoch: number, updateBase64: string, updatedBy: CrdtUpdatedBy): void {
+    if (this.isRetiring(fileId)) {
+      // The room's final text is being materialized, so this update could never reach `files`. Same
+      // rejection the room gives once it has left the CRDT lane.
+      throw new AppError("CRDT_DISABLED", "Live editing is turned off for this room.", 409);
+    }
     let updateBytes: Uint8Array;
     try {
       updateBytes = fromBase64(updateBase64);
@@ -227,6 +248,65 @@ export class CrdtDocManager {
     this.cache.delete(key);
   }
 
+  /**
+   * Takes a room off the CRDT lane without losing an edit or letting a stale document write over
+   * whole-file content later. While this runs the room's documents reject updates. Before `switchMode`
+   * flips the room, every live Markdown document's durable text must match its materialized content -
+   * whatever its timers or earlier attempts did, and whether or not it was loaded since a restart -
+   * and the room's documents and timers are dropped once it has flipped. A document that cannot be
+   * written aborts the switch, keeping the room live and its edits scheduled. `fallbackActor` is
+   * credited for a write when nothing records who last edited the document.
+   */
+  async retireRoom<T>(roomId: string, switchMode: () => Promise<T>, fallbackActor: CrdtUpdatedBy): Promise<T> {
+    this.retiringRooms.add(roomId);
+    // Cancelled in the same tick that starts rejecting updates, so none of the room's timers can
+    // fire later and start a write this would not wait for.
+    const cancelled = this.roomDocuments(roomId).filter((cached) => cached.materializeTimer !== undefined);
+    for (const cached of cancelled) {
+      this.timerHost.clearTimeout(cached.materializeTimer);
+      cached.materializeTimer = undefined;
+    }
+    try {
+      await Promise.allSettled([...this.materializing]);
+      try {
+        await this.landRoomDocuments(roomId, fallbackActor);
+      } catch (error) {
+        for (const cached of cancelled) {
+          if (this.cache.get(this.key(cached.fileId, cached.epoch)) === cached) {
+            this.scheduleMaterialize(cached);
+          }
+        }
+        throw error;
+      }
+      const result = await switchMode();
+      for (const cached of this.roomDocuments(roomId)) {
+        this.evictDocument(cached.fileId, cached.epoch);
+      }
+      return result;
+    } finally {
+      this.retiringRooms.delete(roomId);
+    }
+  }
+
+  /** Writes each live Markdown document of the room whose durable text differs from its materialized
+   *  content. Throws on the first one that cannot be written. */
+  private async landRoomDocuments(roomId: string, fallbackActor: CrdtUpdatedBy): Promise<void> {
+    for (const file of this.repo.listFiles(roomId)) {
+      if (file.deleted_at || !isCrdtEligiblePath(file.relative_path)) continue;
+      const cached = this.cache.get(this.key(file.id, file.crdt_epoch));
+      // A cached document never runs ahead of its durable state (see applyUpdate). An uncached one is
+      // rebuilt outside the cache, so LRU pressure cannot drop it mid-write; one with no durable state
+      // at all has nothing to land, and must not empty the file.
+      const rebuilt = cached ? undefined : this.reconstruct(file.id, file.crdt_epoch);
+      if (rebuilt && !rebuilt.hasDurableState) continue;
+      const text = (cached ?? rebuilt!.cached).doc.getText(CRDT_TEXT_KEY).toString();
+      if (sha256Text(text) === file.sha256) continue;
+      const updatedBy =
+        cached?.lastUpdatedBy ?? (file.updated_by_user_id ? { userId: file.updated_by_user_id, displayName: "" } : fallbackActor);
+      await this.landText(file.id, file.crdt_epoch, text, updatedBy);
+    }
+  }
+
   /** Test/diagnostic seam: whether `(fileId, epoch)` currently has a live cache entry, without the
    *  side effect of loading one if absent. */
   isCached(fileId: string, epoch: number): boolean {
@@ -241,6 +321,26 @@ export class CrdtDocManager {
     return `${fileId}:${epoch}`;
   }
 
+  private isRetiring(fileId: string): boolean {
+    if (this.retiringRooms.size === 0) return false;
+    const roomId = this.repo.getFileById(fileId)?.room_id;
+    return roomId !== undefined && this.retiringRooms.has(roomId);
+  }
+
+  private roomDocuments(roomId: string): CachedDoc[] {
+    return [...this.cache.values()].filter((cached) => this.repo.getFileById(cached.fileId)?.room_id === roomId);
+  }
+
+  /** Remembers a materialization until it settles, so `retireRoom` can wait for it. */
+  private track(run: Promise<void>): Promise<void> {
+    this.materializing.add(run);
+    const forget = (): void => {
+      this.materializing.delete(run);
+    };
+    void run.then(forget, forget);
+    return run;
+  }
+
   private load(fileId: string, epoch: number): CachedDoc {
     const key = this.key(fileId, epoch);
     const existing = this.cache.get(key);
@@ -249,6 +349,14 @@ export class CrdtDocManager {
       return existing;
     }
 
+    const { cached } = this.reconstruct(fileId, epoch);
+    this.cache.set(key, cached);
+    this.evictLruIfOverCapacity();
+    return cached;
+  }
+
+  /** Rebuilds a document from its durable snapshot and updates, without caching it. */
+  private reconstruct(fileId: string, epoch: number): { cached: CachedDoc; hasDurableState: boolean } {
     const doc = new Y.Doc();
     const snapshot = this.repo.getLatestCrdtSnapshot(fileId, epoch);
     let lastSeq = 0;
@@ -272,9 +380,7 @@ export class CrdtDocManager {
       materializeTimer: undefined,
       lastUpdatedBy: null
     };
-    this.cache.set(key, cached);
-    this.evictLruIfOverCapacity();
-    return cached;
+    return { cached, hasDurableState: snapshot !== null || pending.length > 0 };
   }
 
   /**
@@ -307,7 +413,7 @@ export class CrdtDocManager {
       this.timerHost.clearTimeout(cached.materializeTimer);
       cached.materializeTimer = undefined;
     }
-    await this.materialize(cached);
+    await this.track(this.materialize(cached));
   }
 
   private compact(cached: CachedDoc): void {
@@ -324,23 +430,38 @@ export class CrdtDocManager {
     cached.materializeTimer = this.timerHost.setTimeout(() => {
       cached.materializeTimer = undefined;
       if (this.withDbAccess) {
-        void this.withDbAccess(() => undefined).then(() => this.materialize(cached)).catch((error) => {
-          console.error("Vault Rooms relay: CRDT materialization could not enter the database queue", error);
-        });
+        void this.track(
+          this.withDbAccess(() => undefined).then(() => this.materialize(cached)).catch((error) => {
+            console.error("Vault Rooms relay: CRDT materialization could not enter the database queue", error);
+          })
+        );
       } else {
         // materialize() catches and logs its own failures.
-        void this.materialize(cached);
+        void this.track(this.materialize(cached));
       }
     }, MATERIALIZE_DEBOUNCE_MS);
+  }
+
+  private async materialize(cached: CachedDoc): Promise<void> {
+    try {
+      await this.writeMaterialized(cached);
+    } catch (error) {
+      // This callback runs off a raw setTimeout (no caller to propagate a rejection/rethrow to),
+      // so an uncaught error here would crash the whole relay process for every room. Contract 1.6
+      // treats a missing materialization as self-healing ("briefly stale... self-heals on the next
+      // update") - log and let the next crdt_update's scheduleMaterialize retry instead of crashing.
+      console.error("Vault Rooms relay: CRDT materialization failed, will retry on the next update", error);
+    }
   }
 
   /** Materialization (contract 1.6) - independent of compaction. Extracts the doc's current text
    *  and writes it into `files`/`file_versions` so REST/legacy readers see fresh content within the
    *  SLA, without waiting for the (much less frequent) compaction threshold. A no-op if the file
-   *  was deleted before the debounce fired (`materializeCrdtContent` returns null), and silently
-   *  skipped if the doc was evicted from cache in the meantime (nothing to materialize from - the
-   *  next load will reconstruct current durable state anyway). */
-  private async materialize(cached: CachedDoc): Promise<void> {
+   *  was deleted before the debounce fired, its epoch was superseded, or its room left the CRDT lane
+   *  (`materializeCrdtContent` returns null), and silently skipped if the doc was evicted from cache
+   *  in the meantime (nothing to materialize from - the next load will reconstruct current durable
+   *  state anyway). Throws on failure; `materialize` is the logging wrapper. */
+  private async writeMaterialized(cached: CachedDoc): Promise<void> {
     if (this.disposed) return;
     const key = this.key(cached.fileId, cached.epoch);
     if (this.cache.get(key) !== cached) {
@@ -350,28 +471,25 @@ export class CrdtDocManager {
     }
     const updatedBy = cached.lastUpdatedBy;
     if (!updatedBy) return;
-    const text = cached.doc.getText(CRDT_TEXT_KEY).toString();
-    try {
-      const result = await this.repo.materializeCrdtContent({ fileId: cached.fileId, content: text, actorUserId: updatedBy.userId });
-      if (!result) return;
-      const file = this.repo.getFileById(cached.fileId);
-      if (!file) return;
-      this.onMaterialized({
-        fileId: cached.fileId,
-        roomId: file.room_id,
-        relativePath: file.relative_path,
-        version: result.version,
-        sha256: result.sha256,
-        content: text,
-        updatedBy
-      });
-    } catch (error) {
-      // This callback runs off a raw setTimeout (no caller to propagate a rejection/rethrow to),
-      // so an uncaught error here would crash the whole relay process for every room. Contract 1.6
-      // treats a missing materialization as self-healing ("briefly stale... self-heals on the next
-      // update") - log and let the next crdt_update's scheduleMaterialize retry instead of crashing.
-      console.error("Vault Rooms relay: CRDT materialization failed, will retry on the next update", error);
-    }
+    await this.landText(cached.fileId, cached.epoch, cached.doc.getText(CRDT_TEXT_KEY).toString(), updatedBy);
+  }
+
+  /** Writes `text` as the file's whole-file content and announces it, unless the repository declines
+   *  (deleted file, superseded epoch, or a room that has left the CRDT lane). */
+  private async landText(fileId: string, epoch: number, text: string, updatedBy: CrdtUpdatedBy): Promise<void> {
+    const result = await this.repo.materializeCrdtContent({ fileId, epoch, content: text, actorUserId: updatedBy.userId });
+    if (!result) return;
+    const file = this.repo.getFileById(fileId);
+    if (!file) return;
+    this.onMaterialized({
+      fileId,
+      roomId: file.room_id,
+      relativePath: file.relative_path,
+      version: result.version,
+      sha256: result.sha256,
+      content: text,
+      updatedBy
+    });
   }
 
   private evictIdle(): void {
@@ -404,4 +522,9 @@ export class CrdtDocManager {
       this.cache.delete(oldestKey);
     }
   }
+}
+
+/** Same digest `files.sha256` records for materialized Markdown. */
+function sha256Text(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }

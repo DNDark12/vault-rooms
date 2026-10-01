@@ -1134,6 +1134,96 @@ describe("CRDT sync flow (Phase 4)", () => {
       await expect(nextMessage(renamer, "remote_crdt_rename")).rejects.toThrow(/Timed out/);
     });
 
+    it("never discloses a path a subscriber cannot read - each one learns only what it can see", async () => {
+      const timers = new FakeCrdtTimerHost();
+      const { app, owner, room } = await setupCrdtRoom({ crdtTimerHost: timers });
+      const renamer = await connect(app);
+      await helloAndSubscribe(renamer, owner.deviceToken, room.id);
+      renamer.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "secret/payroll.md" });
+      const created = await nextMessage(renamer, "crdt_created");
+      renamer.sendJson({
+        type: "crdt_update",
+        requestId: "u1",
+        roomId: room.id,
+        relativePath: "secret/payroll.md",
+        epoch: created.epoch,
+        update: base64OfUpdate(Y.encodeStateAsUpdate((() => {
+          const doc = new Y.Doc();
+          doc.getText(CRDT_TEXT_KEY).insert(0, "salary table");
+          return doc;
+        })()))
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      timers.runAllTimeouts();
+      await vi.waitFor(async () => {
+        const read = await app.inject({
+          method: "GET",
+          url: `/api/rooms/${room.id}/files/content?path=${encodeURIComponent("secret/payroll.md")}`,
+          headers: { authorization: `Bearer ${owner.deviceToken}` }
+        });
+        expect(read.json().content).toBe("salary table");
+      });
+
+      const denyRead = async (member: { user: { id: string } }, pathPattern: string) => {
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/rooms/${room.id}/acl`,
+          headers: { authorization: `Bearer ${owner.deviceToken}` },
+          payload: { subjectType: "user", subjectId: member.user.id, effect: "deny", permissions: ["file:read"], pathPattern }
+        });
+        expect(response.statusCode).toBe(200);
+      };
+      const cannotReadOld = await addMember(app, owner, room, "reader");
+      await denyRead(cannotReadOld, "secret/**");
+      const cannotReadNew = await addMember(app, owner, room, "reader");
+      await denyRead(cannotReadNew, "public/**");
+      const readsBoth = await addMember(app, owner, room, "reader");
+      const cannotReadOldSocket = await connect(app);
+      await helloAndSubscribe(cannotReadOldSocket, cannotReadOld.deviceToken, room.id);
+      const cannotReadNewSocket = await connect(app);
+      await helloAndSubscribe(cannotReadNewSocket, cannotReadNew.deviceToken, room.id);
+      const readsBothSocket = await connect(app);
+      await helloAndSubscribe(readsBothSocket, readsBoth.deviceToken, room.id);
+
+      renamer.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "secret/payroll.md", relativePath: "public/payroll.md" });
+      await nextMessage(renamer, "crdt_renamed");
+      const listed = await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/files`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      });
+      const renamedVersion = (listed.json().files as Array<{ relativePath: string; version: number }>).find(
+        (file) => file.relativePath === "public/payroll.md"
+      )!.version;
+
+      // Can read both paths: the rename itself.
+      expect(await nextMessage(readsBothSocket, "remote_crdt_rename")).toMatchObject({
+        oldRelativePath: "secret/payroll.md",
+        relativePath: "public/payroll.md",
+        epoch: created.epoch
+      });
+      // Can read only the new path: the note simply appears there, with a document to adopt.
+      expect(await nextMessage(cannotReadOldSocket, "remote_file_change")).toMatchObject({
+        roomId: room.id,
+        relativePath: "public/payroll.md",
+        version: renamedVersion,
+        content: "salary table",
+        crdtEpoch: created.epoch
+      });
+      // Can read only the old path: the note is gone from there.
+      expect(await nextMessage(cannotReadNewSocket, "remote_file_delete")).toMatchObject({
+        roomId: room.id,
+        relativePath: "secret/payroll.md",
+        version: renamedVersion + 1
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const received = (socket: WebSocket) => JSON.stringify(messageQueues.get(socket));
+      expect(received(cannotReadOldSocket)).not.toContain("secret/payroll.md");
+      expect(received(cannotReadNewSocket)).not.toContain("public/payroll.md");
+      expect(received(readsBothSocket)).not.toContain("remote_file_delete");
+    });
+
     // Eleventh hardware-testing round (2026-07-24): a rename whose target is held by another live
     // document is now disambiguated rather than rejected - the same first-come-first-served policy a
     // colliding create already used. Rejecting was a dead end: the note stayed unsynced under a name
@@ -1185,6 +1275,36 @@ describe("CRDT sync flow (Phase 4)", () => {
         relativePath: "taken.md",
         epoch: created.epoch
       });
+    });
+
+    it("never moves a path's version backwards: the old path keeps a newer tombstone, a reused path rises above its tombstone", async () => {
+      const { app, owner, room } = await setupCrdtRoom();
+      const socket = await connect(app);
+      await helloAndSubscribe(socket, owner.deviceToken, room.id);
+      socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "taken.md" });
+      await nextMessage(socket, "crdt_created");
+      socket.sendJson({ type: "file_delete", requestId: "d1", roomId: room.id, relativePath: "taken.md", baseVersion: 1 });
+      const deleted = await nextMessage(socket, "file_delete_ack");
+      socket.sendJson({ type: "crdt_create", requestId: "c2", roomId: room.id, relativePath: "source.md" });
+      await nextMessage(socket, "crdt_created");
+
+      socket.sendJson({ type: "crdt_rename", requestId: "r1", roomId: room.id, oldRelativePath: "source.md", relativePath: "taken.md" });
+      await nextMessage(socket, "crdt_renamed");
+
+      const files = (
+        await app.inject({
+          method: "GET",
+          url: `/api/rooms/${room.id}/files`,
+          headers: { authorization: `Bearer ${owner.deviceToken}` }
+        })
+      ).json().files as Array<{ relativePath: string; version: number; deleted: boolean }>;
+      const taken = files.find((file) => file.relativePath === "taken.md");
+      const source = files.find((file) => file.relativePath === "source.md");
+      // A client still holding taken.md's tombstone only accepts something newer than it.
+      expect(taken).toMatchObject({ deleted: false });
+      expect(taken!.version).toBeGreaterThan(deleted.version);
+      // source.md was at version 1; anything created there later has to read as newer than that.
+      expect(source).toMatchObject({ deleted: true, version: 2 });
     });
 
     it("rejects with NOT_FOUND when the source path does not exist", async () => {

@@ -6,8 +6,19 @@ import {
   isEligiblePath,
   isLegacyEligiblePath,
   isValidBase64,
+  isValidUtf8,
   normalizeRelativePath
 } from "./paths.js";
+
+describe("isValidUtf8", () => {
+  it("accepts UTF-8 text and rejects bytes in any other encoding", () => {
+    expect(isValidUtf8(new TextEncoder().encode("plain, café, 漢字, 🎉"))).toBe(true);
+    expect(isValidUtf8(new Uint8Array([0xef, 0xbb, 0xbf, 0x61]))).toBe(true); // BOM + "a"
+    expect(isValidUtf8(new Uint8Array([]))).toBe(true);
+    // "café" as Windows-1252: a lone 0xE9 is not UTF-8.
+    expect(isValidUtf8(new Uint8Array([0x63, 0x61, 0x66, 0xe9]))).toBe(false);
+  });
+});
 
 describe("path error prose", () => {
   it("does not expose path-parser vocabulary", () => {

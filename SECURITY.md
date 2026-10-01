@@ -137,6 +137,8 @@ The only endpoint that can provision privileged access with no pre-existing cred
 
 `POST /api/invites/accept` normally uses the same device bearer-token authentication as other REST and WebSocket traffic. The only alternate form is strict TLS migration: over the freshly pinned HTTPS connection, the client omits `Authorization` and sends an HMAC proof bound to the device ID, stable server ID, exact invite token, and presented identity SPKI. The relay verifies that proof against the stored hash of an active plaintext-era device token and immediately rotates the token on success. A copied public `serverId` or attacker-controlled invite therefore cannot make the client disclose a reusable bearer token, and the proof cannot be replayed against another invite or identity.
 
+Every other REST route checks its device token before the relay reads any of the request body. Only the two file-upload routes accept file-sized bodies; every other body, including those of the unauthenticated routes above, is capped at 64 KiB. Cross-origin (CORS) access is granted only to Obsidian's own `app://obsidian.md` renderer origin, so a web page on any other origin gets no CORS grant.
+
 ## Outbound update check
 
 Vault Rooms makes exactly one request that leaves your local network, and it carries no vault data.

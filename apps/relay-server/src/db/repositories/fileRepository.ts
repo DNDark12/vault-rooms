@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AppError, contentTypeForPath, createId, type ContentType } from "@vault-rooms/protocol";
+import { AppError, contentTypeForPath, createId, isCrdtEligiblePath, type ContentType } from "@vault-rooms/protocol";
 import type { CrdtOperationReceiptRow, FileRow, FileVersionWithContentRow, RoomRow } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
 
@@ -129,8 +129,14 @@ export class RelayFileRepository {
     actorUserId: string;
     /** Raw-byte key already finalized by ContentWriteService. */
     blobKey?: string;
+    /** A whole-file-lane write: rechecked here, as it commits, against the room switching this note
+     *  to live editing after the request's own check. */
+    wholeFileLane?: boolean;
   }): FileWriteResult {
     const write = this.db.transaction(() => {
+      if (input.wholeFileLane && isCrdtEligiblePath(input.relativePath) && this.getRoom(input.roomId)?.crdt_enabled) {
+        throw new AppError("CRDT_WRITE_UNSUPPORTED", "This note uses live editing - update the plugin to edit it.", 409);
+      }
       const existing = this.getFile(input.roomId, input.relativePath);
       const sha256 = sha256Text(input.content);
       const sizeBytes = Buffer.byteLength(input.content, "utf8");
@@ -261,13 +267,18 @@ export class RelayFileRepository {
       }
       // User-authored rename targets are never auto-disambiguated.
       const targetPath = input.relativePath;
-      if (input.oldRelativePath !== targetPath) {
+      const moves = input.oldRelativePath !== targetPath;
+      // Clients keep versions per path and ignore anything at or below the one they last saw there, so
+      // a path's version must never go backwards - on either side of the move.
+      let version = existing.version;
+      if (moves) {
         const conflict = this.getFile(input.roomId, targetPath);
         if (conflict && !conflict.deleted_at) {
           throw new AppError("FILE_EXISTS", "A file already exists at the new path.", 409, { serverVersion: conflict.version });
         }
         if (conflict) {
-          // Remove the tombstone occupying the unique path slot.
+          // Remove the tombstone occupying the unique path slot, landing above its version.
+          version = Math.max(version, conflict.version + 1);
           this.bumpCrdtEpochStatements(conflict.id);
           this.deleteAllVersionsAndCollectBlobs(conflict.id);
           this.db.prepare("delete from files where id = ?").run(conflict.id);
@@ -275,9 +286,21 @@ export class RelayFileRepository {
       }
       const now = new Date().toISOString();
       this.db
-        .prepare("update files set relative_path = ?, content_type = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
-        .run(targetPath, contentTypeForPath(targetPath), input.actorUserId, now, existing.id);
-      this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, targetPath, existing.version);
+        .prepare("update files set relative_path = ?, content_type = ?, version = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
+        .run(targetPath, contentTypeForPath(targetPath), version, input.actorUserId, now, existing.id);
+      if (version !== existing.version) {
+        this.db.prepare("update file_versions set version = ? where file_id = ? and version = ?").run(version, existing.id, existing.version);
+      }
+      if (moves) {
+        // A tombstone newer than anything seen at the old path, so a file created there later continues
+        // above it rather than restarting at version 1.
+        this.db
+          .prepare(
+            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, null, null, 0, ?, ?, ?, ?)"
+          )
+          .run(createId("fil"), input.roomId, input.oldRelativePath, contentTypeForPath(input.oldRelativePath), existing.version + 1, now, input.actorUserId, now, now);
+      }
+      this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, targetPath, version);
       return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: targetPath, epoch: existing.crdt_epoch };
   }
 
@@ -498,11 +521,12 @@ export class RelayFileRepository {
     return `${base} (${label}) ${createId("fil").slice(-8)}${extension}`;
   }
 
-  /** Materializes CRDT text; deleted files return null. This path stays quota-exempt. */
-  materializeCrdtContent(input: { fileId: string; content: string; actorUserId: string; blobKey?: string }): ({ version: number; sha256: string } & { orphanedBlobKeys?: string[] }) | null {
+  /** Materializes CRDT text. Returns null without writing for a deleted file, a superseded epoch, or a
+   *  room that has left the CRDT lane - whole-file writes own that content now. This path stays quota-exempt. */
+  materializeCrdtContent(input: { fileId: string; epoch: number; content: string; actorUserId: string; blobKey?: string }): ({ version: number; sha256: string } & { orphanedBlobKeys?: string[] }) | null {
     const materialize = this.db.transaction(() => {
       const existing = this.db.prepare("select * from files where id = ?").get(input.fileId) as FileRow | undefined;
-      if (!existing || existing.deleted_at) {
+      if (!existing || existing.deleted_at || existing.crdt_epoch !== input.epoch || !this.getRoom(existing.room_id)?.crdt_enabled) {
         return null;
       }
       const sha256 = sha256Text(input.content);

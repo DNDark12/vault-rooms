@@ -1,3 +1,5 @@
+import { createId, type Permission } from "@vault-rooms/protocol";
+import { BLOCKED_PERMISSIONS, isExactPermissionSet, READER_PERMISSIONS } from "@vault-rooms/policy";
 import type { RelayDb, RelayDbReader } from "./sqlJsAdapter.js";
 
 const CURRENT_ROOMS_COLUMNS_SQL = `
@@ -218,8 +220,66 @@ export function runMigrations(db: RelayDb): void {
   if (upgradingV01) {
     db.prepare("insert or replace into server_meta(key, value) values ('legacy_v01_migrated', '1')").run();
   }
+  migrateReaderDenyRulesToBlocked(db);
   // Quota accounting is exact before writes are accepted.
   recomputeStorageUsage(db);
+}
+
+/**
+ * The room-settings "Blocked" choice used to be stored as a deny of just the reader permissions, which
+ * left creating, writing and deleting open. Nothing records which deny came from that choice, so each
+ * deny that is exactly the reader set is treated as one and widened to the full blocked set - closing
+ * the gap outweighs keeping an identical hand-made rule. Runs once; each original rule is kept in
+ * acl_rule_migration_backup and each change is audited.
+ */
+function migrateReaderDenyRulesToBlocked(db: RelayDb): void {
+  const migration = "acl_reader_denies_blocked";
+  if (db.prepare("select 1 from server_meta where key = ?").get(migration)) {
+    return;
+  }
+  db.exec(`
+    create table if not exists acl_rule_migration_backup(
+      migration text not null,
+      rule_id text not null,
+      permissions_json text not null,
+      migrated_at text not null,
+      primary key(migration, rule_id)
+    );
+  `);
+  const now = new Date().toISOString();
+  const serverId =
+    (db.prepare("select value from server_meta where key = 'server_id'").get() as { value: string } | undefined)?.value ?? "relay";
+  const denies = db.prepare("select id, room_id, permissions_json from acl_rules where effect = 'deny'").all() as Array<{
+    id: string;
+    room_id: string;
+    permissions_json: string;
+  }>;
+  db.transaction(() => {
+    for (const rule of denies) {
+      const permissions = parsePermissions(rule.permissions_json);
+      if (!permissions || !isExactPermissionSet(permissions, READER_PERMISSIONS)) continue;
+      db.prepare("insert into acl_rule_migration_backup(migration, rule_id, permissions_json, migrated_at) values (?, ?, ?, ?)").run(
+        migration,
+        rule.id,
+        rule.permissions_json,
+        now
+      );
+      db.prepare("update acl_rules set permissions_json = ? where id = ?").run(JSON.stringify(BLOCKED_PERMISSIONS), rule.id);
+      db.prepare(
+        "insert into audit_events(id, team_id, actor_type, actor_id, action, resource_type, resource_id, metadata_json, ip_address, created_at) values (?, null, 'system', ?, 'acl.block_migrated', 'room', ?, ?, null, ?)"
+      ).run(createId("aud"), serverId, rule.room_id, JSON.stringify({ aclId: rule.id, before: permissions, after: BLOCKED_PERMISSIONS }), now);
+    }
+    db.prepare("insert into server_meta(key, value) values (?, ?)").run(migration, now);
+  })();
+}
+
+function parsePermissions(json: string): Permission[] | null {
+  try {
+    const value = JSON.parse(json) as unknown;
+    return Array.isArray(value) ? (value as Permission[]) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Recomputes referenced legacy and external content bytes. */

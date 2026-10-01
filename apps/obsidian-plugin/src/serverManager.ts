@@ -1,6 +1,6 @@
 import { createServer } from "node:net";
 import type { MigrationMode, ServerSecurityState } from "@vault-rooms/protocol";
-import type { DataAdapter } from "obsidian";
+import { Notice, type DataAdapter } from "obsidian";
 import {
   certPemToDerBase64Url,
   createRelayCore,
@@ -110,7 +110,14 @@ export class EmbeddedRelayServer {
     let db: RelayDb | null = null;
     let app: EmbeddedRelayApp | null = null;
     try {
-      db = await openObsidianSqlJsDb(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) });
+      db = await openObsidianSqlJsDb(this.adapter, this.dbPath, { wasmBinary: toArrayBuffer(sqlWasmBinary) }, {
+        onPersistenceError: (error, retry) => {
+          console.error(`Vault Rooms: the server database could not be saved (attempt ${retry.attempt})`, error);
+          if (!retry.willRetry) {
+            new Notice("Vault Rooms couldn't save its server database. Recent changes are kept in memory and saved with the next change.");
+          }
+        }
+      });
       const core = createRelayCore(db, {
         maxFileBytes: settings.maxFileBytes,
         maxStoredContentBytes: settings.maxStoredContentBytes ?? DEFAULT_SERVER_SETTINGS.maxStoredContentBytes,

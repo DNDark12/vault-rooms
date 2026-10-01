@@ -20,9 +20,14 @@ export type ContentWriteService = {
     baseVersion: number;
     content: string;
     actorUserId: string;
+    /** Whether the caller may read this file: only then does a conflict carry the server's copy. */
+    revealServerContent?: boolean;
+    /** A whole-file-lane write, rechecked against the room's live-editing mode as it commits. */
+    wholeFileLane?: boolean;
   }): Promise<FileWriteResult>;
   materializeCrdtContent(input: {
     fileId: string;
+    epoch: number;
     content: string;
     actorUserId: string;
   }): Promise<{ version: number; sha256: string } | null>;
@@ -58,7 +63,21 @@ export function createContentWriteService(repo: RelayRepository, blobStore: Blob
   };
 
   const collect = async (keys: string[] | undefined, bestEffort = false): Promise<void> => {
-    for (const key of new Set(keys ?? [])) {
+    const unreferenced = [...new Set(keys ?? [])].filter((key) => !repo.isBlobKeyReferenced(key));
+    if (unreferenced.length === 0) {
+      return;
+    }
+    // The in-memory image already dropped these references, but the on-disk one is written on a
+    // delay and may still hold them. Persist it first: deleting before that lets a crash reopen
+    // metadata that points at a blob which no longer exists. A failed flush keeps the blobs; the
+    // orphan sweep reclaims them later.
+    try {
+      await repo.flush();
+    } catch (error) {
+      if (!bestEffort) throw error;
+      return;
+    }
+    for (const key of unreferenced) {
       if (!repo.isBlobKeyReferenced(key)) {
         try {
           await blobStore.delete(key);
@@ -69,13 +88,17 @@ export function createContentWriteService(repo: RelayRepository, blobStore: Blob
     }
   };
 
-  const enrichConflict = async (error: unknown): Promise<never> => {
+  const enrichConflict = async (error: unknown, revealServerContent: boolean): Promise<never> => {
     if (!(error instanceof AppError) || error.code !== "VERSION_CONFLICT") {
       throw error;
     }
     const details = error.details as
       | { serverBlobKey?: string; serverContentType?: ContentType; serverVersion?: number; serverSha256?: string | null }
       | undefined;
+    if (!revealServerContent) {
+      // The content and its fingerprint belong to callers who may read the file.
+      throw new AppError(error.code, error.message, error.statusCode, { serverVersion: details?.serverVersion });
+    }
     if (!details?.serverBlobKey || !details.serverContentType) {
       throw error;
     }
@@ -93,10 +116,11 @@ export function createContentWriteService(repo: RelayRepository, blobStore: Blob
   return {
     async writeFile(input) {
       return withBlobAccess(async () => {
-        const bytes = decodeTransportContent(input.content, contentTypeForPath(input.relativePath));
+        const { revealServerContent = false, ...write } = input;
+        const bytes = decodeTransportContent(write.content, contentTypeForPath(write.relativePath));
         const blobKey = await blobStore.put(bytes);
         try {
-          const result = await repo.withExclusiveAccess(() => repo.writeFile({ ...input, blobKey }));
+          const result = await repo.withExclusiveAccess(() => repo.writeFile({ ...write, blobKey }));
           await collect(result.orphanedBlobKeys, true);
           const { orphanedBlobKeys: _ignored, ...publicResult } = result;
           return publicResult;
@@ -104,7 +128,7 @@ export function createContentWriteService(repo: RelayRepository, blobStore: Blob
           if (!repo.isBlobKeyReferenced(blobKey)) {
             await collect([blobKey], true);
           }
-          return enrichConflict(error);
+          return enrichConflict(error, revealServerContent);
         }
       });
     },

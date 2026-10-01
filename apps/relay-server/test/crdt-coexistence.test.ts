@@ -1,7 +1,12 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 import * as Y from "yjs";
 import { createApp } from "../src/app.js";
+import type { RelayRepository } from "../src/db/repositories/relayRepository.js";
+import { createInMemoryBlobStore, type BlobStore } from "../src/storage/blobStore.js";
 import type { CrdtDocManager } from "../src/sync/crdtDocManager.js";
 import type { SyncTimerHost } from "../src/sync/syncServer.js";
 import { injectBootstrap } from "./bootstrapHelper.js";
@@ -383,6 +388,231 @@ describe("CRDT coexistence (Phase 6)", () => {
       payload: { relativePath: "note.md", baseVersion: 1, content: "edited after reverting to CAS" }
     });
     expect(putResponse.statusCode).toBe(200);
+  });
+
+  it("[toggle-OFF] a live edit still waiting to materialize is saved before the room leaves the CRDT lane", async () => {
+    const timers = new FakeCrdtTimerHost();
+    const { app, owner, room } = await setupRoom({ crdtTimerHost: timers });
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+    socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    const created = await nextMessage(socket, "crdt_created");
+    socket.sendJson({
+      type: "crdt_update",
+      requestId: "u1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: created.epoch,
+      update: base64OfUpdate(Y.encodeStateAsUpdate((() => {
+        const doc = new Y.Doc();
+        doc.getText("content").insert(0, "typed live");
+        return doc;
+      })()))
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The materialize debounce has not fired, so the edit exists only in the CRDT lane.
+    expect((await toggleCrdt(app, owner, room, false)).statusCode).toBe(200);
+
+    const read = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=note.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(read.json().content).toBe("typed live");
+    const crdtDocManager = (app as unknown as { testCrdtDocManager: CrdtDocManager }).testCrdtDocManager;
+    expect(crdtDocManager.isCached(created.documentId, created.epoch)).toBe(false);
+  });
+
+  it("[toggle-OFF] a CRDT materialization scheduled before the switch never overwrites a later whole-file write", async () => {
+    const timers = new FakeCrdtTimerHost();
+    const { app, owner, room } = await setupRoom({ crdtTimerHost: timers });
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+    socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+    const created = await nextMessage(socket, "crdt_created");
+    socket.sendJson({
+      type: "crdt_update",
+      requestId: "u1",
+      roomId: room.id,
+      relativePath: "note.md",
+      epoch: created.epoch,
+      update: base64OfUpdate(Y.encodeStateAsUpdate((() => {
+        const doc = new Y.Doc();
+        doc.getText("content").insert(0, "stale live text");
+        return doc;
+      })()))
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await toggleCrdt(app, owner, room, false)).statusCode).toBe(200);
+
+    const current = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=note.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    const put = await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "note.md", baseVersion: current.json().version, content: "whole-file edit after the switch" }
+    });
+    expect(put.statusCode).toBe(200);
+
+    // Fire whatever the CRDT lane still had scheduled, then let any asynchronous write land.
+    timers.runAllTimeouts();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const read = await app.inject({
+      method: "GET",
+      url: `/api/rooms/${room.id}/files/content?path=note.md`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` }
+    });
+    expect(read.json().content).toBe("whole-file edit after the switch");
+  });
+
+  it("[toggle-OFF] lands live edits that only exist in durable CRDT state after a restart, so turning it back on keeps them", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vault-rooms-crdt-restart-"));
+    let app: Awaited<ReturnType<typeof createApp>> | undefined;
+    try {
+      const dbPath = join(directory, "relay.sqlite");
+      const beforeRestart = await createApp({ dbPath, publicUrl: "http://127.0.0.1:8787", crdtTimerHost: new FakeCrdtTimerHost() });
+      const owner = (await injectBootstrap(beforeRestart, { displayName: "Owner", deviceName: "Owner laptop" })).json();
+      const room = (
+        await beforeRestart.inject({
+          method: "POST",
+          url: "/api/rooms",
+          headers: { authorization: `Bearer ${owner.deviceToken}` },
+          payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [] }
+        })
+      ).json().room;
+      const socket = await connect(beforeRestart);
+      await helloAndSubscribe(socket, owner.deviceToken, room.id);
+      socket.sendJson({ type: "crdt_create", requestId: "c1", roomId: room.id, relativePath: "note.md" });
+      const created = await nextMessage(socket, "crdt_created");
+      socket.sendJson({
+        type: "crdt_update",
+        requestId: "u1",
+        roomId: room.id,
+        relativePath: "note.md",
+        epoch: created.epoch,
+        update: base64OfUpdate(Y.encodeStateAsUpdate((() => {
+          const doc = new Y.Doc();
+          doc.getText("content").insert(0, "typed before the restart");
+          return doc;
+        })()))
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      socket.close();
+      // The materialize debounce never fired: the edit exists only in the durable CRDT update log.
+      await beforeRestart.close();
+
+      app = await createApp({ dbPath, publicUrl: "http://127.0.0.1:8787", crdtTimerHost: new FakeCrdtTimerHost() });
+      // Nobody subscribes after the restart, so the subscribe-time catch-up never runs.
+      expect((await toggleCrdt(app, owner, room, false)).statusCode).toBe(200);
+      const afterOff = await app.inject({
+        method: "GET",
+        url: `/api/rooms/${room.id}/files/content?path=note.md`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` }
+      });
+      expect(afterOff.json().content).toBe("typed before the restart");
+
+      expect((await toggleCrdt(app, owner, room, true)).statusCode).toBe(200);
+      const reader = await connect(app);
+      await helloAndSubscribe(reader, owner.deviceToken, room.id);
+      reader.sendJson({ type: "subscribe_room", requestId: "s2", roomId: room.id });
+      const snapshot = await nextMessage(reader, "room_snapshot");
+      const epoch = snapshot.files.find((file: { relativePath: string }) => file.relativePath === "note.md").crdtEpoch;
+      reader.sendJson({
+        type: "crdt_sync_step1",
+        requestId: "h1",
+        roomId: room.id,
+        relativePath: "note.md",
+        epoch,
+        stateVector: emptyStateVectorBase64()
+      });
+      const step2 = await nextMessage(reader, "crdt_sync_step2");
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, new Uint8Array(Buffer.from(step2.update, "base64")));
+      expect(doc.getText("content").toString()).toBe("typed before the restart");
+    } finally {
+      await app?.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("[toggle-ON] reseeds a note that changed between reading its seed text and committing the switch", async () => {
+    const backing = createInMemoryBlobStore();
+    let holdNextRead: { held: () => void; gate: Promise<void> } | null = null;
+    const blobStore: BlobStore = {
+      put: (bytes) => backing.put(bytes),
+      has: (key) => backing.has(key),
+      delete: (key) => backing.delete(key),
+      list: () => backing.list(),
+      async get(key) {
+        const hold = holdNextRead;
+        holdNextRead = null;
+        if (hold) {
+          hold.held();
+          await hold.gate;
+        }
+        return backing.get(key);
+      }
+    };
+    const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:8787", blobStore });
+    apps.push(app);
+    const repo = (app as unknown as { testRepo: RelayRepository }).testRepo;
+    const owner = (await injectBootstrap(app, { displayName: "Owner", deviceName: "Owner laptop" })).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Room", type: "folder", sourcePath: "Room", mountName: "Room", capabilities: [], crdtEnabled: false }
+      })
+    ).json().room;
+    await app.inject({
+      method: "PUT",
+      url: `/api/rooms/${room.id}/files/content`,
+      headers: { authorization: `Bearer ${owner.deviceToken}` },
+      payload: { relativePath: "note.md", baseVersion: 0, content: "read as the seed" }
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      holdNextRead = { held: resolve, gate: new Promise<void>((done) => { release = done; }) };
+    });
+
+    const toggled = toggleCrdt(app, owner, room, true);
+    await held;
+    // Lands while the switch still holds the older text; the commit must notice.
+    repo.writeFile({ roomId: room.id, relativePath: "note.md", baseVersion: 1, content: "changed meanwhile", actorUserId: owner.user.id });
+    release();
+    expect((await toggled).statusCode).toBe(200);
+
+    const socket = await connect(app);
+    await helloAndSubscribe(socket, owner.deviceToken, room.id);
+    socket.sendJson({ type: "subscribe_room", requestId: "s2", roomId: room.id });
+    const snapshot = await nextMessage(socket, "room_snapshot");
+    const epoch = snapshot.files.find((file: { relativePath: string }) => file.relativePath === "note.md").crdtEpoch;
+    socket.sendJson({ type: "crdt_sync_step1", requestId: "h1", roomId: room.id, relativePath: "note.md", epoch, stateVector: emptyStateVectorBase64() });
+    const step2 = await nextMessage(socket, "crdt_sync_step2");
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, new Uint8Array(Buffer.from(step2.update, "base64")));
+    expect(doc.getText("content").toString()).toBe("changed meanwhile");
+  });
+
+  it("[toggle-ON] rejects a whole-file write to a note that switched to live editing before it committed", async () => {
+    const { app, owner, room } = await setupRoom();
+    const repo = (app as unknown as { testRepo: RelayRepository }).testRepo;
+
+    // The room is live already; the request's own early check would have run before the switch.
+    expect(() =>
+      repo.writeFile({ roomId: room.id, relativePath: "note.md", baseVersion: 0, content: "late", actorUserId: owner.user.id, wholeFileLane: true })
+    ).toThrowError(expect.objectContaining({ code: "CRDT_WRITE_UNSUPPORTED" }));
+    // Non-Markdown files stay on the whole-file lane.
+    expect(
+      repo.writeFile({ roomId: room.id, relativePath: "notes.txt", baseVersion: 0, content: "fine", actorUserId: owner.user.id, wholeFileLane: true })
+    ).toMatchObject({ version: 1 });
   });
 
   it("[memory hygiene] a REST delete of a CRDT-enabled file evicts its cached Y.Doc, closing the Phase 4 gap for this route", async () => {

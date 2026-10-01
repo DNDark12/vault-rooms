@@ -60,7 +60,7 @@ class FakeApi implements RelayFileApi {
   writes: Array<{ roomId: string; relativePath: string; baseVersion: number; content: string }> = [];
   nextWrite:
     | { ok: true; relativePath: string; version: number; sha256: string }
-    | { ok: false; code: "VERSION_CONFLICT"; serverVersion: number; serverSha256: string; serverContent: string } = {
+    | { ok: false; code: "VERSION_CONFLICT"; serverVersion: number; serverSha256?: string; serverContent?: string } = {
     ok: true,
     relativePath: "Board.md",
     version: 2,
@@ -74,11 +74,11 @@ class FakeApi implements RelayFileApi {
   async writeFile(roomId: string, relativePath: string, baseVersion: number, content: string): Promise<{ ok: true; relativePath: string; version: number; sha256: string }> {
     this.writes.push({ roomId, relativePath, baseVersion, content });
     if (!this.nextWrite.ok) {
-      const error = new Error("conflict") as Error & { code: string; serverVersion: number; serverSha256: string; serverContent: string };
+      const error = new Error("conflict") as Error & { code: string; serverVersion: number; serverSha256?: string; serverContent?: string };
       error.code = this.nextWrite.code;
       error.serverVersion = this.nextWrite.serverVersion;
-      error.serverSha256 = this.nextWrite.serverSha256;
-      error.serverContent = this.nextWrite.serverContent;
+      if (this.nextWrite.serverSha256 !== undefined) error.serverSha256 = this.nextWrite.serverSha256;
+      if (this.nextWrite.serverContent !== undefined) error.serverContent = this.nextWrite.serverContent;
       throw error;
     }
     return this.nextWrite;
@@ -279,6 +279,44 @@ describe("plugin sync core", () => {
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# server\n");
     expect(await vault.read("Vault Rooms/demo/Projects Demo/Board (conflict B laptop 2026-07-06T120000).md")).toBe("# local\n");
     expect(room.files["Board.md"]).toMatchObject({ serverVersion: 4, serverSha256: "server-4", dirty: false });
+  });
+
+  it("refuses to push a text file that is not UTF-8, leaving it untouched", async () => {
+    const vault = new FakeVaultAdapter() as FakeVaultAdapter & { readStrictUtf8(path: string): Promise<string> };
+    vault.readStrictUtf8 = async () => {
+      throw Object.assign(new Error("This file isn't UTF-8 text."), { code: "VALIDATION_ERROR" });
+    };
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api, () => new Date("2026-07-06T12:00:00Z"));
+    const room = { roomId: "room_1", mountPath: "Vault Rooms/demo/Projects Demo", files: {} };
+    await vault.write("Vault Rooms/demo/Projects Demo/export.csv", "name,caf\uFFFD\n");
+
+    await expect(engine.pushLocalChange(room, "export.csv", "B laptop")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+    expect(api.writes).toEqual([]);
+    expect(await vault.read("Vault Rooms/demo/Projects Demo/export.csv")).toBe("name,caf\uFFFD\n");
+  });
+
+  it("leaves the local file alone when a conflict comes back without the server's copy", async () => {
+    // The relay withholds the copy from a caller who may write the file but not read it.
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    api.nextWrite = { ok: false, code: "VERSION_CONFLICT", serverVersion: 4 };
+    const engine = new VaultSyncEngine(vault, api, () => new Date("2026-07-06T12:00:00Z"));
+    const room = {
+      roomId: "room_1",
+      mountPath: "Vault Rooms/demo/Projects Demo",
+      files: {
+        "Board.md": { serverVersion: 3, serverSha256: "server-3", localSha256: "local", dirty: true }
+      }
+    };
+    await vault.write("Vault Rooms/demo/Projects Demo/Board.md", "# local\n");
+
+    await expect(engine.pushLocalChange(room, "Board.md", "B laptop")).rejects.toMatchObject({ code: "VERSION_CONFLICT" });
+
+    expect(await vault.read("Vault Rooms/demo/Projects Demo/Board.md")).toBe("# local\n");
+    expect(await vault.list("Vault Rooms/demo/Projects Demo")).toEqual(["Vault Rooms/demo/Projects Demo/Board.md"]);
+    expect(room.files["Board.md"]).toMatchObject({ serverVersion: 3, dirty: true });
   });
 
   it("round-trips binary files (e.g. images) as base64 instead of corrupting them", async () => {

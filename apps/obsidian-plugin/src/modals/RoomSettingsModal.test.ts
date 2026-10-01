@@ -357,4 +357,27 @@ describe("RoomSettingsModal low-tech access contract", () => {
       preset: "editor"
     });
   });
+
+  it("sends Blocked as the shared blocked preset rather than a reader deny", async () => {
+    const { modal, grantRoomAccess } = harness([]);
+    await open(modal);
+    button(modal.contentEl, "Give someone access").click();
+    const choice = Array.from(modal.contentEl.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.value === "deny")
+    )!;
+    choice.value = "deny";
+    choice.dispatchEvent(new Event("change"));
+
+    button(modal.contentEl, "Give access").click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(grantRoomAccess).toHaveBeenCalledWith("daily", {
+      subjectType: "team",
+      subjectId: "ekyo",
+      effect: "deny",
+      pathPattern: "**/*",
+      preset: "blocked"
+    });
+  });
 });

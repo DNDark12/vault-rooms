@@ -21,6 +21,7 @@ import { certPemToDerBase64Url } from "./security/identity.js";
 import { CrdtDocManager } from "./sync/crdtDocManager.js";
 import { registerSyncRoutes, type SyncTimerHost } from "./sync/syncServer.js";
 import { isRawHttpResponse } from "./services/rawHttpResponse.js";
+import { authenticateBeforeBody, bodyLimitFor, bodyTooLargeError, corsHeadersFor, SMALL_JSON_BODY_BYTES } from "./services/httpPolicy.js";
 
 const nodeSyncTimerHost: SyncTimerHost = {
   setInterval: (callback, delayMs) => setNodeInterval(callback, delayMs),
@@ -65,14 +66,15 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     options.crdtTimerHost ?? nodeSyncTimerHost,
     createCrdtMaterializedHandler(repo, connectionRegistry)
   );
-  // The JSON request body wrapping a file's content (quoting/escaping newlines, etc.) is always
-  // somewhat larger than the raw file itself, so Fastify's bodyLimit needs real headroom above
-  // maxFileBytes - otherwise a file just under the configured limit can still be rejected at the
-  // HTTP layer before the friendlier FILE_TOO_LARGE check even runs.
+  // Each route gets its own body limit (httpPolicy.ts); this default covers requests that match no route.
   const app = Fastify({
     logger: false,
-    bodyLimit: Math.max(maxFileBytes * 2, 5 * 1024 * 1024),
+    bodyLimit: SMALL_JSON_BODY_BYTES,
     ...(options.https ? { https: options.https } : {})
+  });
+  app.addHook("onRoute", (routeOptions) => {
+    const method = typeof routeOptions.method === "string" ? routeOptions.method : "";
+    routeOptions.bodyLimit = bodyLimitFor(method, routeOptions.url, maxFileBytes);
   });
   app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_request, body, done) => done(null, body));
   app.addHook("preSerialization", (_request, reply, payload, done) => {
@@ -101,10 +103,9 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
   });
 
   app.addHook("onRequest", (request, reply, done) => {
-    reply.header("access-control-allow-origin", "*");
-    reply.header("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-    reply.header("access-control-allow-headers", "authorization,content-type");
-    reply.header("access-control-max-age", "86400");
+    for (const [name, value] of Object.entries(corsHeadersFor(request.headers.origin))) {
+      reply.header(name, value);
+    }
     if (request.method === "OPTIONS") {
       void reply.code(204).send();
       return;
@@ -129,11 +130,24 @@ export async function createAppWithDb(db: RelayDb, options: CreateAppCoreOptions
     done();
   });
 
+  // Runs before Fastify parses the body, so an unauthenticated caller never gets one read.
+  app.addHook("onRequest", (request, _reply, done) => {
+    if (request.routeOptions.url !== undefined) {
+      authenticateBeforeBody(repo, request.method, request.routeOptions.url, request);
+    }
+    done();
+  });
+
   void app.register(websocket, { options: { maxPayload: Math.max(maxFileBytes * 2, 5 * 1024 * 1024) } });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
       reply.status(error.statusCode).send(toApiError(error));
+      return;
+    }
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      const tooLarge = bodyTooLargeError(request.method, request.routeOptions.url ?? "", maxFileBytes);
+      reply.status(tooLarge.statusCode).send(toApiError(tooLarge));
       return;
     }
     reply.status(500).send(toApiError(new AppError("VALIDATION_ERROR", "Unexpected server error.", 500)));

@@ -15,7 +15,7 @@ export * from "./security/identityLifecycle.js";
 export * from "./security/identityStore.js";
 export * from "./security/rotation.js";
 export { ConnectionRegistry } from "./sync/connectionRegistry.js";
-export { handleSyncSocket } from "./sync/syncServer.js";
+export { handleSyncSocket, startInQueueTurn } from "./sync/syncServer.js";
 export type { SyncTimerHost } from "./sync/syncServer.js";
 // Both runtimes share the same presence service and registry.
 export { PresenceRegistry } from "./sync/presenceRegistry.js";
@@ -33,3 +33,4 @@ export { blobKeyForBytes, isValidBlobKey, shardedRelativePath } from "./storage/
 export type { BlobStore } from "./storage/blobStore.js";
 export type { ContentWriteService } from "./storage/contentWriteService.js";
 export { isRawHttpResponse } from "./services/rawHttpResponse.js";
+export { authenticateBeforeBody, bodyLimitFor, bodyTooLargeError, corsHeadersFor } from "./services/httpPolicy.js";

@@ -20,11 +20,11 @@ import {
 import { activeServer, isOwnEmbeddedServerConnection, type ServerConnection } from "../settings.js";
 import { EmbeddedRelayServer, type EmbeddedServerStatus } from "../serverManager.js";
 import type { PluginContext } from "./PluginContext.js";
-import { userFacingError } from "../errorMessages.js";
+import { lanDiscoveryUnavailableReason, userFacingError } from "../errorMessages.js";
 import {
   LanDiscoveryResponder,
   resolveLanDiscoveryClientInterface,
-  resolveLanDiscoveryInterface,
+  resolveLanDiscoveryHostInterface,
   startLanDiscovery,
   type LanDiscoverySearch
 } from "../lanDiscovery.js";
@@ -91,7 +91,7 @@ export class ServerConnectionManager {
           transport: url.protocol === "https:" ? "https" as const : "http" as const,
           port: Number.parseInt(url.port, 10),
           interfaceAddress: status.lanUrl
-            ? await (this.ctx.resolveLanDiscoveryInterface ?? resolveLanDiscoveryInterface)(status.lanUrl)
+            ? await (this.ctx.resolveLanDiscoveryInterface ?? resolveLanDiscoveryHostInterface)(status.lanUrl)
             : undefined
         };
         const responder = this.ctx.createLanDiscoveryResponder?.(endpoint) ?? new LanDiscoveryResponder(endpoint);
@@ -102,10 +102,7 @@ export class ServerConnectionManager {
         } catch (error) {
           responder.stop();
           this.lanDiscoveryResponder = null;
-          this.lanDiscoveryState = {
-            available: false,
-            error: error instanceof Error ? error.message : String(error)
-          };
+          this.lanDiscoveryState = { available: false, error: lanDiscoveryUnavailableReason(error) };
         }
       }
       const pinnedPortChanged = !this.ctx.settings.server.port && status.port !== this.ctx.settings.server.pinnedPort;

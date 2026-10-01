@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  BLOCKED_PERMISSIONS,
   EDITOR_PERMISSIONS,
   READER_PERMISSIONS
 } from "../../../packages/policy-engine/src/index.js";
 import type { AclRuleSummary } from "./apiClient.js";
 import {
+  BLOCKED_PERMISSION_SET,
   EDITOR_PERMISSION_SET,
   READER_PERMISSION_SET,
   accessRulePresentation
@@ -26,6 +28,7 @@ describe("access rule presentation", () => {
   it("stays byte-for-byte aligned with policy presets", () => {
     expect(EDITOR_PERMISSION_SET).toEqual(EDITOR_PERMISSIONS);
     expect(READER_PERMISSION_SET).toEqual(READER_PERMISSIONS);
+    expect(BLOCKED_PERMISSION_SET).toEqual(BLOCKED_PERMISSIONS);
   });
 
   it("translates only exact presets", () => {
@@ -39,14 +42,25 @@ describe("access rule presentation", () => {
     });
   });
 
-  it("keeps denies separate and makes folder scope readable", () => {
+  it("calls only a full block Blocked, and makes folder scope readable", () => {
+    expect(accessRulePresentation(rule({
+      effect: "deny",
+      permissions: [...BLOCKED_PERMISSION_SET],
+      pathPattern: "Meetings/**/*"
+    }))).toEqual({
+      kind: "deny",
+      summary: "Blocked from Meetings"
+    });
+  });
+
+  it("describes a custom deny by exactly what it blocks", () => {
     expect(accessRulePresentation(rule({
       effect: "deny",
       permissions: ["file:read"],
       pathPattern: "Meetings/**/*"
     }))).toEqual({
       kind: "deny",
-      summary: "Blocked from Meetings",
+      summary: "Partly blocked · only Meetings",
       rawPermissions: "file:read"
     });
   });

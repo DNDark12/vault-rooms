@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type WebSocket from "ws";
+import * as Y from "yjs";
 import { createApp } from "vault-rooms-relay/app";
 import { RelayApiClient, type RoomSummary } from "../src/apiClient.js";
 import { mountPathForRoom, VaultSyncEngine, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "../src/syncClient.js";
@@ -116,8 +118,12 @@ class FakeVaultAdapter implements VaultAdapter {
 
 const apps: Array<Awaited<ReturnType<typeof createApp>>> = [];
 const clients: Client[] = [];
+const rawSockets: WebSocket[] = [];
 
 afterEach(async () => {
+  for (const socket of rawSockets.splice(0)) {
+    socket.close();
+  }
   for (const client of clients.splice(0)) {
     client.socket.disconnect();
     client.coordinator.dispose();
@@ -143,8 +149,10 @@ async function waitFor(check: () => boolean | Promise<boolean>, description: str
 
 /** Starts a real listening relay and returns its http base URL (used both for RelayApiClient's
  *  REST calls and, after RoomSyncSocket's http->ws rewrite, the live WebSocket connection). */
-async function startRelay(): Promise<{ app: Awaited<ReturnType<typeof createApp>>; baseUrl: string }> {
-  const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:0" });
+async function startRelay(
+  crdtTimerHost?: NonNullable<Parameters<typeof createApp>[0]>["crdtTimerHost"]
+): Promise<{ app: Awaited<ReturnType<typeof createApp>>; baseUrl: string }> {
+  const app = await createApp({ dbPath: ":memory:", publicUrl: "http://127.0.0.1:0", crdtTimerHost });
   apps.push(app);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const address = app.server.address();
@@ -685,3 +693,139 @@ describe("Room Settings save -> Vault Rooms panel refresh (main.ts's updateRoomS
     expect(afterRoom?.capabilities).toEqual([{ pluginId: "com.example.plugin", displayName: "Example Plugin", mode: "optional", minVersion: undefined, installed: true }]);
   });
 });
+
+describe("path reuse after a live-editing rename", () => {
+  it("delivers a note recreated at a renamed-away path to a member who only sees the old path", async () => {
+    const timers = new ManualCrdtTimerHost();
+    const { app, baseUrl } = await startRelay(timers);
+    const owner = (await injectBootstrap(app, { displayName: "A", deviceName: "A laptop", teamName: "Demo" })).json();
+    const invite = (
+      await app.inject({
+        method: "POST",
+        url: `/api/teams/${owner.team.id}/invites`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { role: "member", expiresInMinutes: 60, maxUses: 1 }
+      })
+    ).json();
+    const member = (
+      await app.inject({
+        method: "POST",
+        url: "/api/join",
+        payload: { inviteToken: invite.inviteToken, displayName: "B", deviceName: "B laptop" }
+      })
+    ).json();
+    const room = (
+      await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { name: "Notes", type: "folder", sourcePath: "Notes", mountName: "Notes", capabilities: [] }
+      })
+    ).json().room;
+    const grant = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: "POST",
+        url: `/api/rooms/${room.id}/acl`,
+        headers: { authorization: `Bearer ${owner.deviceToken}` },
+        payload: { subjectType: "user", subjectId: member.user.id, ...payload }
+      });
+    await grant({ effect: "allow", preset: "reader", pathPattern: "**/*" });
+    // B does not see the folder the note is about to move into.
+    await grant({ effect: "deny", preset: "reader", pathPattern: "archive/**/*" });
+
+    const ownerSocket = await rawSyncSocket(app, owner.deviceToken, room.id);
+    const writeNote = async (text: string) => {
+      ownerSocket.send({ type: "crdt_create", requestId: `create-${text}`, roomId: room.id, relativePath: "note.md" });
+      const created = await ownerSocket.next("crdt_created");
+      const doc = new Y.Doc();
+      doc.getText("content").insert(0, text);
+      ownerSocket.send({
+        type: "crdt_update",
+        requestId: `update-${text}`,
+        roomId: room.id,
+        relativePath: "note.md",
+        epoch: created.epoch,
+        update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64")
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      timers.runAllTimeouts(); // materialize
+    };
+    await writeNote("first note");
+
+    const b = buildClient({
+      baseUrl,
+      deviceToken: member.deviceToken,
+      deviceName: "B laptop",
+      roomId: room.id,
+      mountPath: mountPathForRoom({ owner: false, mountRoot: "Vault Rooms", mountName: room.mountName, sourcePath: room.sourcePath })
+    });
+    await connectAndSubscribe(b);
+    const notePath = `${b.room.mountPath}/note.md`;
+    await waitFor(async () => (await b.vault.exists(notePath)) && (await b.vault.read(notePath)) === "first note", "B to download the note");
+
+    ownerSocket.send({ type: "crdt_rename", requestId: "rename", roomId: room.id, oldRelativePath: "note.md", relativePath: "archive/note.md" });
+    await ownerSocket.next("crdt_renamed");
+    await waitFor(async () => !(await b.vault.exists(notePath)), "B to drop the note that left its view");
+
+    await writeNote("second note");
+
+    await waitFor(
+      async () => (await b.vault.exists(notePath)) && (await b.vault.read(notePath)) === "second note",
+      "B to receive the note recreated at the same path"
+    );
+  });
+});
+
+/** Fires the relay's CRDT materialize debounce on demand instead of after two real seconds. */
+class ManualCrdtTimerHost {
+  private nextHandle = 1;
+  private readonly timeouts = new Map<number, () => void>();
+
+  setInterval(): unknown {
+    return "interval";
+  }
+
+  clearInterval(): void {}
+
+  setTimeout(callback: () => void): unknown {
+    const handle = this.nextHandle++;
+    this.timeouts.set(handle, callback);
+    return handle;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.timeouts.delete(handle as number);
+  }
+
+  runAllTimeouts(): void {
+    const callbacks = [...this.timeouts.values()];
+    this.timeouts.clear();
+    for (const callback of callbacks) callback();
+  }
+}
+
+/** A relay-level sync connection that speaks raw protocol messages - the client stack under test
+ *  has no live-editing session layer, so another device's CRDT operations are driven directly. */
+async function rawSyncSocket(app: Awaited<ReturnType<typeof createApp>>, token: string, roomId: string) {
+  await app.ready();
+  // @fastify/websocket's injectWS augmentation is not visible from this package's types.
+  const socket = (await (app as unknown as { injectWS(path: string): Promise<unknown> }).injectWS("/sync")) as WebSocket;
+  const queue: Array<{ type: string } & Record<string, unknown>> = [];
+  socket.on("message", (raw: WebSocket.RawData) => queue.push(JSON.parse(raw.toString())));
+  const send = (message: unknown) => socket.send(JSON.stringify(message));
+  const next = async (type: string): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + 3_000;
+    for (;;) {
+      const index = queue.findIndex((message) => message.type === type);
+      if (index !== -1) return queue.splice(index, 1)[0]!;
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${type}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  rawSockets.push(socket);
+  send({ type: "hello", requestId: "hello", token, client: { kind: "obsidian-plugin", version: "0.3.0", deviceName: "A laptop" }, capabilities: { crdt: true } });
+  await next("hello_ok");
+  send({ type: "subscribe_room", requestId: "subscribe", roomId });
+  await next("room_snapshot");
+  return { send, next };
+}

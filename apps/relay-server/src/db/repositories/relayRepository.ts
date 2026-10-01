@@ -13,7 +13,7 @@ import {
   type SubjectType,
   type TeamRole
 } from "@vault-rooms/protocol";
-import { expandPreset } from "@vault-rooms/policy";
+import { BLOCKED_PERMISSIONS, expandPreset, isExactPermissionSet } from "@vault-rooms/policy";
 import type {
   AclRuleRow,
   AuditEventRow,
@@ -112,6 +112,11 @@ export class RelayRepository {
 
   withExclusiveAccess<T>(operation: () => T | Promise<T>): Promise<T> {
     return this.db.withExclusiveAccess(operation);
+  }
+
+  /** Writes the current in-memory image to disk now instead of on the delayed flush. */
+  async flush(): Promise<void> {
+    await this.db.flush();
   }
 
   getServerOwnerId(): string | null {
@@ -1056,7 +1061,10 @@ export class RelayRepository {
         .all(input.roomId, input.subjectType, input.subjectId, input.pathPattern) as AclRuleRow[]
     ).map(mapAclRule);
     for (const denyRule of conflictingDenyRules) {
-      const remainingPermissions = denyRule.permissions.filter((permission) => !input.permissions.includes(permission));
+      // Granting access to someone Blocked on this exact scope replaces the Block outright - the new
+      // grant is the access they get, with no remainder of the Block left behind.
+      const replacesBlock = isExactPermissionSet(denyRule.permissions, BLOCKED_PERMISSIONS);
+      const remainingPermissions = replacesBlock ? [] : denyRule.permissions.filter((permission) => !input.permissions.includes(permission));
       if (remainingPermissions.length === denyRule.permissions.length) {
         // No overlap at all - this deny rule isn't in conflict with the new allow grant, leave it.
         continue;
@@ -1079,7 +1087,7 @@ export class RelayRepository {
           subjectId: input.subjectId,
           pathPattern: input.pathPattern,
           supersededByPermissions: input.permissions,
-          removedPermissions: denyRule.permissions.filter((permission) => input.permissions.includes(permission)),
+          removedPermissions: denyRule.permissions.filter((permission) => !remainingPermissions.includes(permission)),
           remainingPermissions,
           deleted: remainingPermissions.length === 0,
           at: now
@@ -1151,6 +1159,7 @@ export class RelayRepository {
     content: string;
     actorUserId: string;
     blobKey?: string;
+    wholeFileLane?: boolean;
   }): FileWriteResult {
     return this.files.writeFile(input);
   }
@@ -1243,6 +1252,8 @@ export class RelayRepository {
 
   materializeCrdtContent(input: {
     fileId: string;
+    /** The document's epoch; a superseded one writes nothing. */
+    epoch: number;
     content: string;
     actorUserId: string;
     blobKey?: string;
@@ -1419,6 +1430,10 @@ export class RelayRepository {
       )
       .get(roomId, userId) as AclRuleRow | undefined;
     if (existing) {
+      this.supersedeConflictingDenyRules(
+        { roomId, actorUserId, subjectType: "user", subjectId: userId, permissions, pathPattern: "**/*" },
+        new Date().toISOString()
+      );
       this.db.prepare("update acl_rules set permissions_json = ? where id = ?").run(JSON.stringify(permissions), existing.id);
       this.audit({
         teamId: null,

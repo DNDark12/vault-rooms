@@ -181,7 +181,8 @@ describe("CrdtDocManager (Phase 4)", () => {
         return repo.appendCrdtUpdate(...args);
       },
       materializeCrdtContent: (...args) => repo.materializeCrdtContent(...args),
-      getFileById: (...args) => repo.getFileById(...args)
+      getFileById: (...args) => repo.getFileById(...args),
+      listFiles: (...args) => repo.listFiles(...args)
     };
     const manager = new CrdtDocManager(flakyRepo, timers, noopMaterialized);
     manager.createDocument(fileId, 0, { userId: "usr_owner", displayName: "Owner" });
@@ -243,7 +244,8 @@ describe("CrdtDocManager (Phase 4)", () => {
       listCrdtUpdatesSince: (...args) => repo.listCrdtUpdatesSince(...args),
       appendCrdtUpdate: (...args) => repo.appendCrdtUpdate(...args),
       materializeCrdtContent: (...args) => repo.materializeCrdtContent(...args),
-      getFileById: (...args) => repo.getFileById(...args)
+      getFileById: (...args) => repo.getFileById(...args),
+      listFiles: (...args) => repo.listFiles(...args)
     };
     const manager = new CrdtDocManager(flakyRepo, timers, noopMaterialized);
     manager.createDocument(fileId, 0, { userId: "usr_owner", displayName: "Owner" });
@@ -276,7 +278,8 @@ describe("CrdtDocManager (Phase 4)", () => {
       materializeCrdtContent: () => {
         throw new Error("simulated materialization failure");
       },
-      getFileById: (...args) => repo.getFileById(...args)
+      getFileById: (...args) => repo.getFileById(...args),
+      listFiles: (...args) => repo.listFiles(...args)
     };
     const manager = new CrdtDocManager(flakyRepo, timers, noopMaterialized);
     manager.createDocument(fileId, 0, { userId: "usr_owner", displayName: "Owner" });
@@ -340,6 +343,18 @@ describe("CrdtDocManager (Phase 4)", () => {
     manager.dispose();
   });
 
+  it("materializes nothing for a superseded epoch or a room that has left the CRDT lane", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room, epoch } = makeRoomAndCrdtFile(repo);
+    const before = repo.readFileContent(room.id, "note.md");
+
+    expect(repo.materializeCrdtContent({ fileId, epoch: epoch + 1, content: "superseded epoch", actorUserId: "usr_owner" })).toBeNull();
+    repo.setRoomCrdtEnabled({ roomId: room.id, actorUserId: "usr_owner", enabled: false });
+    expect(repo.materializeCrdtContent({ fileId, epoch, content: "room left the lane", actorUserId: "usr_owner" })).toBeNull();
+
+    expect(repo.readFileContent(room.id, "note.md")).toEqual(before);
+  });
+
   it("never evicts (idle or LRU) a doc with an outstanding materialize timer, so an unmaterialized update can't be silently dropped", async () => {
     const { repo } = await createTestRepo();
     const { fileId } = makeRoomAndCrdtFile(repo);
@@ -383,3 +398,204 @@ describe("CrdtDocManager (Phase 4)", () => {
     manager.dispose();
   });
 });
+
+describe("CrdtDocManager.retireRoom", () => {
+  const owner = { userId: "usr_owner", displayName: "Owner" };
+
+  it("lands a pending materialization before switching modes, then drops the room's documents and timers", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    const manager = new CrdtDocManager(repo, timers, noopMaterialized);
+    manager.createDocument(fileId, 0, owner);
+    manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("pending edit"), owner);
+
+    let contentAtSwitch: string | null = null;
+    await manager.retireRoom(
+      room.id,
+      async () => {
+        contentAtSwitch = repo.readFileContent(room.id, "note.md").content;
+        repo.setRoomCrdtEnabled({ roomId: room.id, actorUserId: "usr_owner", enabled: false });
+      },
+      owner
+    );
+
+    expect(contentAtSwitch).toBe("pending edit");
+    expect(manager.isCached(fileId, 0)).toBe(false);
+    expect(timers.timeouts.size).toBe(0);
+    manager.dispose();
+  });
+
+  it("finishes a materialization already in flight before switching modes", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const withDbAccess = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+      await gate;
+      return operation();
+    };
+    const manager = new CrdtDocManager(repo, timers, noopMaterialized, Date.now, withDbAccess);
+    manager.createDocument(fileId, 0, owner);
+    manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("in flight"), owner);
+    timers.runAllTimeouts(); // The timer has fired; its materialization now waits for the database queue.
+
+    let contentAtSwitch: string | null = null;
+    const retired = manager.retireRoom(
+      room.id,
+      async () => {
+        contentAtSwitch = repo.readFileContent(room.id, "note.md").content;
+      },
+      owner
+    );
+    await Promise.resolve();
+    release();
+    await retired;
+
+    expect(contentAtSwitch).toBe("in flight");
+    manager.dispose();
+  });
+
+  it("rejects updates for the room until the switch has completed", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    const manager = new CrdtDocManager(repo, timers, noopMaterialized);
+    manager.createDocument(fileId, 0, owner);
+
+    let rejection: unknown;
+    await manager.retireRoom(
+      room.id,
+      async () => {
+        try {
+          manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("too late"), owner);
+        } catch (error) {
+          rejection = error;
+        }
+      },
+      owner
+    );
+
+    expect(rejection).toMatchObject({ code: "CRDT_DISABLED" });
+    expect(repo.listCrdtUpdatesSince(fileId, 0, 0)).toEqual([]);
+    manager.dispose();
+  });
+
+  it("keeps the room live, with its edit still scheduled, when the final materialization fails", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    let failMaterialize = true;
+    const flakyRepo: CrdtRepositoryPort = {
+      writeCrdtSnapshot: (...args) => repo.writeCrdtSnapshot(...args),
+      getLatestCrdtSnapshot: (...args) => repo.getLatestCrdtSnapshot(...args),
+      listCrdtUpdatesSince: (...args) => repo.listCrdtUpdatesSince(...args),
+      appendCrdtUpdate: (...args) => repo.appendCrdtUpdate(...args),
+      materializeCrdtContent: (input) => {
+        if (failMaterialize) throw new Error("simulated materialization failure");
+        return repo.materializeCrdtContent(input);
+      },
+      getFileById: (...args) => repo.getFileById(...args),
+      listFiles: (...args) => repo.listFiles(...args)
+    };
+    const manager = new CrdtDocManager(flakyRepo, timers, noopMaterialized);
+    manager.createDocument(fileId, 0, owner);
+    manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("must not be dropped"), owner);
+    const switchMode = vi.fn(async () => undefined);
+
+    await expect(manager.retireRoom(room.id, switchMode, owner)).rejects.toThrow("simulated materialization failure");
+
+    expect(switchMode).not.toHaveBeenCalled();
+    expect(manager.isCached(fileId, 0)).toBe(true);
+    failMaterialize = false;
+    timers.runAllTimeouts();
+    await vi.waitFor(() => expect(repo.readFileContent(room.id, "note.md").content).toBe("must not be dropped"));
+    manager.dispose();
+  });
+
+  it("lands a document whose in-flight materialization failed before switching modes", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    let failuresLeft = 1;
+    const manager = new CrdtDocManager(
+      portFailingMaterialize(repo, () => failuresLeft-- > 0),
+      timers,
+      noopMaterialized
+    );
+    manager.createDocument(fileId, 0, owner);
+    manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("in flight"), owner);
+    timers.runAllTimeouts(); // This attempt fails, and is only logged.
+
+    let contentAtSwitch: string | null = null;
+    await manager.retireRoom(
+      room.id,
+      async () => {
+        contentAtSwitch = repo.readFileContent(room.id, "note.md").content;
+      },
+      owner
+    );
+
+    expect(contentAtSwitch).toBe("in flight");
+    manager.dispose();
+  });
+
+  it("keeps the room live when a document whose earlier materialization failed still cannot be saved", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const timers = new FakeCrdtTimerHost();
+    const manager = new CrdtDocManager(portFailingMaterialize(repo, () => true), timers, noopMaterialized);
+    manager.createDocument(fileId, 0, owner);
+    manager.applyUpdate(fileId, 0, encodeTextInsertUpdate("never saved"), owner);
+    timers.runAllTimeouts();
+    await new Promise((resolve) => setTimeout(resolve, 0)); // Let the failed attempt settle.
+    const switchMode = vi.fn(async () => undefined);
+
+    await expect(manager.retireRoom(room.id, switchMode, owner)).rejects.toThrow("simulated materialization failure");
+
+    expect(switchMode).not.toHaveBeenCalled();
+    expect(repo.readFileContent(room.id, "note.md").content).toBe("");
+    manager.dispose();
+  });
+
+  it("lands durable updates of a document that is not cached, as after a restart", async () => {
+    const { repo } = await createTestRepo();
+    const { fileId, room } = makeRoomAndCrdtFile(repo);
+    const beforeRestart = new CrdtDocManager(repo, new FakeCrdtTimerHost(), noopMaterialized);
+    beforeRestart.createDocument(fileId, 0, owner);
+    beforeRestart.applyUpdate(fileId, 0, encodeTextInsertUpdate("typed before the restart"), owner);
+    beforeRestart.dispose(); // The debounce never fired: the text exists only in crdt_updates.
+    const manager = new CrdtDocManager(repo, new FakeCrdtTimerHost(), noopMaterialized);
+
+    let contentAtSwitch: string | null = null;
+    await manager.retireRoom(
+      room.id,
+      async () => {
+        contentAtSwitch = repo.readFileContent(room.id, "note.md").content;
+      },
+      owner
+    );
+
+    expect(contentAtSwitch).toBe("typed before the restart");
+    expect(manager.isCached(fileId, 0)).toBe(false);
+    manager.dispose();
+  });
+});
+
+function portFailingMaterialize(repo: RelayRepository, shouldFail: () => boolean): CrdtRepositoryPort {
+  return {
+    writeCrdtSnapshot: (...args) => repo.writeCrdtSnapshot(...args),
+    getLatestCrdtSnapshot: (...args) => repo.getLatestCrdtSnapshot(...args),
+    listCrdtUpdatesSince: (...args) => repo.listCrdtUpdatesSince(...args),
+    appendCrdtUpdate: (...args) => repo.appendCrdtUpdate(...args),
+    materializeCrdtContent: (input) => {
+      if (shouldFail()) throw new Error("simulated materialization failure");
+      return repo.materializeCrdtContent(input);
+    },
+    getFileById: (...args) => repo.getFileById(...args),
+    listFiles: (...args) => repo.listFiles(...args)
+  };
+}

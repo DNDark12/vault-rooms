@@ -78,6 +78,19 @@ export function isCrdtEligiblePath(path: string): boolean {
   return lower.endsWith(".md") && !lower.endsWith(".excalidraw.md");
 }
 
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** True for bytes that decode as UTF-8 without a single replacement. The text lane is UTF-8 only:
+ *  decoding anything else would replace its bytes with U+FFFD on every device that receives it. */
+export function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    strictUtf8.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /** True for well-formed standard base64 (correct alphabet and padding). Used to validate a

@@ -96,6 +96,47 @@ describe("pinned REST transport", () => {
     expect(requestBytes).toEqual(Buffer.from(uploadBytes));
   });
 
+  it("uploads RelayApiClient.writeFileRaw bytes through the pinned transport", async () => {
+    // The client hands the transport an ArrayBuffer (the shape `requestUrl` needs); Node's
+    // ClientRequest#write rejects that with ERR_INVALID_ARG_TYPE unless the transport normalizes it.
+    const identity = await generateServerIdentity("srv_pinned_raw_upload");
+    let requestBytes = Buffer.alloc(0);
+    let requestContentType: string | undefined;
+    const server = createServer(
+      { key: identity.leafKeyPem, cert: tlsCertificateChainPem(identity) },
+      (request, response) => {
+        requestContentType = request.headers["content-type"];
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          requestBytes = Buffer.concat(chunks);
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ ok: true, relativePath: "image.bin", version: 1, sha256: "hash" }));
+        });
+      }
+    );
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const baseUrl = `https://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // A view into a larger buffer: only the viewed bytes may go on the wire.
+    const backing = new Uint8Array([9, 0, 1, 2, 127, 128, 255, 9]);
+    const uploadBytes = backing.subarray(1, 7);
+
+    const result = await new RelayApiClient(baseUrl, "tr_device", undefined, pinnedInfo(identity)).writeFileRaw(
+      "room",
+      "image.bin",
+      0,
+      uploadBytes
+    );
+
+    expect(result).toEqual({ ok: true, relativePath: "image.bin", version: 1, sha256: "hash" });
+    expect(requestContentType).toBe("application/octet-stream");
+    expect(requestBytes).toEqual(Buffer.from([0, 1, 2, 127, 128, 255]));
+  });
+
   it("rejects tampered local pin material before opening a network request", async () => {
     const identity = await generateServerIdentity("srv_local_pin_validation");
     const remote = await startServer(identity, { ok: true });

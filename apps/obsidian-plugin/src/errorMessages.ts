@@ -81,6 +81,33 @@ function transportMessage(message: string, code: string | undefined): string | u
   return undefined;
 }
 
+/**
+ * Why LAN discovery could not open its UDP listener, as something a person can act on. Kept separate
+ * from `TRANSPORT_MESSAGES`: those answer "your HTTP request failed", which is the wrong frame here -
+ * hosting is still up and working, only the find-me-on-the-LAN convenience is missing. Without this
+ * the panel rendered the raw errno, so the most common case read as `addMembership EADDRNOTAVAIL`.
+ */
+const LAN_DISCOVERY_MESSAGES: Array<[RegExp, string]> = [
+  [
+    /EADDRNOTAVAIL/,
+    "this network won't let Vault Rooms join its discovery group - the advertised address may belong to a VPN or virtual adapter rather than your LAN"
+  ],
+  [/EADDRINUSE/, "another app is already using the discovery port on this computer"],
+  [/EACCES|EPERM/, "this computer's security settings blocked the discovery port"],
+  [/ENODEV|ENXIO/, "the network interface for the advertised address is not up"]
+];
+
+export function lanDiscoveryUnavailableReason(error: unknown): string {
+  const candidate = typeof error === "object" && error !== null ? (error as ErrorLike) : {};
+  const message = typeof error === "string" ? error : typeof candidate.message === "string" ? candidate.message : "";
+  const code = typeof candidate.code === "string" ? candidate.code : "";
+  const haystack = `${code} ${message}`;
+  for (const [pattern, text] of LAN_DISCOVERY_MESSAGES) {
+    if (pattern.test(haystack)) return text;
+  }
+  return message || "the discovery listener could not be opened";
+}
+
 type ErrorLike = { code?: unknown; message?: unknown };
 
 export function isTransportFailure(error: unknown): boolean {

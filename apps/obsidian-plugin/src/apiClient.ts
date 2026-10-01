@@ -380,7 +380,7 @@ export class RelayApiClient implements RelayFileApi {
     });
   }
 
-  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor"; permissions?: string[]; pathPattern: string }): Promise<{ aclRule: AclRuleSummary }> {
+  async grantAcl(roomId: string, input: { subjectType: "user" | "team"; subjectId: string; effect: "allow" | "deny"; preset?: "reader" | "editor" | "blocked"; permissions?: string[]; pathPattern: string }): Promise<{ aclRule: AclRuleSummary }> {
     return this.request(`/api/rooms/${roomId}/acl`, {
       method: "POST",
       body: input
@@ -575,7 +575,10 @@ export class RelayApiClient implements RelayFileApi {
 
 export function requestUrlWithTimeout(request: RequestUrlParam, timeoutMs: number): Promise<Awaited<ReturnType<typeof requestUrl>>> {
   return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => reject(new Error("Request timed out.")), timeoutMs);
+    const timeout = window.setTimeout(
+      () => reject(Object.assign(new Error("Request timed out."), { code: "ETIMEDOUT" })),
+      timeoutMs
+    );
     requestUrl(request).then(
       (response) => {
         window.clearTimeout(timeout);

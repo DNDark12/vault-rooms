@@ -1,6 +1,8 @@
 // Strict-zero tokens are always rejected. Dependency-owned runtime tokens use approved baselines.
 // Baselines include dependency, CRDT, storage, and LAN discovery timers.
 // Any increase requires source inspection before updating these numbers.
+// clearTimeout( 27 -> 28: CrdtDocManager.retireRoom cancels a room's pending materialize timers
+// through the injected SyncTimerHost (window timers when embedded), not a bare global.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -11,7 +13,7 @@ export const TIER2_STRICT_ZERO = ["fastify", "Fastify", "ajv", "new Function", "
 export const TIER3_APPROVED_BASELINE = {
   "setTimeout(": 27,
   "setInterval(": 3,
-  "clearTimeout(": 27,
+  "clearTimeout(": 28,
   "clearInterval(": 3,
   "globalThis": 10,
   "fetch(": 2,
@@ -19,6 +21,12 @@ export const TIER3_APPROVED_BASELINE = {
 };
 
 export const REQUIRED_PRESENT = ["noServer", "maxPayload"];
+
+// Modules matched as a require/import specifier, not a substring: a bare "os" would match "photos".
+export const STRICT_ZERO_MODULES = ["os"];
+
+const moduleReferences = (bundle, name) =>
+  bundle.match(new RegExp(`(?:require\\(\\s*|from\\s*)["'](?:node:)?${name}["']`, "g"))?.length ?? 0;
 
 const countOf = (bundle, token) => {
   let count = 0;
@@ -43,6 +51,14 @@ export function scanBundle(bundle) {
     if (count !== 0) {
       failed = true;
       lines.push(`FAIL [tier2 strict-zero] "${token}" found ${count} time(s) in main.js - must be 0.`);
+    }
+  }
+
+  for (const name of STRICT_ZERO_MODULES) {
+    const count = moduleReferences(bundle, name);
+    if (count !== 0) {
+      failed = true;
+      lines.push(`FAIL [tier2 strict-zero] module "${name}" is required ${count} time(s) in main.js - must be 0.`);
     }
   }
 

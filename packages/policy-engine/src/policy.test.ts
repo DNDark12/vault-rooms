@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AclRule, Permission } from "@vault-rooms/protocol";
-import { EDITOR_PERMISSIONS, evaluatePolicy, expandPreset } from "./index.js";
+import { BLOCKED_PERMISSIONS, EDITOR_PERMISSIONS, evaluatePolicy, expandPreset, isPermissionPreset } from "./index.js";
 
 const baseRule = {
   id: "acl_1",
@@ -24,6 +24,24 @@ function decide(permission: Permission, rules: AclRule[] = [], overrides = {}) {
 }
 
 describe("policy engine", () => {
+  it("a blocked preset denies every data operation a grant can give", () => {
+    expect(expandPreset("blocked")).toEqual(BLOCKED_PERMISSIONS);
+    expect(new Set(BLOCKED_PERMISSIONS)).toEqual(new Set(EDITOR_PERMISSIONS));
+    const rules: AclRule[] = [
+      { ...baseRule, id: "edit", permissions: [...EDITOR_PERMISSIONS] },
+      { ...baseRule, id: "block", effect: "deny", permissions: expandPreset("blocked") }
+    ];
+    for (const permission of EDITOR_PERMISSIONS) {
+      expect(decide(permission, rules).allowed).toBe(false);
+    }
+  });
+
+  it("recognizes only the known presets", () => {
+    expect(["reader", "editor", "blocked"].every(isPermissionPreset)).toBe(true);
+    expect(isPermissionPreset("admin")).toBe(false);
+    expect(isPermissionPreset(undefined)).toBe(false);
+  });
+
   it("denies members without ACL", () => {
     expect(decide("file:read").allowed).toBe(false);
   });

@@ -7,8 +7,13 @@ import type { DataAdapter } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js/dist/sql-wasm-browser.js";
 import { runMigrations } from "../../relay-server/src/db/migrations.js";
 import { LEGACY_V01_SCHEMA, RELEASED_V01_SCHEMA } from "../../relay-server/test/fixtures/legacyV01.js";
+import { EventEmitter } from "node:events";
 import {
+  createCrdtMaterializedHandler,
+  createCrdtRepositoryPort,
   createRelayCore,
+  CrdtDocManager,
+  handleSyncSocket,
   reclaimDatabaseSpace,
   scheduleStorageBackfill,
   blobKeyForBytes,
@@ -85,6 +90,27 @@ class FakeDataAdapter implements Pick<DataAdapter, AdapterMethod> {
     }
     this.store.set(normalizedNewPath, data);
     this.store.delete(normalizedPath);
+  }
+}
+
+/** Just enough of a WebSocket for handleSyncSocket: records what the relay sends. */
+class MessageSocket extends EventEmitter {
+  readonly OPEN = 1;
+  readyState = 1;
+  readonly sent: Array<{ type: string }> = [];
+
+  send(payload: string): void {
+    this.sent.push(JSON.parse(payload) as { type: string });
+  }
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  ping(): void {}
+
+  receive(message: unknown): void {
+    this.emit("message", { toString: () => JSON.stringify(message) });
   }
 }
 
@@ -560,7 +586,149 @@ describe("openObsidianSqlJsDb - flush serialization (A2)", () => {
   });
 });
 
+describe("openObsidianSqlJsDb - background save failures", () => {
+  async function persistedValues(adapter: FakeDataAdapter, dbPath: string): Promise<string[]> {
+    const { SQL } = await loadSqlJs();
+    const bytes = adapter.store.get(dbPath);
+    if (!bytes) return [];
+    const image = new SQL.Database(new Uint8Array(bytes));
+    try {
+      const statement = image.prepare("select value from kv order by id");
+      const values: string[] = [];
+      while (statement.step()) values.push(String(statement.get()[0]));
+      statement.free();
+      return values;
+    } finally {
+      image.close();
+    }
+  }
+
+  it("retries a failed background save until the adapter recovers, reporting each failure", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const failures: Array<{ attempt: number; willRetry: boolean }> = [];
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary }, {
+      retryDelaysMs: [5, 5, 5],
+      onPersistenceError: (_error, retry) => failures.push(retry)
+    });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    await db.flush();
+
+    adapter.writeFailures = 2;
+    db.prepare("insert into kv (value) values (?)").run("kept in memory, then saved");
+
+    await vi.waitFor(async () => expect(await persistedValues(adapter, dbPath)).toEqual(["kept in memory, then saved"]));
+    expect(failures).toEqual([
+      { attempt: 1, willRetry: true },
+      { attempt: 2, willRetry: true }
+    ]);
+    await db.close();
+  });
+
+  it("stops after its retry limit, then saves again with the next change", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const failures: Array<{ attempt: number; willRetry: boolean }> = [];
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary }, {
+      retryDelaysMs: [5, 5],
+      onPersistenceError: (_error, retry) => failures.push(retry)
+    });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    await db.flush();
+
+    adapter.writeFailures = 100;
+    db.prepare("insert into kv (value) values (?)").run("first");
+    await vi.waitFor(() => expect(failures.at(-1)).toEqual({ attempt: 3, willRetry: false }));
+    const callsAtLimit = adapter.writeBinaryCalls;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(adapter.writeBinaryCalls).toBe(callsAtLimit);
+
+    adapter.writeFailures = 0;
+    db.prepare("insert into kv (value) values (?)").run("second");
+    await vi.waitFor(async () => expect(await persistedValues(adapter, dbPath)).toEqual(["first", "second"]));
+    await db.close();
+  });
+});
+
 describe("openObsidianSqlJsDb - withExclusiveAccess", () => {
+  it("never runs a queued write into a durable image that started while it waited its turn", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary });
+    db.exec("create table kv (id integer primary key, value text not null)");
+    await db.flush();
+
+    // A route calls durable() directly; depending on where its awaits land, that can begin at any
+    // microtask while a queued write is between taking its turn and starting.
+    const outcomes: string[] = [];
+    for (let offset = 0; offset < 8; offset += 1) {
+      const queuedWrite = db.withExclusiveAccess(() => db.prepare("insert into kv (value) values (?)").run(`queued-${offset}`));
+      for (let tick = 0; tick < offset; tick += 1) {
+        await Promise.resolve();
+      }
+      const durable = db.durable(() => db.prepare("insert into kv (value) values (?)").run(`durable-${offset}`));
+      const [queued] = await Promise.allSettled([queuedWrite, durable]);
+      outcomes.push(queued.status === "fulfilled" ? "landed" : String((queued as PromiseRejectedResult).reason));
+    }
+
+    expect(outcomes).toEqual(Array.from({ length: 8 }, () => "landed"));
+    expect(db.prepare("select count(*) as count from kv").get()).toEqual({ count: 16 });
+    await db.close();
+  });
+
+  it("starts a sync message inside its queue turn, so a durable image beginning meanwhile cannot fail its writes", async () => {
+    const { wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), "vault-rooms/relay.sqlite", { wasmBinary });
+    const core = createRelayCore(db);
+    const owner = await core.repo.durable(() =>
+      core.repo.bootstrapServer({ displayName: "Owner", deviceName: "Owner laptop", tokenSecurity: "plain" })
+    );
+    const timers = {
+      setInterval: () => 0,
+      clearInterval: () => undefined,
+      setTimeout: () => 0,
+      clearTimeout: () => undefined
+    };
+    const withDbAccess = <T>(operation: () => T | Promise<T>) => core.repo.withExclusiveAccess(operation);
+    const crdtDocManager = new CrdtDocManager(
+      createCrdtRepositoryPort(core.repo, core.contentWriteService),
+      timers,
+      createCrdtMaterializedHandler(core.repo, core.connectionRegistry),
+      Date.now,
+      withDbAccess
+    );
+
+    // `hello` writes (device transport, audit row) before its first await.
+    const replies: string[] = [];
+    for (let offset = 0; offset < 8; offset += 1) {
+      const socket = new MessageSocket();
+      handleSyncSocket(socket, core.repo, core.connectionRegistry, {
+        maxFileBytes: 1024 * 1024,
+        maxConnections: 100,
+        transport: "http",
+        timerHost: timers,
+        crdtDocManager,
+        presenceService: core.presenceService,
+        contentWriteService: core.contentWriteService,
+        withDbAccess
+      });
+      socket.receive({ type: "hello", requestId: "h", token: owner.deviceToken, client: { kind: "test" } });
+      for (let tick = 0; tick < offset; tick += 1) {
+        await Promise.resolve();
+      }
+      await core.repo.durable(() => core.repo.getOrCreateServerId());
+      await vi.waitFor(() => expect(socket.sent.length).toBeGreaterThan(0));
+      replies.push(socket.sent[0]!.type);
+    }
+
+    expect(replies).toEqual(Array.from({ length: 8 }, () => "hello_ok"));
+    crdtDocManager.dispose();
+    await db.close();
+  });
+
   it("does not mistake a concurrent call for a nested call", async () => {
     const { wasmBinary } = await loadSqlJs();
     const adapter = new FakeDataAdapter();
@@ -713,6 +881,80 @@ describe("Phase B migration under exclusive access", () => {
     releaseFirstPut();
     await expect(Promise.all([migration, queuedWrite])).resolves.toHaveLength(2);
     expect(core.repo.getFile(room.id, "new.bin")).not.toBeNull();
+    await db.close();
+  });
+});
+
+describe("embedded content writes - crash consistency", () => {
+  it("keeps a superseded blob until the DataAdapter image stops referencing it", async () => {
+    const { SQL, wasmBinary } = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/relay.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter), dbPath, { wasmBinary });
+    const blobs = new Map<string, Uint8Array>();
+    const blobStore: BlobStore = {
+      async put(bytes) {
+        const key = blobKeyForBytes(bytes);
+        blobs.set(key, Uint8Array.from(bytes));
+        return key;
+      },
+      async get(key) {
+        return blobs.get(key);
+      },
+      async has(key) {
+        return blobs.has(key);
+      },
+      async delete(key) {
+        blobs.delete(key);
+      },
+      async list() {
+        return [...blobs.keys()];
+      }
+    };
+    const core = createRelayCore(db, { blobStore });
+    const room = core.repo.createRoom({
+      name: "Room",
+      type: "folder",
+      sourcePath: "Room",
+      mountName: "Room",
+      ownerUserId: "usr_owner",
+      capabilities: []
+    });
+    const first = await core.contentWriteService.writeFile({
+      roomId: room.id,
+      relativePath: "note.md",
+      baseVersion: 0,
+      content: "v1",
+      actorUserId: "usr_owner"
+    });
+    await db.flush();
+
+    await core.contentWriteService.writeFile({
+      roomId: room.id,
+      relativePath: "note.md",
+      baseVersion: first.version,
+      content: "v2",
+      actorUserId: "usr_owner"
+    });
+
+    // The image a crash at this instant would reopen is the one the DataAdapter holds.
+    const image = new SQL.Database(new Uint8Array(adapter.store.get(dbPath)!));
+    try {
+      const statement = image.prepare(
+        "select fv.blob_key from file_versions fv join files f on f.id = fv.file_id where f.relative_path = 'note.md' and fv.blob_key is not null"
+      );
+      const referenced: string[] = [];
+      while (statement.step()) {
+        referenced.push(String(statement.get()[0]));
+      }
+      statement.free();
+      expect(referenced).not.toHaveLength(0);
+      for (const key of referenced) {
+        expect(blobs.has(key)).toBe(true);
+      }
+    } finally {
+      image.close();
+    }
     await db.close();
   });
 });

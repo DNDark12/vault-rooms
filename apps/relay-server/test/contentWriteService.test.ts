@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrations.js";
 import { RelayRepository } from "../src/db/repositories/relayRepository.js";
-import { openSqlJsDb } from "../src/db/sqlJsAdapter.js";
+import { inspectSqlJsDatabaseBytes, openSqlJsDb } from "../src/db/sqlJsAdapter.js";
 import {
   createContentWriteService,
   decodeTransportContent,
@@ -29,6 +32,47 @@ async function createTestRepo() {
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/** A file-backed repository, so a test can read the on-disk image a crash would leave behind. */
+async function createDurableTestRepo() {
+  const directory = mkdtempSync(join(tmpdir(), "vault-rooms-content-write-"));
+  temporaryDirectories.push(directory);
+  const dbPath = join(directory, "relay.sqlite");
+  const db = await openSqlJsDb(dbPath);
+  runMigrations(db);
+  const repo = new RelayRepository(db);
+  const room = repo.createRoom({
+    name: "Room",
+    type: "folder",
+    sourcePath: "/vault/room",
+    mountName: "room",
+    ownerUserId: "usr_owner",
+    capabilities: []
+  });
+  return { db, dbPath, repo, room };
+}
+
+/** Blob keys the on-disk database image still references for one path - what a relay restarted
+ *  right now would try to serve. */
+async function durableBlobKeys(dbPath: string, relativePath: string): Promise<string[]> {
+  return inspectSqlJsDatabaseBytes(new Uint8Array(readFileSync(dbPath)), (reader) =>
+    (
+      reader
+        .prepare(
+          "select fv.blob_key from file_versions fv join files f on f.id = fv.file_id where f.relative_path = ? and fv.blob_key is not null"
+        )
+        .all(relativePath) as Array<{ blob_key: string }>
+    ).map((row) => row.blob_key)
+  );
 }
 
 describe("createContentWriteService - writeFile", () => {
@@ -246,7 +290,7 @@ describe("createContentWriteService - materializeCrdtContent", () => {
     const service = createContentWriteService(repo, blobStore);
     const created = repo.createCrdtFile({ roomId: room.id, relativePath: "live.md", actorUserId: "usr_owner" });
 
-    await service.materializeCrdtContent({ fileId: created.fileId, content: "typed content", actorUserId: "usr_owner" });
+    await service.materializeCrdtContent({ fileId: created.fileId, epoch: created.epoch, content: "typed content", actorUserId: "usr_owner" });
 
     const expectedKey = sha256Hex(Buffer.from("typed content", "utf8"));
     expect(await blobStore.get(expectedKey)).toEqual(new Uint8Array(Buffer.from("typed content", "utf8")));
@@ -494,6 +538,42 @@ describe("createContentWriteService - deletion", () => {
 
     expect(await blobStore.list()).toEqual([]);
     expect(repo.getStorageUsageBytes()).toBe(0);
+  });
+});
+
+describe("createContentWriteService - crash consistency", () => {
+  it("keeps a superseded blob until the on-disk metadata stops referencing it", async () => {
+    const { db, dbPath, repo, room } = await createDurableTestRepo();
+    const blobStore = createInMemoryBlobStore();
+    const service = createContentWriteService(repo, blobStore);
+    const first = await service.writeFile({ roomId: room.id, relativePath: "note.md", baseVersion: 0, content: "v1", actorUserId: "usr_owner" });
+    await db.flush();
+
+    await service.writeFile({ roomId: room.id, relativePath: "note.md", baseVersion: first.version, content: "v2", actorUserId: "usr_owner" });
+
+    // No delayed flush has run yet: this is the image a crash at this instant would reopen.
+    const referenced = await durableBlobKeys(dbPath, "note.md");
+    expect(referenced).not.toHaveLength(0);
+    for (const key of referenced) {
+      expect(await blobStore.has(key)).toBe(true);
+    }
+    await db.close();
+  });
+
+  it("keeps a deleted file's blob until the on-disk metadata stops referencing it", async () => {
+    const { db, dbPath, repo, room } = await createDurableTestRepo();
+    const blobStore = createInMemoryBlobStore();
+    const service = createContentWriteService(repo, blobStore);
+    const written = await service.writeFile({ roomId: room.id, relativePath: "note.md", baseVersion: 0, content: "v1", actorUserId: "usr_owner" });
+    await db.flush();
+
+    await service.deleteFile({ roomId: room.id, relativePath: "note.md", baseVersion: written.version, actorUserId: "usr_owner" });
+
+    for (const key of await durableBlobKeys(dbPath, "note.md")) {
+      expect(await blobStore.has(key)).toBe(true);
+    }
+    expect(await blobStore.list()).toEqual([]);
+    await db.close();
   });
 });
 

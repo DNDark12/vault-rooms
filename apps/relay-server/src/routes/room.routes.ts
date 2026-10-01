@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { AppError, isCrdtEligiblePath, normalizeRelativePath, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
-import { evaluatePolicy, expandPreset } from "@vault-rooms/policy";
+import { evaluatePolicy, expandPreset, isPermissionPreset } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageRoom } from "../db/repositories/relayRepository.js";
-import type { RoomRow } from "../db/schema.js";
+import type { FileRow, RoomRow } from "../db/schema.js";
 import { getActivePrincipal } from "../services/authService.js";
 import { revalidateRoomAccess } from "../services/policyService.js";
 import type { ConnectionRegistry } from "../sync/connectionRegistry.js";
@@ -148,41 +148,66 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       // already has existing .md files must seed a fresh CRDT document for each of them (Phase 6,
       // contract 1.4/1.5's "conversion never discards content", at a NEW epoch since
       // bumpFileCrdtEpoch/purgeCrdtState semantics apply even though there's nothing yet to purge)
-      // - never toggling OFF touches files at all: they simply keep being served from their last-
-      // materialized files/file_versions rows, same as always (verified by reading fileRepository.ts
-      // /crdtDocManager.ts - materialization already keeps that row fresh independent of the flag).
+      // - toggling OFF keeps serving files from their materialized files/file_versions rows, but only
+      // after CrdtDocManager.retireRoom has landed every accepted live edit in them and before any
+      // whole-file write is accepted; it then drops the room's documents and timers, so a stale
+      // debounced materialize can never overwrite a later whole-file write.
       // The whole ON transition (flag flip + every per-file epoch bump/seed) goes through
       // repo.durable(...) as one lifecycle operation, matching this codebase's established pattern
       // for security/lifecycle transitions (see the epoch-bump code in Phase 2/4).
       if (body.crdtEnabled !== undefined && body.crdtEnabled !== Boolean(updated.crdt_enabled)) {
         const crdtEnabled = body.crdtEnabled;
-        // Snapshot which files need seeding, and their current text, before entering durable() -
-        // its callback must stay synchronous (sqlJsAdapter.ts's durable() contract), so any async
-        // read has to happen out here first.
-        const filesToSeed = crdtEnabled
-          ? await Promise.all(
-              repo
-                .listFiles(roomId)
-                .filter((file) => !file.deleted_at && isCrdtEligiblePath(file.relative_path))
-                .map(async (file) => ({
-                  file,
-                  content: options.contentWriteService
-                    ? (await options.contentWriteService.readFileContent({ roomId, relativePath: file.relative_path })).content
-                    : repo.latestFileVersion(file.id)?.content ?? ""
-                }))
-            )
-          : [];
-        updated = await repo.durable(() => {
-          const room = repo.setRoomCrdtEnabled({ roomId, actorUserId: principal.userId, enabled: crdtEnabled });
-          for (const { file, content } of filesToSeed) {
-            const newEpoch = repo.bumpFileCrdtEpoch(file.id);
-            options.crdtDocManager?.createDocumentFromText(file.id, newEpoch, content, {
-              userId: principal.userId,
-              displayName: principal.userDisplayName
-            });
+        const actor = { userId: principal.userId, displayName: principal.userDisplayName };
+        // The seed text is read before entering durable() - its callback must stay synchronous
+        // (sqlJsAdapter.ts's durable() contract). Whole-file writes keep landing while those reads run,
+        // so the commit re-checks the room against what was read and starts over if anything moved.
+        const readSeeds = async () =>
+          Promise.all(
+            repo
+              .listFiles(roomId)
+              .filter((file) => !file.deleted_at && isCrdtEligiblePath(file.relative_path))
+              .map(async (listed) =>
+                options.contentWriteService
+                  ? options.contentWriteService.readFileContent({ roomId, relativePath: listed.relative_path })
+                  : { file: listed, content: repo.latestFileVersion(listed.id)?.content ?? "" }
+              )
+          );
+        const switchMode = (filesToSeed: Array<{ file: FileRow; content: string }>) =>
+          // Queued like every other database writer, so the image cannot start under one mid-commit.
+          repo.withExclusiveAccess(() =>
+            repo.durable(() => {
+              const current = requireRoom(repo, roomId);
+              if (Boolean(current.crdt_enabled) === crdtEnabled) {
+                return current;
+              }
+              if (crdtEnabled && !seedsAreCurrent(repo, roomId, filesToSeed)) {
+                throw new SeedsOutdated();
+              }
+              const room = repo.setRoomCrdtEnabled({ roomId, actorUserId: principal.userId, enabled: crdtEnabled });
+              for (const { file, content } of filesToSeed) {
+                const newEpoch = repo.bumpFileCrdtEpoch(file.id);
+                options.crdtDocManager?.createDocumentFromText(file.id, newEpoch, content, actor);
+              }
+              return room;
+            })
+          );
+        if (!crdtEnabled) {
+          updated = options.crdtDocManager
+            ? await options.crdtDocManager.retireRoom(roomId, () => switchMode([]), actor)
+            : await switchMode([]);
+        } else {
+          for (let attempt = 1; ; attempt += 1) {
+            try {
+              updated = await switchMode(await readSeeds());
+              break;
+            } catch (error) {
+              if (!(error instanceof SeedsOutdated)) throw error;
+              if (attempt === MAX_SEED_ATTEMPTS) {
+                throw new AppError("VERSION_CONFLICT", "Notes in this room kept changing while live editing was turning on - try again.", 409);
+              }
+            }
           }
-          return room;
-        });
+        }
         if (!crdtEnabled) {
           // Leaving the CRDT lane retires every document in the room, so presence has nothing left to
           // attach to. Enabling needs no equivalent - there is no presence yet to clear.
@@ -223,7 +248,7 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       subjectType: SubjectType;
       subjectId: string;
       effect: "allow" | "deny";
-      preset: "reader" | "editor";
+      preset: string;
       permissions: Permission[];
       pathPattern: string;
     }>;
@@ -236,7 +261,13 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     if (body.effect !== "allow" && body.effect !== "deny") {
       throw new AppError("VALIDATION_ERROR", "Choose whether this access rule allows or denies access.", 422);
     }
-    const permissions = body.preset ? expandPreset(body.preset) : body.permissions;
+    const preset = body.preset;
+    if (preset !== undefined && (!isPermissionPreset(preset) || (body.effect === "allow" && preset === "blocked"))) {
+      throw new AppError("VALIDATION_ERROR", "Choose Can view, Can edit, or Blocked.", 422);
+    }
+    // A preset on a deny is always a full block: older plugin builds send Blocked as a deny of the
+    // reader preset, which on its own left creating, writing and deleting open.
+    const permissions = preset !== undefined ? expandPreset(body.effect === "deny" ? "blocked" : preset) : body.permissions;
     if (!permissions || permissions.length === 0) {
       throw new AppError("VALIDATION_ERROR", "Choose an access level or at least one permission.", 422);
     }
@@ -291,6 +322,20 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
     options.connectionRegistry?.broadcastToRoom(roomId, { type: "room_deleted", roomId });
     return { ok: true };
   });
+}
+
+/** Read attempts before turning live editing on gives up on a room whose notes keep changing. */
+const MAX_SEED_ATTEMPTS = 3;
+
+/** The notes changed between reading their seed text and committing the switch. */
+class SeedsOutdated extends Error {}
+
+/** Whether the room's live Markdown notes are exactly the seeded ones, each still at the version its
+ *  seed text was read from. */
+function seedsAreCurrent(repo: RelayRepository, roomId: string, seeds: Array<{ file: FileRow }>): boolean {
+  const seededVersions = new Map(seeds.map(({ file }) => [file.id, file.version]));
+  const live = repo.listFiles(roomId).filter((file) => !file.deleted_at && isCrdtEligiblePath(file.relative_path));
+  return live.length === seededVersions.size && live.every((file) => seededVersions.get(file.id) === file.version);
 }
 
 function visibleRoom(repo: RelayRepository, principal: DevicePrincipal, room: RoomRow, teamIds: string[]) {
