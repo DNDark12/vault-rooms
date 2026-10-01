@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { AppError, isCrdtEligiblePath, normalizeRelativePath, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
+import { AppError, assertPortablePath, isCrdtEligiblePath, normalizeRelativePath, type CapabilityMode, type ConflictPolicy, type Permission, type SubjectType } from "@vault-rooms/protocol";
 import { evaluatePolicy, expandPreset, isPermissionPreset } from "@vault-rooms/policy";
 import type { DevicePrincipal, RelayRepository } from "../db/repositories/relayRepository.js";
 import { canManageRoom } from "../db/repositories/relayRepository.js";
@@ -129,7 +129,11 @@ export function registerRoomRoutes(app: FastifyInstance, repo: RelayRepository, 
       capabilities: Array<{ pluginId: string; displayName: string; mode: CapabilityMode; minVersion?: string }>;
       crdtEnabled: boolean;
     }>;
-    validateRoomBody(body);
+    validateRoomBody(body, room);
+
+    if (body.crdtEnabled !== undefined && body.crdtEnabled !== Boolean(room.crdt_enabled) && repo.listPathCollisions(room.id).length) {
+      throw new AppError("PATH_COLLISION", "Repair overlapping file names before changing Live editing.", 409);
+    }
 
     try {
       let updated = repo.updateRoom({
@@ -465,7 +469,7 @@ function validateRoomBody(body: Partial<{
   mountName: string;
   conflictPolicy: ConflictPolicy;
   crdtEnabled: boolean;
-}>): void {
+}>, previous?: { source_path: string; mount_name: string }): void {
   if (!body.name || !body.type || !body.sourcePath || !body.mountName) {
     throw new AppError("VALIDATION_ERROR", "Enter a room name, choose the shared folder, and enter its folder name.", 422);
   }
@@ -484,6 +488,8 @@ function validateRoomBody(body: Partial<{
   if (!isSafeMountName(body.mountName)) {
     throw new AppError("INVALID_PATH", "The local folder name must be one valid folder name.", 422);
   }
+  if (body.sourcePath !== previous?.source_path) assertPortablePath(body.sourcePath);
+  if (body.mountName !== previous?.mount_name) assertPortablePath(body.mountName);
   if (body.conflictPolicy !== undefined && body.conflictPolicy !== "keep_both" && body.conflictPolicy !== "owner_wins") {
     throw new AppError("VALIDATION_ERROR", "Choose how this room handles conflicting file changes.", 422);
   }

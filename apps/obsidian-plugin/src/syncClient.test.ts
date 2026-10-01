@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, resolveRoomMountPath, VaultSyncEngine, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
+import { canonicalPathForConflictCopy, createConflictCopyPath, mountPathForRoom, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, resolveRoomMountPath, VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
@@ -583,5 +583,92 @@ describe("resolveCanPushLocalEdits", () => {
   it("defaults to false (the safe default) when neither visibleRooms nor a persisted value is available", () => {
     expect(resolveCanPushLocalEdits(undefined, undefined)).toBe(false);
     expect(resolveCanPushLocalEdits(undefined, {})).toBe(false);
+  });
+});
+
+
+describe("portable sync identity", () => {
+  it("pauses duplicate live aliases even when saved metadata matches but local bytes differ", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const state = { serverVersion: 1, serverSha256: "same", localSha256: "same", dirty: false };
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", files: { "Note.md": { ...state }, "note.md": { ...state } } };
+    vault.files.set("Room/Note.md", "offline one");
+    vault.files.set("Room/note.md", "offline two");
+    const before = JSON.stringify(room.files);
+    await engine.applyRemoteChange(room, { relativePath: "Note.md", version: 2, sha256: "remote", content: "remote" }, "device");
+    expect(JSON.stringify(room.files)).toBe(before);
+    expect([...vault.files.values()]).toEqual(["offline one", "offline two"]);
+  });
+
+  it("pushes a case/NFD alias using the tracked server version without adding tracking", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", files: {
+      "Café.md": { serverVersion: 7, serverSha256: "old", localSha256: "old", dirty: true }
+    } };
+    vault.files.set("Room/cafe\u0301.MD", "edited");
+    api.nextWrite = { ok: true, relativePath: "Café.md", version: 8, sha256: "new" };
+
+    await engine.pushLocalChange(room, "cafe\u0301.MD", "device");
+
+    expect(api.writes[0]?.baseVersion).toBe(7);
+    expect(Object.keys(room.files)).toEqual(["Café.md"]);
+    expect(room.files["Café.md"]?.serverVersion).toBe(8);
+  });
+
+  it("preserves both conflicting tracking entries and disk content", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", canPushLocalEdits: true, files: {
+      "Note.md": { serverVersion: 1, serverSha256: "one", localSha256: "one", dirty: true },
+      "note.md": { serverVersion: 2, serverSha256: "two", localSha256: "two", dirty: true }
+    } };
+    vault.files.set("Room/Note.md", "local one");
+    vault.files.set("Room/note.md", "local two");
+    const before = JSON.stringify(room.files);
+
+    await engine.pushLocalChange(room, "Note.md", "device");
+    await engine.applyRemoteDelete(room, { relativePath: "NOTE.md", version: 9 }, "device");
+    await engine.applyRemoteChange(room, { relativePath: "Note.md", version: 10, sha256: "remote", content: "remote" }, "device");
+
+    expect(api.writes).toEqual([]);
+    expect(JSON.stringify(room.files)).toBe(before);
+    expect([...vault.files.values()]).toEqual(["local one", "local two"]);
+  });
+
+  it("does not read, push, or delete quarantined aliases", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const engine = new VaultSyncEngine(vault, api);
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", pathCollisionKeys: ["note.md"], files: {
+      "Note.md": { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: true }
+    } };
+    vault.files.set("Room/Note.md", "local");
+    await engine.pushLocalChange(room, "Note.md", "device");
+    await engine.pushLocalDelete(room, "NOTE.md");
+    await engine.applyRemoteDelete(room, { relativePath: "NOTE.md", version: 9 }, "device");
+    expect(api.writes).toEqual([]);
+    expect(vault.files.get("Room/Note.md")).toBe("local");
+    expect(room.files["Note.md"]?.dirty).toBe(true);
+  });
+});
+
+
+describe("collision recovery preservation", () => {
+  it("keeps differing local bytes as a conflict copy before adopting a surviving file", async () => {
+    const vault = new FakeVaultAdapter();
+    const engine = new VaultSyncEngine(vault, new FakeApi(), () => new Date("2026-10-01T00:00:00Z"));
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", canPushLocalEdits: false, files: {
+      "Note.md": { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: false }
+    } };
+    vault.files.set("Room/Note.md", "quarantined local");
+    await engine.preserveRecoveredLocalFile(room, { relativePath: "note.md", sha256: await VaultSyncEngine.sha256("survivor") }, "device");
+    await engine.applyRemoteChange(room, { relativePath: "note.md", version: 5, sha256: "survivor", content: "survivor" }, "server", true);
+    expect(vault.files.get("Room/Note (conflict device 2026-10-01T000000).md")).toBe("quarantined local");
+    expect(vault.files.get("Room/Note.md")).toBe("survivor");
   });
 });

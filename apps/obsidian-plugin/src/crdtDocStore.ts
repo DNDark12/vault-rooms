@@ -51,14 +51,39 @@ export class CrdtDocStore {
     return new Uint8Array(await this.adapter.readBinary(path));
   }
 
+  /** Quarantine recovery cannot assume the surviving document's epoch identifies an old cache.
+   * Enumerate only this path's hashed entries in the room, retaining bytes until preserved. */
+  async loadAllEpochs(roomId: string, relativePath: string): Promise<Array<{ epoch: number; state: Uint8Array }>> {
+    const { dir, prefix } = await this.keyFor(roomId, relativePath, 0);
+    if (!(await this.adapter.exists(dir))) return [];
+    const listing = await this.adapter.list(dir);
+    const epochs = new Set<number>();
+    for (const path of listing.files) {
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      const match = new RegExp(`^${prefix}\\.epoch-(\\d+)\\.ydoc(?:\\.tmp|\\.replace-backup)?$`).exec(name);
+      if (match) epochs.add(Number(match[1]));
+    }
+    const documents: Array<{ epoch: number; state: Uint8Array }> = [];
+    for (const epoch of epochs) {
+      const state = await this.load(roomId, relativePath, epoch);
+      if (state) documents.push({ epoch, state });
+      const { path } = await this.keyFor(roomId, relativePath, epoch);
+      if (await this.adapter.exists(`${path}.tmp`)) {
+        documents.push({ epoch, state: new Uint8Array(await this.adapter.readBinary(`${path}.tmp`)) });
+      }
+    }
+    return documents;
+  }
+
   /**
    * Atomic write (temp-then-rename, matching how obsidianSqlJsDb.ts replaces its own database
    * image) plus the per-doc quota from 1.7/1.12. Also prunes any *other* epoch's persisted entry
    * for this same path - so a repeated delete/recreate cycle across restarts (when the live
    * epoch-bump cleanup couldn't run because the process was closed in between) never leaves
-   * multiple stale generations sitting on disk.
+   * multiple stale generations sitting on disk. Quarantined identities retain prior epochs until
+   * recovery has preserved each document's text.
    */
-  async save(roomId: string, relativePath: string, epoch: number, state: Uint8Array): Promise<void> {
+  async save(roomId: string, relativePath: string, epoch: number, state: Uint8Array, retainPriorEpochs = false): Promise<void> {
     if (state.byteLength > MAX_PERSISTED_CRDT_DOC_BYTES) {
       throw new CrdtDocStoreQuotaExceededError(state.byteLength);
     }
@@ -69,7 +94,7 @@ export class CrdtDocStore {
     await replaceDataAdapterFile(this.adapter, path, async (temporaryPath) => {
       await this.adapter.writeBinary(temporaryPath, buffer);
     });
-    await this.prunePriorEpochs(dir, prefix, epoch);
+    if (!retainPriorEpochs) await this.prunePriorEpochs(dir, prefix, epoch);
   }
 
   /** Moves persisted state to a renamed path without changing its epoch. */

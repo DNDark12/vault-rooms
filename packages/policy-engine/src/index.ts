@@ -1,4 +1,4 @@
-import type { AclRule, Permission } from "@vault-rooms/protocol";
+import { portablePathKey, type AclRule, type Permission } from "@vault-rooms/protocol";
 
 export const READER_PERMISSIONS: Permission[] = ["room:read", "file:read", "sync:subscribe"];
 export const EDITOR_PERMISSIONS: Permission[] = [
@@ -121,6 +121,8 @@ function specificity(pattern: string): number {
 }
 
 export function pathMatches(pattern: string, relativePath: string): boolean {
+  pattern = portablePathKey(pattern);
+  relativePath = portablePathKey(relativePath);
   if (pattern === "**/*" || pattern === "**" || pattern === "") {
     return true;
   }

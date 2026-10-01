@@ -60,6 +60,51 @@ describe("RelayApiClient.request", () => {
     await expect(client.listRooms()).resolves.toEqual({ rooms: [] });
   });
 
+  it("advertises portable path handling alongside extended binary sync on file reads", async () => {
+    const files = [{ relativePath: "Note.md", version: 3, sha256: "hash", deleted: false, fileId: "file_1", pathCollision: true }];
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200, json: { files } } as Awaited<ReturnType<typeof requestUrl>>);
+    const client = new RelayApiClient("https://relay.example", "token");
+
+    await expect(client.listFiles("room")).resolves.toEqual({ files });
+    await client.readFile("room", "Note.md");
+
+    for (const [request] of vi.mocked(requestUrl).mock.calls) {
+      const url = new URL(typeof request === "string" ? request : request.url);
+      expect(url.searchParams.get("capabilities")?.split(",")).toEqual(["extendedBinarySync", "portablePaths"]);
+    }
+  });
+
+  it("lists owner collision groups using the authenticated room endpoint", async () => {
+    const groups = [{ pathKey: "note.md", files: [
+      { fileId: "file_1", relativePath: "Note.md", version: 3, crdtEpoch: 2 },
+      { fileId: "file_2", relativePath: "note.md", version: 5, crdtEpoch: 1 }
+    ] }];
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200, json: { groups } } as Awaited<ReturnType<typeof requestUrl>>);
+    const client = new RelayApiClient("https://relay.example", "token");
+
+    await expect(client.listPathCollisions("room")).resolves.toEqual({ groups });
+    expect(requestUrl).toHaveBeenCalledWith(expect.objectContaining({
+      url: "https://relay.example/api/rooms/room/path-collisions",
+      method: "GET",
+      headers: { authorization: "Bearer token" }
+    }));
+  });
+
+  it("renames by stable file ID while retaining the owner's chosen spelling", async () => {
+    const input = { fileId: "file_2", relativePath: "Notes/Cafe\u0301 Recovery.md" };
+    const result = { ok: true, fileId: input.fileId, oldRelativePath: "note.md", relativePath: input.relativePath, version: 6, epoch: 1 };
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200, json: result } as Awaited<ReturnType<typeof requestUrl>>);
+    const client = new RelayApiClient("https://relay.example", "token");
+
+    await expect(client.renameRoomFile("room", input)).resolves.toEqual(result);
+    expect(requestUrl).toHaveBeenCalledWith(expect.objectContaining({
+      url: "https://relay.example/api/rooms/room/files/rename",
+      method: "POST",
+      body: JSON.stringify(input),
+      headers: { authorization: "Bearer token", "content-type": "application/json" }
+    }));
+  });
+
   it("wraps non-Error requestUrl rejections in an Error", async () => {
     vi.mocked(requestUrl).mockRejectedValue("network failed");
 

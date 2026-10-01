@@ -119,6 +119,22 @@ export type AclRuleSummary = {
   createdAt: string;
 };
 
+export type PathCollisionGroup = {
+  pathKey: string;
+  files: Array<{ fileId: string; relativePath: string; version: number; crdtEpoch: number }>;
+};
+
+export type RenameRoomFileInput = { fileId: string; relativePath: string };
+
+export type RenameRoomFileResponse = {
+  ok: true;
+  oldRelativePath: string;
+  relativePath: string;
+  epoch: number;
+  fileId: string;
+  version: number;
+};
+
 export class RelayApiClient implements RelayFileApi {
   constructor(
     private readonly baseUrl: string,
@@ -403,15 +419,24 @@ export class RelayApiClient implements RelayFileApi {
     return this.request(`/api/teams/${teamId}`, { method: "DELETE" });
   }
 
+  async listPathCollisions(roomId: string): Promise<{ groups: PathCollisionGroup[] }> {
+    return this.request(`/api/rooms/${roomId}/path-collisions`);
+  }
+
+  async renameRoomFile(roomId: string, input: RenameRoomFileInput): Promise<RenameRoomFileResponse> {
+    return this.request(`/api/rooms/${roomId}/files/rename`, { method: "POST", body: input });
+  }
+
   // Appended to every GET below (2026-08-03 sync-widening): REST has no persistent handshake to
   // negotiate a capability the way the WS "hello" message does, so this build declares
-  // extendedBinarySync fresh on each request instead - see file.routes.ts's
-  // hasExtendedBinarySyncCapability. Without it the relay hides any path outside the
+  // extendedBinarySync and portablePaths fresh on each request instead. portablePaths means
+  // collision entries can be retained without being reconciled onto the local filesystem.
+  // Without extendedBinarySync the relay hides any path outside the
   // pre-widening whitelist from this request entirely, the same as it would for an older build
   // that never sends this at all.
-  private static readonly CAPABILITIES_QUERY = "capabilities=extendedBinarySync";
+  private static readonly CAPABILITIES_QUERY = "capabilities=extendedBinarySync,portablePaths";
 
-  async listFiles(roomId: string): Promise<{ files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean }> }> {
+  async listFiles(roomId: string): Promise<{ files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean; pathCollision?: boolean; fileId?: string }> }> {
     return this.request(`/api/rooms/${roomId}/files?${RelayApiClient.CAPABILITIES_QUERY}`);
   }
 

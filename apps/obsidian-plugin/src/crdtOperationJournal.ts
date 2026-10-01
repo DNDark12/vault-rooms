@@ -1,4 +1,5 @@
-import type { MountedRoomState, PendingCrdtOperation } from "./syncClient.js";
+import { portablePathKey } from "@vault-rooms/protocol";
+import { isMountedPathBlocked, type MountedRoomState, type PendingCrdtOperation } from "./syncClient.js";
 import { CrdtRejectedError } from "./crdtSession.js";
 
 export type CrdtOperationJournalDeps = {
@@ -51,7 +52,7 @@ export class CrdtOperationJournal {
     const room = this.deps.getRoom(roomId);
     if (!room) return;
     const operations = operationsFor(room);
-    if (!operations.some((operation) => operation.relativePath === relativePath && !operation.deleteAfterAck)) {
+    if (!operations.some((operation) => samePath(operation.relativePath, relativePath) && !operation.deleteAfterAck)) {
       operations.push({
         operationId: this.createOperationId(),
         kind: "create",
@@ -67,7 +68,7 @@ export class CrdtOperationJournal {
     const room = this.deps.getRoom(roomId);
     if (!room) return;
     const operations = operationsFor(room);
-    const existingIndex = findLastIndex(operations, (operation) => operation.relativePath === oldRelativePath && !operation.deleteAfterAck);
+    const existingIndex = findLastIndex(operations, (operation) => samePath(operation.relativePath, oldRelativePath) && !operation.deleteAfterAck);
     const existing = existingIndex >= 0 ? operations[existingIndex] : undefined;
     if (existing && !existing.attemptedAt) {
       existing.relativePath = relativePath;
@@ -91,7 +92,7 @@ export class CrdtOperationJournal {
     let targetPath = relativePath;
 
     for (;;) {
-      const index = findLastIndex(operations, (operation) => operation.relativePath === targetPath && !operation.deleteAfterAck);
+      const index = findLastIndex(operations, (operation) => samePath(operation.relativePath, targetPath) && !operation.deleteAfterAck);
       if (index < 0) {
         await this.persist();
         return { handled: false, relativePath: targetPath };
@@ -119,8 +120,8 @@ export class CrdtOperationJournal {
     const operations = this.deps.getRoom(roomId)?.pendingCrdtOperations ?? [];
     return operations.some(
       (operation) =>
-        operation.relativePath === relativePath ||
-        (operation.kind === "rename" && operation.oldRelativePath === relativePath)
+        samePath(operation.relativePath, relativePath) ||
+        (operation.kind === "rename" && samePath(operation.oldRelativePath, relativePath))
     );
   }
 
@@ -154,6 +155,8 @@ export class CrdtOperationJournal {
       while (operations.length > 0 && this.readyRooms.get(roomId) === ready && this.deps.canReplay(room)) {
         const operation = operations[0]!;
         const finalIntent = finalIntentForHead(operations);
+        if (isMountedPathBlocked(room, finalIntent.relativePath) || isMountedPathBlocked(room, operation.relativePath) ||
+          (operation.kind === "rename" && isMountedPathBlocked(room, operation.oldRelativePath))) return;
         if (!finalIntent.deleted && !(await this.deps.pathExists(roomId, finalIntent.relativePath))) {
           this.deps.onReplayError(
             roomId,
@@ -194,7 +197,7 @@ export class CrdtOperationJournal {
         }
 
         const follower = operations.slice(1).find(
-          (candidate) => candidate.kind === "rename" && candidate.oldRelativePath === operation.relativePath
+          (candidate) => candidate.kind === "rename" && samePath(candidate.oldRelativePath, operation.relativePath)
         );
         if (follower?.kind === "rename") {
           if (follower.attemptedAt) {
@@ -238,6 +241,8 @@ export class CrdtOperationJournal {
     while (operations.length > 0 && this.readyRooms.get(roomId) === ready && this.deps.canReplay(room)) {
       const operation = operations[0]!;
       const finalIntent = finalIntentForHead(operations);
+      if (isMountedPathBlocked(room, finalIntent.relativePath) || isMountedPathBlocked(room, operation.relativePath) ||
+        (operation.kind === "rename" && isMountedPathBlocked(room, operation.oldRelativePath))) return;
       if (!finalIntent.deleted && !(await this.deps.pathExists(roomId, finalIntent.relativePath))) {
         this.deps.onReplayError(
           roomId,
@@ -327,7 +332,7 @@ function finalIntentForHead(operations: PendingCrdtOperation[]): { relativePath:
   let deleted = operations[0]!.deleteAfterAck === true;
   for (let index = 1; index < operations.length && !deleted; index += 1) {
     const operation = operations[index]!;
-    if (operation.kind === "rename" && operation.oldRelativePath === relativePath) {
+    if (operation.kind === "rename" && samePath(operation.oldRelativePath, relativePath)) {
       relativePath = operation.relativePath;
       deleted = operation.deleteAfterAck === true;
     }
@@ -344,7 +349,7 @@ function rebaseUnattemptedFollowers(
   const completedIndex = operations.findIndex((operation) => operation.operationId === completedOperationId);
   for (let index = completedIndex + 1; index < operations.length; index += 1) {
     const follower = operations[index]!;
-    if (follower.attemptedAt || follower.kind !== "rename" || follower.oldRelativePath !== requestedPath) continue;
+    if (follower.attemptedAt || follower.kind !== "rename" || !samePath(follower.oldRelativePath, requestedPath)) continue;
     follower.oldRelativePath = resolvedPath;
     return;
   }
@@ -357,10 +362,14 @@ function hasLineageFollower(
 ): boolean {
   const completedIndex = operations.findIndex((operation) => operation.operationId === completedOperationId);
   return operations.slice(completedIndex + 1).some(
-    (operation) => operation.kind === "rename" && operation.oldRelativePath === relativePath
+    (operation) => operation.kind === "rename" && samePath(operation.oldRelativePath, relativePath)
   );
 }
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function samePath(left: string, right: string): boolean {
+  return portablePathKey(left) === portablePathKey(right);
 }

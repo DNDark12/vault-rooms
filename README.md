@@ -201,6 +201,15 @@ Vault Rooms never grants permission to run someone else's plugin code.
   storage, so file and storage limits count real bytes and binary content no longer inflates `relay.sqlite`.
   Base64 still adds about 33% to an in-flight frame and peak transport memory; optional raw sync framing remains
   future work. A device predating this widening never sees a file outside the old whitelist at all.
+- File identity uses Unicode NFC and case-insensitive keys on every platform; original spelling is retained.
+  New names reject Windows device names, reserved punctuation, and trailing spaces/dots in any segment.
+  Legacy names remain readable and can be repaired by the room owner. Multiple live legacy aliases are
+  paused together until the owner renames one by stable file ID in room settings; no content is merged or chosen.
+  Current plugins keep local copies and skip these paths. Older plugins cannot subscribe/list a room with
+  visible collisions until repaired. Unicode folding follows JavaScript lowercase, which can differ from rare
+  filesystem-specific equivalences; real Windows/macOS vault validation is still required before release.
+  Ambiguous local tracking and pending offline CRDT structural operations remain paused after server repair;
+  their local files and quarantined caches are retained, including across unmount, without blind replay.
 - Whole-file retention is latest-only. Superseded and deleted content is reference-checked and collected; a
   default 256 MiB stored-content ceiling prevents unbounded growth. Lowering the ceiling never blocks reads,
   deletes, cleanup, or a replacement that reduces usage. The physical SQLite file only returns freed pages to

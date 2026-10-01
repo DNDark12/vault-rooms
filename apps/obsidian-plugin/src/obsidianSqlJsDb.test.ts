@@ -1,3 +1,4 @@
+import { portablePathKey } from "@vault-rooms/protocol";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -5,6 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { DataAdapter } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js/dist/sql-wasm-browser.js";
+import * as Y from "yjs";
 import { runMigrations } from "../../relay-server/src/db/migrations.js";
 import { LEGACY_V01_SCHEMA, RELEASED_V01_SCHEMA } from "../../relay-server/test/fixtures/legacyV01.js";
 import { EventEmitter } from "node:events";
@@ -22,6 +24,8 @@ import {
   type StorageMaintenanceTimerHost
 } from "vault-rooms-relay/embedded-core";
 import { openObsidianSqlJsDb, restoreObsidianLegacyV01Backup } from "./obsidianSqlJsDb.js";
+import { createAppWithDb } from "../../relay-server/src/appCore.js";
+import { injectBootstrap } from "../../relay-server/test/bootstrapHelper.js";
 
 // obsidianSqlJsDb.ts calls window.setTimeout/clearTimeout directly (it only ever runs embedded,
 // inside Obsidian, so it has no need for the timerHost fallback the shared standalone/embedded
@@ -1030,8 +1034,8 @@ function seedLegacyFileForBackfill(db: RelayDb, roomId: string, relativePath: st
   const fileId = `fil_test_${relativePath.replace(/[^a-z0-9]/gi, "_")}`;
   const versionId = `${fileId}_v1`;
   db.prepare(
-    "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', 'markdown', 1, ?, ?, null, null, 'usr_owner', ?, ?)"
-  ).run(fileId, roomId, relativePath, sha, Buffer.byteLength(content, "utf8"), now, now);
+    "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, path_key) values (?, ?, ?, 'file', 'markdown', 1, ?, ?, null, null, 'usr_owner', ?, ?, ?)"
+  ).run(fileId, roomId, relativePath, sha, Buffer.byteLength(content, "utf8"), now, now, portablePathKey(relativePath));
   db.prepare("insert or ignore into content_blobs(storage_key, content, created_at) values (?, ?, ?)").run(storageKey, content, now);
   db.prepare(
     "insert into file_versions(id, file_id, version, sha256, size_bytes, raw_size_bytes, content_storage_key, created_by_user_id, created_at) values (?, ?, 1, ?, ?, null, ?, 'usr_owner', ?)"
@@ -1044,6 +1048,74 @@ function realTimerHost(): StorageMaintenanceTimerHost<number> {
     clearTimeout: (handle) => window.clearTimeout(handle)
   };
 }
+
+describe("embedded portable path recovery", () => {
+  it("migrates legacy collisions in place and queues owner repair behind an active durable flush", async () => {
+    const {wasmBinary} = await loadSqlJs();
+    const adapter = new FakeDataAdapter();
+    const dbPath = "vault-rooms/portable.sqlite";
+    const db = await openObsidianSqlJsDb(asDataAdapter(adapter),dbPath,{wasmBinary});
+    const app = await createAppWithDb(db);
+    const owner = (await injectBootstrap(app,{displayName:"Owner",deviceName:"Laptop",teamName:"Team"})).json();
+    const headers = {authorization:`Bearer ${owner.deviceToken}`};
+    const room = (await app.inject({method:"POST",url:"/api/rooms",headers,payload:{name:"Room",type:"folder",sourcePath:"Room",mountName:"Room",crdtEnabled:false,capabilities:[]}})).json().room;
+    const core = createRelayCore(db);
+    core.repo.writeFile({roomId:room.id,relativePath:"Note.csv",baseVersion:0,content:"first",actorUserId:owner.user.id});
+    core.repo.writeFile({roomId:room.id,relativePath:"Other.csv",baseVersion:0,content:"second",actorUserId:owner.user.id});
+    const first = core.repo.getFile(room.id,"Note.csv")!;
+    const second = core.repo.getFile(room.id,"Other.csv")!;
+    core.repo.setRoomCrdtEnabled({roomId:room.id,actorUserId:owner.user.id,enabled:true});
+    const live = core.repo.createCrdtFile({roomId:room.id,relativePath:"Live.md",actorUserId:owner.user.id});
+    db.exec(`alter table files rename to files_fixture;
+      create table files as select id,room_id,relative_path,kind,content_type,version,sha256,size_bytes,deleted_at,updated_by_user_id,updated_at,created_at,crdt_epoch,raw_size_bytes from files_fixture;
+      drop table files_fixture;`);
+    db.prepare("update files set relative_path = 'note.CSV' where id = ?").run(second.id);
+    db.prepare("delete from server_meta where key = 'portable_paths_v1'").run();
+    runMigrations(db);
+    expect(core.repo.listPathCollisions(room.id)[0]?.files).toHaveLength(2);
+    const timers = {setInterval:()=>0,clearInterval:()=>undefined,setTimeout:()=>0,clearTimeout:()=>undefined};
+    const withDbAccess = <T>(operation:()=>T|Promise<T>)=>core.repo.withExclusiveAccess(operation);
+    const manager = new CrdtDocManager(createCrdtRepositoryPort(core.repo,core.contentWriteService),timers,createCrdtMaterializedHandler(core.repo,core.connectionRegistry),Date.now,withDbAccess);
+    const socket = new MessageSocket();
+    handleSyncSocket(socket,core.repo,core.connectionRegistry,{maxFileBytes:1024*1024,maxConnections:100,transport:"http",timerHost:timers,crdtDocManager:manager,presenceService:core.presenceService,contentWriteService:core.contentWriteService,withDbAccess});
+    socket.receive({type:"hello",requestId:"h",token:owner.deviceToken,client:{kind:"obsidian-plugin"},capabilities:{crdt:true,portablePaths:true}});
+    await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==="hello_ok")).toBe(true));
+    socket.receive({type:"subscribe_room",requestId:"s",roomId:room.id});
+    await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==="room_snapshot")).toBe(true));
+    await db.flush();
+    adapter.writeDelaysMs = [0,150,0,150];
+    const durable = core.repo.durable(()=>core.repo.getOrCreateServerId());
+    const response = app.inject({method:"POST",url:`/api/rooms/${room.id}/files/rename`,headers,payload:{fileId:first.id,relativePath:"Recovered.csv"}});
+    await durable;
+    await vi.waitFor(()=>expect(core.repo.getFileById(first.id)?.relative_path).toBe("Recovered.csv"));
+    const clientDoc = new Y.Doc();
+    clientDoc.getText("content").insert(0,"edited during owner recovery");
+    const update = Buffer.from(Y.encodeStateAsUpdate(clientDoc)).toString("base64");
+    clientDoc.destroy();
+    socket.receive({type:"crdt_update",requestId:"u",roomId:room.id,relativePath:"Live.md",epoch:live.epoch,update});
+    expect((await response).statusCode).toBe(200);
+    await vi.waitFor(()=>expect(core.repo.listCrdtUpdatesSince(live.fileId,live.epoch,0)).toHaveLength(1));
+    expect(socket.sent.some(message=>message.type==="crdt_rejected")).toBe(false);
+    expect(core.repo.getFile(room.id,"NOTE.csv")?.id).toBe(second.id);
+    expect(core.repo.latestFileVersion(first.id)?.content).toBe("first");
+    expect(core.repo.latestFileVersion(second.id)?.content).toBe("second");
+    manager.dispose();
+    await app.close();
+    const reopened = await openObsidianSqlJsDb(asDataAdapter(adapter),dbPath,{wasmBinary});
+    try {
+      runMigrations(reopened);
+      const restored = createRelayCore(reopened);
+      expect(restored.repo.getFile(room.id,"Recovered.csv")?.id).toBe(first.id);
+      expect(restored.repo.getFile(room.id,"note.CSV")?.id).toBe(second.id);
+      expect(restored.repo.listPathCollisions(room.id)).toEqual([]);
+      expect(reopened.prepare("select count(*) as n from portable_path_migration_backup").get()).toEqual({n:3});
+      const restoredDoc = new Y.Doc();
+      for (const row of restored.repo.listCrdtUpdatesSince(live.fileId,live.epoch,0)) Y.applyUpdate(restoredDoc,Buffer.from(row.update,"base64"));
+      expect(restoredDoc.getText("content").toString()).toBe("edited during owner recovery");
+      restoredDoc.destroy();
+    } finally {await reopened.close();}
+  });
+});
 
 describe("scheduleStorageBackfill - timer lifecycle and exclusive access (Phase A review fix)", () => {
   it("never runs a batch once cancelled before its first timer fires, and close() does not throw", async () => {

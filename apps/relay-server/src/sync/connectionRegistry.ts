@@ -15,7 +15,7 @@ export type SyncConnection = {
   principal: DevicePrincipal | null;
   subscriptions: Set<string>;
   /** Advertised capabilities; presence requires CRDT and binary sync is opt-in. */
-  capabilities: { crdt: boolean; presence: boolean; extendedBinarySync: boolean };
+  capabilities: { crdt: boolean; presence: boolean; extendedBinarySync: boolean; portablePaths?: boolean };
 };
 
 export class ConnectionRegistry {
@@ -35,7 +35,7 @@ export class ConnectionRegistry {
 
   broadcastToRoom(
     roomId: string,
-    message: SyncServerMessage,
+    message: SyncServerMessage | ((connection: SyncConnection) => SyncServerMessage),
     options?: {
       exclude?: SyncConnection;
       excludeDeviceId?: string;
@@ -64,7 +64,7 @@ export class ConnectionRegistry {
       // frequency), but the hazard predates it and applies to every broadcast. Deliberately does not
       // close the socket - its own error/close lifecycle stays canonical and owns cleanup.
       try {
-        sendJson(connection.socket, message);
+        sendJson(connection.socket, typeof message === "function" ? message(connection) : message);
       } catch (error) {
         console.warn("Vault Rooms relay: could not deliver a room broadcast", error);
       }

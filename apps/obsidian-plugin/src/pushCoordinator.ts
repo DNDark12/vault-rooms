@@ -1,5 +1,7 @@
+import { portablePathKey } from "@vault-rooms/protocol";
+import type { RenameHint } from "./fileWatcher.js";
 import { userFacingError } from "./errorMessages.js";
-import { isConflictCopyPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
+import { getMountedFileEntry, isMountedPathBlocked, localPortablePathError, isConflictCopyPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
 
 /** Errors that cannot succeed by retrying the same write. */
 const TERMINAL_ERROR_CODES = new Set(["FILE_TOO_LARGE", "INVALID_PATH", "VALIDATION_ERROR", "STORAGE_QUOTA_EXCEEDED"]);
@@ -34,6 +36,7 @@ export type RoomPushCoordinatorDeps = {
  */
 export class RoomPushCoordinator {
   private readonly pendingTimers = new Map<string, number>();
+  private readonly invalidNamesNotified = new Set<string>();
   private readonly pushChains = new Map<string, Promise<void>>();
   private readonly schedule: (fn: () => void, ms: number) => number;
   private readonly cancel: (id: number) => void;
@@ -44,8 +47,22 @@ export class RoomPushCoordinator {
   }
 
   /** Handles one already-classified local vault event for this room. */
-  handleLocalChange(type: "create" | "modify" | "delete", relativePath: string): void {
-    if (isConflictCopyPath(relativePath)) {
+  handleLocalChange(type: "create" | "modify" | "delete", relativePath: string, renameHint?: RenameHint): void {
+    if (relativePath.split("/").some((part) => part.startsWith(".")) || isConflictCopyPath(relativePath) || isMountedPathBlocked(this.deps.room, relativePath)) {
+      return;
+    }
+    const renamedTo = renameHint && "renamedToRelativePath" in renameHint ? renameHint.renamedToRelativePath : undefined;
+    const tracked = getMountedFileEntry(this.deps.room, relativePath)?.[1];
+    if (renamedTo && !this.isValidNewName(renamedTo)) return;
+    if (type !== "delete" && (renameHint || !tracked?.serverSha256) && !this.isValidNewName(relativePath)) return;
+    if (renamedTo && portablePathKey(renamedTo) === portablePathKey(relativePath)) {
+      const entry = getMountedFileEntry(this.deps.room, relativePath);
+      const trackedPath = entry?.[0] ?? relativePath;
+      if (entry?.[1].serverSha256) {
+        this.deps.room.files[trackedPath] = { ...entry[1], localDeleted: true, renamedToRelativePath: renamedTo, syncError: undefined };
+        this.deps.onPersist();
+        this.debounce(relativePath, () => this.enqueue(relativePath, () => this.pushPendingRename(trackedPath, renamedTo)));
+      }
       return;
     }
     if (type === "delete") {
@@ -63,10 +80,12 @@ export class RoomPushCoordinator {
       return;
     }
     for (const [relativePath, state] of Object.entries(this.deps.room.files)) {
-      if (state.syncError) {
+      if (state.syncError || isMountedPathBlocked(this.deps.room, relativePath)) {
         continue;
       }
-      if (state.localDeleted) {
+      if (state.renamedToRelativePath) {
+        this.enqueue(relativePath, () => this.pushPendingRename(relativePath, state.renamedToRelativePath!));
+      } else if (state.localDeleted) {
         this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalDelete(this.deps.room, relativePath));
       } else if (state.dirty) {
         this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalChange(this.deps.room, relativePath, this.deps.deviceName));
@@ -84,8 +103,16 @@ export class RoomPushCoordinator {
 
   private handleLocalEdit(relativePath: string): void {
     const { room } = this.deps;
-    const existing = room.files[relativePath];
-    room.files[relativePath] = existing
+    const entry = getMountedFileEntry(room, relativePath);
+    const trackedPath = entry?.[0] ?? relativePath;
+    const existing = entry?.[1];
+    if (existing?.renamedToRelativePath) {
+      room.files[trackedPath] = { ...existing, dirty: true };
+      this.deps.onPersist();
+      this.debounce(relativePath, () => this.enqueue(relativePath, () => this.pushPendingRename(trackedPath, existing.renamedToRelativePath!)));
+      return;
+    }
+    room.files[trackedPath] = existing
       ? { ...existing, dirty: true, localDeleted: false, syncError: undefined }
       : { serverVersion: 0, serverSha256: null, localSha256: null, dirty: true };
     this.deps.onPersist();
@@ -94,52 +121,75 @@ export class RoomPushCoordinator {
 
   private handleLocalDelete(relativePath: string): void {
     const { room } = this.deps;
-    const current = room.files[relativePath];
+    const entry = getMountedFileEntry(room, relativePath);
+    const trackedPath = entry?.[0] ?? relativePath;
+    const current = entry?.[1];
     if (!current || current.serverSha256 === null) {
       // Never pushed (or already a tombstone) - nothing to tell the server, just drop tracking.
       // Also cancel any debounce timer already armed for this path (e.g. from the create/edit that
       // preceded this delete), so it can't fire later against a path that no longer has anything
       // to push.
-      const existingTimer = this.pendingTimers.get(relativePath);
+      const existingTimer = this.pendingTimers.get(portablePathKey(relativePath));
       if (existingTimer !== undefined) {
         this.cancel(existingTimer);
-        this.pendingTimers.delete(relativePath);
+        this.pendingTimers.delete(portablePathKey(relativePath));
       }
-      delete room.files[relativePath];
+      delete room.files[trackedPath];
       this.deps.onPersist();
       return;
     }
-    room.files[relativePath] = { ...current, localDeleted: true, syncError: undefined };
+    room.files[trackedPath] = { ...current, localDeleted: true, syncError: undefined };
     this.deps.onPersist();
     this.debounce(relativePath, () => this.enqueue(relativePath, () => this.deps.syncEngine.pushLocalDelete(room, relativePath)));
   }
 
+  private isValidNewName(relativePath: string): boolean {
+    const error = localPortablePathError(relativePath);
+    if (!error) return true;
+    const notificationKey = `${relativePath}\0${error.message}`;
+    if (!this.invalidNamesNotified.has(notificationKey)) {
+      this.invalidNamesNotified.add(notificationKey);
+      this.deps.onError(relativePath, error);
+    }
+    return false;
+  }
+
+  private async pushPendingRename(oldRelativePath: string, relativePath: string): Promise<void> {
+    const { room, syncEngine } = this.deps;
+    if (isMountedPathBlocked(room, oldRelativePath) || isMountedPathBlocked(room, relativePath)) return;
+    await syncEngine.pushLocalDelete(room, oldRelativePath, { renamedToRelativePath: relativePath });
+    // Persist a pending create before awaiting the network so a reconnect can resume after deletion.
+    room.files[relativePath] = { serverVersion: 0, serverSha256: null, localSha256: null, dirty: true };
+    this.deps.onPersist();
+    await syncEngine.pushLocalChange(room, relativePath, this.deps.deviceName);
+  }
+
   private debounce(relativePath: string, run: () => void): void {
-    const existingTimer = this.pendingTimers.get(relativePath);
+    const existingTimer = this.pendingTimers.get(portablePathKey(relativePath));
     if (existingTimer !== undefined) {
       this.cancel(existingTimer);
     }
     const timer = this.schedule(() => {
-      this.pendingTimers.delete(relativePath);
+      this.pendingTimers.delete(portablePathKey(relativePath));
       if (!this.deps.isStillMounted()) {
         return;
       }
       run();
     }, this.deps.debounceMs);
-    this.pendingTimers.set(relativePath, timer);
+    this.pendingTimers.set(portablePathKey(relativePath), timer);
   }
 
   /** Chains onto any push already in flight for this path, so overlapping pushes for the same
    *  path never race each other (see the class doc comment). */
   private enqueue(relativePath: string, push: () => Promise<void>): void {
-    if (!this.deps.isStillMounted()) {
+    if (!this.deps.isStillMounted() || isMountedPathBlocked(this.deps.room, relativePath)) {
       return;
     }
-    const previous = this.pushChains.get(relativePath) ?? Promise.resolve();
+    const previous = this.pushChains.get(portablePathKey(relativePath)) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(() => {
-        if (!this.deps.isStillMounted()) {
+        if (!this.deps.isStillMounted() || isMountedPathBlocked(this.deps.room, relativePath)) {
           return;
         }
         return push();
@@ -154,11 +204,12 @@ export class RoomPushCoordinator {
           return;
         }
         if (isTerminalSyncError(error)) {
-          const state = this.deps.room.files[relativePath];
+          const entry = getMountedFileEntry(this.deps.room, relativePath);
+          const state = entry?.[1];
           if (state) {
             // `syncError` is rendered in the rooms panel, so it is a display sink. `onError` below
             // still receives the raw error for logging and diagnostics.
-            this.deps.room.files[relativePath] = {
+            this.deps.room.files[entry![0]] = {
               ...state,
               syncError: userFacingError(error, "The file could not be synced.")
             };
@@ -167,6 +218,6 @@ export class RoomPushCoordinator {
         }
         this.deps.onError(relativePath, error);
       });
-    this.pushChains.set(relativePath, next);
+    this.pushChains.set(portablePathKey(relativePath), next);
   }
 }

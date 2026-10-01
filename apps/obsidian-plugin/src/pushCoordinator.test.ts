@@ -488,3 +488,65 @@ describe("RoomPushCoordinator", () => {
     coordinator.dispose();
   });
 });
+
+
+describe("portable push coordination", () => {
+  it("reports an invalid new name once without dirty/error tracking, then syncs a corrected name", async () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const room = createRoom();
+    const onError = vi.fn();
+    const coordinator = new RoomPushCoordinator({ room, syncEngine: new VaultSyncEngine(vault, api), deviceName: "device",
+      onPersist: () => undefined, onError, debounceMs: 1, isStillMounted: () => true });
+    await vault.write(`${room.mountPath}/CON.md`, "keep me");
+    coordinator.handleLocalChange("create", "CON.md");
+    coordinator.handleLocalChange("modify", "CON.md");
+    coordinator.retryPending();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(room.files["CON.md"]).toBeUndefined();
+    expect(api.writes).toEqual([]);
+    expect(vault.files.get(`${room.mountPath}/CON.md`)).toBe("keep me");
+    await vault.rename(`${room.mountPath}/CON.md`, `${room.mountPath}/Okay.md`);
+    coordinator.handleLocalChange("create", "Okay.md");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(api.writes[0]?.relativePath).toBe("Okay.md");
+    coordinator.dispose();
+  });
+
+  it("serializes a case-only rename as delete then create on one canonical queue", async () => {
+    const vault = new FakeVaultAdapter();
+    // Model exists() on a case-insensitive filesystem: old spelling still resolves to the renamed file.
+    vault.exists = async (path) => [...vault.files.keys()].some((candidate) => candidate.toLowerCase() === path.toLowerCase());
+    const api = new FakeApi();
+    const order: string[] = [];
+    const write = api.writeFile.bind(api);
+    api.writeFile = async (...args) => { order.push(`create:${args[1]}`); return write(...args); };
+    const remove = api.deleteFile.bind(api);
+    api.deleteFile = async (...args) => { order.push(`delete:${args[1]}`); return remove(...args); };
+    const room = createRoom();
+    room.files["Note.md"] = { serverVersion: 4, serverSha256: "old", localSha256: "old", dirty: false };
+    await vault.write(`${room.mountPath}/note.md`, "local");
+    const coordinator = new RoomPushCoordinator({ room, syncEngine: new VaultSyncEngine(vault, api), deviceName: "device",
+      onPersist: () => undefined, onError: () => undefined, debounceMs: 1, isStillMounted: () => true });
+    coordinator.handleLocalChange("delete", "Note.md", { renamedToRelativePath: "note.md" });
+    coordinator.handleLocalChange("create", "note.md", { renamedFromRelativePath: "Note.md" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(order).toEqual(["delete:Note.md", "create:note.md"]);
+    expect(api.writes[0]?.baseVersion).toBe(0);
+    expect(Object.keys(room.files)).toEqual(["note.md"]);
+    coordinator.dispose();
+  });
+
+  it("pauses a quarantined alias without changing tracking", () => {
+    const room = createRoom();
+    room.pathCollisionKeys = ["note.md"];
+    const state = { serverVersion: 4, serverSha256: "old", localSha256: "old", dirty: false };
+    room.files["Note.md"] = state;
+    const coordinator = new RoomPushCoordinator({ room, syncEngine: new VaultSyncEngine(new FakeVaultAdapter(), new FakeApi()), deviceName: "device",
+      onPersist: () => undefined, onError: () => undefined, debounceMs: 1, isStillMounted: () => true });
+    coordinator.handleLocalChange("modify", "NOTE.MD");
+    expect(room.files).toEqual({ "Note.md": state });
+    coordinator.dispose();
+  });
+});

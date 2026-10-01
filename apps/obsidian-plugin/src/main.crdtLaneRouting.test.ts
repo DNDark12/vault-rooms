@@ -105,6 +105,8 @@ type WatchMountedRoomInternals = {
   saveSettings: () => Promise<void>;
   getActiveServer: () => ServerConnection;
   watchMountedRoom: (roomId: string) => void;
+  resolveCrdtTarget: (vaultPath: string) => { roomId: string; relativePath: string } | undefined;
+  handleActiveEditorChanged: () => void;
 };
 
 /**
@@ -213,9 +215,44 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     internals.roomCoordinators = new Map();
     internals.saveSettings = vi.fn().mockResolvedValue(undefined);
     internals.getActiveServer = () => server;
+    internals.handleActiveEditorChanged = vi.fn();
 
     return { plugin, internals, roomState, vaultAdapter, ensureSession, forgetLocalDelete, renameSession, recordCreate, recordRename };
   }
+
+  it("resolves an NFD mount alias without losing the start of the note name", () => {
+    const { internals, roomState } = setUp({ persistedCrdtEnabled: true });
+    roomState.mountPath = "Rooms/Café";
+    expect(internals.resolveCrdtTarget("rooms/cafe\u0301/Note.md")).toEqual({ roomId: "room_1", relativePath: "Note.md" });
+  });
+
+  it("skips every quarantined alias before journaling or opening CRDT", () => {
+    const h = setUp({ persistedCrdtEnabled: true });
+    h.roomState.pathCollisionKeys = ["note.md"];
+    h.internals.watchMountedRoom("room_1");
+    h.vaultAdapter.emit({ type: "create", path: `${h.roomState.mountPath}/NOTE.MD` });
+    h.vaultAdapter.emit({ type: "modify", path: `${h.roomState.mountPath}/Note.md` });
+    expect(h.recordCreate).not.toHaveBeenCalled();
+    expect(h.ensureSession).not.toHaveBeenCalled();
+    expect(h.roomState.files).toEqual({});
+  });
+
+  it("adopts a create event alias already tracked by the server", () => {
+    const h = setUp({ persistedCrdtEnabled: true });
+    h.roomState.files["Café.md"] = { serverVersion: 2, serverSha256: "known", localSha256: "known", dirty: false };
+    h.internals.watchMountedRoom("room_1");
+    h.vaultAdapter.emit({ type: "create", path: `${h.roomState.mountPath}/cafe\u0301.MD` });
+    expect(h.recordCreate).not.toHaveBeenCalled();
+    expect(h.ensureSession).toHaveBeenCalledWith("room_1", "cafe\u0301.MD", { brandNewNote: false });
+  });
+
+  it("does not journal an invalid CRDT new name", () => {
+    const h = setUp({ persistedCrdtEnabled: true });
+    h.internals.watchMountedRoom("room_1");
+    h.vaultAdapter.emit({ type: "create", path: `${h.roomState.mountPath}/CON.md` });
+    expect(h.recordCreate).not.toHaveBeenCalled();
+    expect(h.roomState.files).toEqual({});
+  });
 
   it("routes a local .md modify to the CRDT lane using the persisted crdtEnabled flag when visibleRooms is still empty at startup", () => {
     const { internals, roomState, vaultAdapter, ensureSession } = setUp({ persistedCrdtEnabled: true });
@@ -403,7 +440,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     // collision escalate without bound into `Untitled (a) (b) (a) (b)…` across two devices.
     it("ignores a rename this plugin performed itself, pushing no crdt_rename and forking nothing", () => {
       const { plugin, internals, ensureSession, forgetLocalDelete, renameSession } = setUp({ persistedCrdtEnabled: true });
-      (plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.add("room_1 Old.md New.md");
+      (plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.add("room_1 old.md new.md");
 
       internals.watchMountedRoom("room_1");
       (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit({
@@ -421,7 +458,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
 
     it("still honors a genuine user rename of the same pair after the self-inflicted one was consumed", () => {
       const { plugin, internals, renameSession } = setUp({ persistedCrdtEnabled: true });
-      (plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.add("room_1 Old.md New.md");
+      (plugin as unknown as { selfInflictedRenames: Set<string> }).selfInflictedRenames.add("room_1 old.md new.md");
       internals.watchMountedRoom("room_1");
       const emit = (internals.vaultAdapter as unknown as { emit: (event: unknown) => void }).emit.bind(internals.vaultAdapter);
 

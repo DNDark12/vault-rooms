@@ -6,6 +6,7 @@ export type ErrorCode =
   | "FILE_DELETED"
   | "FILE_TOO_LARGE"
   | "INVALID_PATH"
+  | "PATH_COLLISION"
   | "NOT_FOUND"
   | "VALIDATION_ERROR"
   | "ADAPTER_CONFLICT"

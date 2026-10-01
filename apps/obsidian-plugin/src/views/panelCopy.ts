@@ -77,6 +77,18 @@ export const PANEL_COPY = {
     /** Shared by the panel's own disclosure and Test connection's raw-evidence disclosure. */
     technical: "Technical details"
   },
+  pathCollisions: {
+    heading: "File names need a choice",
+    description: "Windows and macOS treat these file names as the same. Rename files in each group until their names are distinct to resume syncing. Each file keeps its content and history.",
+    newPath: "New path inside this room",
+    rename: "Rename file",
+    renaming: "Renaming…",
+    loading: "Checking file names…",
+    retry: "Try again",
+    unavailable: "File name recovery is unavailable. Try again, or ask whoever hosts this server to update it.",
+    renameFailed: "Failed to rename this file. Choose another name and try again.",
+    renamed: "File renamed. Its content and history are preserved."
+  },
   activity: {
     heading: "Most recent first",
     connections: "Connections",

@@ -569,3 +569,62 @@ describe("RoomMountController", () => {
     expect(events).toEqual(["stop-watcher", "unsubscribe", "unbind", "dispose-start", "dispose-end", "save"]);
   });
 });
+
+
+describe("portable mount reconciliation", () => {
+  it("enumerates an NFD mount alias by segment boundary and propagates durable recovery history", async () => {
+    const state: MountedRoomState = { roomId: "r", mountPath: "Rooms/Café", files: { "Note.md": {
+      serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: true
+    } }, pathCollisionKeys: ["note.md"] };
+    const room: RoomSummary = { id: "r", name: "Room", type: "folder", sourcePath: "Rooms/Café", mountName: "Room",
+      ownerUserId: "owner", conflictPolicy: "keep_both", permissions: ["sync:push"], capabilities: [], crdtEnabled: true, storedBytes: 0 };
+    const pushLocalChange = vi.fn();
+    const handleCrdtRoomSnapshot = vi.fn(async () => undefined);
+    const engine = { reconcileLocalEdits: vi.fn(), pushLocalChange, preserveRecoveredLocalFile: vi.fn(), applyRemoteChange: vi.fn() };
+    const controller = new RoomMountController({
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: { mountedRooms: { r: state }, roomMountPaths: {}, mountRoot: "" } as unknown as RoomMountControllerDeps["settings"],
+      visibleRooms: [room], vaultAdapter: { list: async () => ["rooms/cafe\u0301/New.txt"] } as unknown as VaultAdapter,
+      getSyncEngine: () => engine as unknown as VaultSyncEngine, handleCrdtRoomSnapshot,
+      ensureCrdtSession: vi.fn(), apiFor: () => ({ listFiles: async () => ({ files: [
+        { relativePath: "note.md", version: 5, sha256: "survivor", deleted: false, crdtEpoch: 0 }
+      ] }), readFile: vi.fn(async () => ({ relativePath: "note.md", version: 5, sha256: "survivor", content: "survivor" })) }) as unknown as ReturnType<RoomMountControllerDeps["apiFor"]>,
+      requireActiveServer: () => ({ id: "s", userId: "owner", deviceName: "owner" }) as ReturnType<RoomMountControllerDeps["requireActiveServer"]>,
+      saveSettings: vi.fn(), renderOpenRoomsViews: vi.fn(), stopWatchingRoom: vi.fn(), watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(), unsubscribeRoom: vi.fn(), unbindCrdtRoom: vi.fn()
+    });
+    await controller.mountRoom(room);
+    expect(pushLocalChange).toHaveBeenCalledWith(state, "New.txt", "owner");
+    expect(handleCrdtRoomSnapshot).toHaveBeenCalledWith("r", expect.any(Array), expect.arrayContaining(["note.md", "Note.md"]));
+    expect(engine.preserveRecoveredLocalFile).toHaveBeenCalled();
+  });
+
+  it("skips quarantined reads and does not push case/NFD aliases as new files", async () => {
+    const state: MountedRoomState = { roomId: "r", mountPath: "Room", files: {} };
+    const room: RoomSummary = { id: "r", name: "Room", type: "folder", sourcePath: "Room", mountName: "Room",
+      ownerUserId: "owner", conflictPolicy: "keep_both", permissions: ["sync:push"], capabilities: [], crdtEnabled: true, storedBytes: 0 };
+    const readFile = vi.fn(async () => { throw new Error("must not read quarantined paths"); });
+    const ensureCrdtSession = vi.fn();
+    const pushLocalChange = vi.fn();
+    const controller = new RoomMountController({
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: { mountedRooms: { r: state }, roomMountPaths: {}, mountRoot: "" } as unknown as RoomMountControllerDeps["settings"],
+      visibleRooms: [room], vaultAdapter: { list: async () => ["Room/cafe\u0301.MD", "Room/NOTE.MD"] } as unknown as VaultAdapter,
+      getSyncEngine: () => ({ reconcileLocalEdits: vi.fn(), pushLocalChange }) as unknown as VaultSyncEngine,
+      ensureCrdtSession, apiFor: () => ({ listFiles: async () => ({ files: [
+        { relativePath: "Café.md", version: 1, sha256: "cafe", deleted: false },
+        { relativePath: "Note.md", version: 1, sha256: "one", deleted: false, pathCollision: true },
+        { relativePath: "note.md", version: 1, sha256: "two", deleted: false, pathCollision: true }
+      ] }), readFile }) as unknown as ReturnType<RoomMountControllerDeps["apiFor"]>,
+      requireActiveServer: () => ({ id: "s", userId: "owner", deviceName: "owner" }) as ReturnType<RoomMountControllerDeps["requireActiveServer"]>,
+      saveSettings: vi.fn(), renderOpenRoomsViews: vi.fn(), stopWatchingRoom: vi.fn(), watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(), unsubscribeRoom: vi.fn(), unbindCrdtRoom: vi.fn()
+    });
+    state.files["Café.md"] = { serverVersion: 1, serverSha256: "cafe", localSha256: "cafe", dirty: false };
+    await controller.mountRoom(room);
+    expect(readFile).not.toHaveBeenCalled();
+    expect(ensureCrdtSession).not.toHaveBeenCalled();
+    expect(pushLocalChange).not.toHaveBeenCalled();
+    expect(state.pathCollisionKeys).toEqual(["note.md"]);
+  });
+});

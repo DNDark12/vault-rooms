@@ -1,4 +1,4 @@
-import { PRODUCT_VERSION, type SyncClientMessage, type SyncServerMessage } from "@vault-rooms/protocol";
+import { PRODUCT_VERSION, portablePathKey, type SyncClientMessage, type SyncServerMessage } from "@vault-rooms/protocol";
 import { WebSocket as NodeWebSocket } from "ws";
 import { requestUrlWithTimeout, type RelayApiClient } from "./apiClient.js";
 import type { CrdtWsBridge } from "./crdtSession.js";
@@ -11,7 +11,7 @@ import {
 import { certDerBase64UrlToPem } from "vault-rooms-relay/embedded-core";
 import type { ServerConnection } from "./settings.js";
 import type { MountedRoomState } from "./syncClient.js";
-import { VaultSyncEngine } from "./syncClient.js";
+import { collisionRecoveryPaths, completePathRecovery, getMountedFileEntry, isMountedPathBlocked, updatePathCollisionKeys, VaultSyncEngine } from "./syncClient.js";
 
 export type SyncConnectionState = "connected" | "connecting" | "offline";
 
@@ -140,6 +140,13 @@ export class RoomSyncSocket {
     }
   }
 
+  /** Reconcile a mounted room after owner recovery without dropping its subscription. */
+  refreshRoom(roomId: string): void {
+    if (this.helloAcked && this.desiredSubscriptions.has(roomId)) {
+      this.send({ type: "subscribe_room", requestId: createRequestId(), roomId });
+    }
+  }
+
   unsubscribe(roomId: string): void {
     if (!this.desiredSubscriptions.delete(roomId)) {
       return;
@@ -216,7 +223,7 @@ export class RoomSyncSocket {
         // extendedBinarySync (2026-08-03 sync-widening): this build understands the default-to-
         // binary rule (@vault-rooms/protocol's isEligibleBinaryPath), so it's safe to receive fanout
         // and room_snapshot entries for any path, not just the pre-widening whitelist.
-        capabilities: { crdt: true, presence: true, extendedBinarySync: true }
+        capabilities: { crdt: true, presence: true, extendedBinarySync: true, portablePaths: true }
       });
       this.clearHelloAckTimer();
       this.helloAckTimer = window.setTimeout(() => {
@@ -396,15 +403,22 @@ export class RoomSyncSocket {
         // reconciliation below - independent concerns over the same message, same as how a CRDT-
         // eligible file's entry still also participates in ordinary CAS-lane bookkeeping until a
         // session actually opens for it.
-        this.deps.crdt?.handleRoomSnapshot(message.roomId, message.files);
-        await this.enqueueRemoteApply(() => this.reconcileSnapshot(message.roomId, message.files));
+        await this.enqueueRemoteApply(async () => {
+          const room = this.deps.getMountedRoom(message.roomId);
+          if (!room) return;
+          const previousPaths = collisionRecoveryPaths(room);
+          const previousCollisions = new Set(previousPaths.map(portablePathKey));
+          updatePathCollisionKeys(room, message.files);
+          await this.deps.crdt?.handleRoomSnapshot(message.roomId, message.files, previousPaths);
+          await this.reconcileSnapshot(message.roomId, message.files, previousCollisions);
+        });
         this.deps.onRoomSnapshotApplied?.(message.roomId, this.crdtOperationReceiptsSupported);
         return;
       }
       case "remote_file_change": {
         await this.enqueueRemoteApply(async () => {
           const room = this.deps.getMountedRoom(message.roomId);
-          if (!room) return;
+          if (!room || isMountedPathBlocked(room, message.relativePath)) return;
           if (this.deps.isCrdtPathProtected?.(message.roomId, message.relativePath)) return;
           // An open CRDT session owns the path; otherwise apply the materialized fallback.
           // Record the document's epoch BEFORE writing anything to disk. That write makes this
@@ -436,7 +450,7 @@ export class RoomSyncSocket {
       case "remote_file_delete": {
         await this.enqueueRemoteApply(async () => {
           const room = this.deps.getMountedRoom(message.roomId);
-          if (!room) return;
+          if (!room || isMountedPathBlocked(room, message.relativePath)) return;
           if (this.deps.isCrdtPathProtected?.(message.roomId, message.relativePath)) return;
           await this.deps.syncEngine.applyRemoteDelete(
             room,
@@ -490,9 +504,10 @@ export class RoomSyncSocket {
         // An unmount marks MountedRoomState.unmounted before it unsubscribes/disposes. A CRDT
         // message already queued on the socket can therefore arrive after local ownership ended;
         // never let it recreate a session or mutate a retired document for that room.
-        if (!this.deps.getMountedRoom(message.roomId)) {
-          return;
-        }
+        const mountedRoom = this.deps.getMountedRoom(message.roomId);
+        if (!mountedRoom) return;
+        if ("relativePath" in message && message.type !== "crdt_created" && message.type !== "crdt_renamed" && message.type !== "crdt_rejected" &&
+          (isMountedPathBlocked(mountedRoom, message.relativePath) || ("oldRelativePath" in message && isMountedPathBlocked(mountedRoom, message.oldRelativePath)))) return;
         if (
           message.type === "remote_crdt_rename" &&
           (this.deps.isCrdtPathProtected?.(message.roomId, message.oldRelativePath) ||
@@ -527,20 +542,29 @@ export class RoomSyncSocket {
 
   private async reconcileSnapshot(
     roomId: string,
-    files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean; crdtEpoch?: number }>
+    files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean; crdtEpoch?: number; pathCollision?: boolean }>,
+    previousCollisions = new Set<string>()
   ): Promise<void> {
     const room = this.deps.getMountedRoom(roomId);
     if (!room) {
       return;
     }
     const api = this.deps.getApi();
-    let changed = false;
+    let changed = previousCollisions.size !== (room.pathCollisionKeys?.length ?? 0) ||
+      (room.pathCollisionKeys ?? []).some((key) => !previousCollisions.has(key));
+    const liveKeys = new Set(files.filter((file) => !file.deleted).map((file) => portablePathKey(file.relativePath)));
     for (const file of files) {
+      if (file.deleted && liveKeys.has(portablePathKey(file.relativePath))) continue;
       try {
+        const recovering = previousCollisions.has(portablePathKey(file.relativePath));
+        if (isMountedPathBlocked(room, file.relativePath, recovering)) continue;
+        if (recovering) {
+          await this.deps.syncEngine.preserveRecoveredLocalFile(room, file, this.server.deviceName);
+        }
         if (this.deps.isCrdtPathProtected?.(roomId, file.relativePath)) {
           continue;
         }
-        const local = room.files[file.relativePath];
+        const local = getMountedFileEntry(room, file.relativePath)?.[1];
         if (local?.dirty || local?.localDeleted) {
           // A local edit or delete is pending push; let the normal push/conflict path reconcile
           // this file instead of auto-applying the remote state over it (which would otherwise
@@ -549,9 +573,10 @@ export class RoomSyncSocket {
         }
         if (file.deleted) {
           if (local && local.serverSha256 !== null) {
-            await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync", true);
+            await this.deps.syncEngine.applyRemoteDelete(room, { relativePath: file.relativePath, version: file.version }, "sync", true, recovering);
             changed = true;
           }
+          if (recovering) completePathRecovery(room, file.relativePath);
           continue;
         }
         // A live CRDT session owns this path. Its reconnect handshake merges the authoritative
@@ -560,11 +585,12 @@ export class RoomSyncSocket {
         if (file.crdtEpoch !== undefined && this.deps.crdt?.isSessionOpen(roomId, file.relativePath)) {
           continue;
         }
-        if (!local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {
+        if (previousCollisions.has(portablePathKey(file.relativePath)) || !local || local.serverVersion !== file.version || local.serverSha256 !== file.sha256) {
           const content = await api.readFile(roomId, file.relativePath);
-          await this.deps.syncEngine.applyRemoteChange(room, content, "sync", true);
+          await this.deps.syncEngine.applyRemoteChange(room, content, "sync", true, recovering);
           changed = true;
         }
+        if (recovering) completePathRecovery(room, file.relativePath);
       } catch (error) {
         console.error(`Vault Rooms: failed to reconcile snapshot file "${file.relativePath}"`, toError(error));
       }

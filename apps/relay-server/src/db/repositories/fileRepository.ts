@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AppError, contentTypeForPath, createId, isCrdtEligiblePath, type ContentType } from "@vault-rooms/protocol";
+import { AppError, assertPortablePath, contentTypeForPath, createId, isCrdtEligiblePath, normalizeRelativePath, portablePathKey, type ContentType } from "@vault-rooms/protocol";
 import type { CrdtOperationReceiptRow, FileRow, FileVersionWithContentRow, RoomRow } from "../schema.js";
 import type { RelayDb } from "../sqlJsAdapter.js";
 
@@ -49,6 +49,8 @@ export type CrdtRenameInput = {
   relativePath: string;
   actorUserId: string;
   actorDisplayName?: string;
+  fileId?: string;
+  resolveCollision?: boolean;
 };
 
 export type CrdtCreateInput = {
@@ -96,9 +98,31 @@ export class RelayFileRepository {
   }
 
   getFile(roomId: string, relativePath: string): FileRow | null {
-    return (
-      (this.db.prepare("select * from files where room_id = ? and relative_path = ?").get(roomId, relativePath) as FileRow | undefined) ?? null
-    );
+    const key = portablePathKey(normalizeRelativePath(relativePath));
+    const rows = this.db.prepare("select * from files where room_id = ? and path_key = ? order by deleted_at is not null, version desc, id").all(roomId, key) as FileRow[];
+    if (rows.some(file => file.path_collision)) this.pathCollision();
+    return rows[0] ?? null;
+  }
+
+  private pathCollision(): never {
+    throw new AppError("PATH_COLLISION", "These file names overlap on another computer. The room owner must rename one before syncing.", 409);
+  }
+
+  private versionFloor(roomId: string, relativePath: string, excludeId = ""): number {
+    return (this.db.prepare("select max(version) as version from files where room_id = ? and path_key = ? and id != ?").get(roomId, portablePathKey(relativePath), excludeId) as { version: number | null }).version ?? 0;
+  }
+
+  listPathCollisions(roomId: string): Array<{ pathKey: string; files: Array<{ fileId: string; relativePath: string; version: number; crdtEpoch: number }> }> {
+    const groups = new Map<string, Array<{ fileId: string; relativePath: string; version: number; crdtEpoch: number }>>();
+    for (const file of this.listFiles(roomId)) {
+      if (!file.path_collision || file.deleted_at) continue;
+      groups.set(file.path_key, [...(groups.get(file.path_key) ?? []), { fileId: file.id, relativePath: file.relative_path, version: file.version, crdtEpoch: file.crdt_epoch }]);
+    }
+    return [...groups].map(([pathKey, files]) => ({ pathKey, files }));
+  }
+
+  renameFileById(input: { roomId: string; fileId: string; relativePath: string; actorUserId: string }): FileRenameResult {
+    return this.db.transaction(() => this.renameFileStatements({ ...input, oldRelativePath: "", resolveCollision: true }))();
   }
 
   /** Looks up a file by stable ID for CRDT materialization and fanout. */
@@ -133,11 +157,14 @@ export class RelayFileRepository {
      *  to live editing after the request's own check. */
     wholeFileLane?: boolean;
   }): FileWriteResult {
+    input.relativePath = normalizeRelativePath(input.relativePath);
     const write = this.db.transaction(() => {
       if (input.wholeFileLane && isCrdtEligiblePath(input.relativePath) && this.getRoom(input.roomId)?.crdt_enabled) {
         throw new AppError("CRDT_WRITE_UNSUPPORTED", "This note uses live editing - update the plugin to edit it.", 409);
       }
       const existing = this.getFile(input.roomId, input.relativePath);
+      if (input.baseVersion === 0) assertPortablePath(input.relativePath);
+      else if (existing) input.relativePath = existing.relative_path;
       const sha256 = sha256Text(input.content);
       const sizeBytes = Buffer.byteLength(input.content, "utf8");
       const contentType = contentTypeForPath(input.relativePath);
@@ -150,21 +177,21 @@ export class RelayFileRepository {
         if (existing && !existing.deleted_at) {
           throw new AppError("FILE_EXISTS", "The file already exists.", 409, { serverVersion: existing.version });
         }
-        const version = existing ? existing.version + 1 : 1;
+        const version = Math.max(existing?.version ?? 0, this.versionFloor(input.roomId, input.relativePath)) + 1;
         const fileId = existing?.id ?? createId("fil");
         this.assertQuotaAllows(existing?.id ?? null, version, storageKey, input.blobKey ?? null, storedBytes);
         if (existing) {
           this.db
             .prepare(
-              "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ? where id = ?"
+              "update files set relative_path = ?, path_key = ?, content_type = ?, version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ? where id = ?"
             )
-            .run(version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, existing.id);
+            .run(input.relativePath, portablePathKey(input.relativePath), contentType, version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, existing.id);
         } else {
           this.db
             .prepare(
-              "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, ?, ?, ?, null, ?, ?, ?)"
+              "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, path_key) values (?, ?, ?, 'file', ?, ?, ?, ?, ?, null, ?, ?, ?, ?)"
             )
-            .run(fileId, input.roomId, input.relativePath, contentType, version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, now);
+            .run(fileId, input.roomId, input.relativePath, contentType, version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, now, portablePathKey(input.relativePath));
         }
         const orphanedBlobKeys = this.insertFileVersion({ fileId, version, sha256, sizeBytes, rawSizeBytes, storageKey, content: input.content, actorUserId: input.actorUserId, now, blobKey: input.blobKey });
         this.auditFileEvent(input.roomId, input.actorUserId, version === 1 ? "file.created" : "file.updated", fileId, input.relativePath, version);
@@ -187,7 +214,7 @@ export class RelayFileRepository {
         // a moment earlier.
       }
 
-      const version = existing.version + 1;
+      const version = Math.max(existing.version, this.versionFloor(input.roomId, input.relativePath)) + 1;
       this.assertQuotaAllows(existing.id, version, storageKey, input.blobKey ?? null, storedBytes);
       this.db
         .prepare(
@@ -217,7 +244,7 @@ export class RelayFileRepository {
       if (!input.crdtAuthoritative && existing.version !== input.baseVersion) {
         throw this.versionConflict(existing);
       }
-      const version = existing.version + 1;
+      const version = Math.max(existing.version, this.versionFloor(input.roomId, input.relativePath)) + 1;
       const now = new Date().toISOString();
       this.db
         .prepare("update files set version = ?, sha256 = null, size_bytes = null, raw_size_bytes = null, deleted_at = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
@@ -261,47 +288,66 @@ export class RelayFileRepository {
   }
 
   private renameFileStatements(input: CrdtRenameInput): FileRenameResult {
-      const existing = this.getFile(input.roomId, input.oldRelativePath);
-      if (!existing || existing.deleted_at) {
-        throw new AppError(existing?.deleted_at ? "FILE_DELETED" : "NOT_FOUND", existing?.deleted_at ? "The file has been deleted." : "File not found.", 404);
-      }
-      // User-authored rename targets are never auto-disambiguated.
-      const targetPath = input.relativePath;
-      const moves = input.oldRelativePath !== targetPath;
-      // Clients keep versions per path and ignore anything at or below the one they last saw there, so
-      // a path's version must never go backwards - on either side of the move.
-      let version = existing.version;
-      if (moves) {
-        const conflict = this.getFile(input.roomId, targetPath);
-        if (conflict && !conflict.deleted_at) {
-          throw new AppError("FILE_EXISTS", "A file already exists at the new path.", 409, { serverVersion: conflict.version });
+    const existing = input.resolveCollision && input.fileId ? this.getFileById(input.fileId) : this.getFile(input.roomId, input.oldRelativePath);
+    if (!existing || existing.room_id !== input.roomId) {
+      throw new AppError("NOT_FOUND", "File not found.", 404);
+    }
+    if (existing.deleted_at) {
+      throw new AppError("FILE_DELETED", "The file has been deleted.", 404);
+    }
+    const targetPath = normalizeRelativePath(input.relativePath);
+    if (targetPath !== existing.relative_path) assertPortablePath(targetPath);
+    if (input.resolveCollision && (contentTypeForPath(targetPath) !== existing.content_type || isCrdtEligiblePath(targetPath) !== isCrdtEligiblePath(existing.relative_path))) {
+      throw new AppError("INVALID_PATH", "Keep the same file type when repairing this name.", 422);
+    }
+    const oldPath = existing.relative_path;
+    const oldKey = existing.path_key;
+    const targetKey = portablePathKey(targetPath);
+    const conflict = oldKey === targetKey && input.resolveCollision ? existing : this.getFile(input.roomId, targetPath);
+    if (conflict && !conflict.deleted_at && conflict.id !== existing.id) {
+      throw new AppError("FILE_EXISTS", "A file already exists at the new path.", 409, { serverVersion: conflict.version });
+    }
+    if (input.resolveCollision && existing.path_collision && targetKey === oldKey) this.pathCollision();
+    if (conflict?.deleted_at) {
+      this.bumpCrdtEpochStatements(conflict.id);
+      this.deleteAllVersionsAndCollectBlobs(conflict.id);
+    }
+    const targetFloor = this.versionFloor(input.roomId, targetPath, existing.id);
+    const version = Math.max(existing.version, targetFloor + 1);
+    const oldDeleteVersion = Math.max(existing.version, this.versionFloor(input.roomId, oldPath, existing.id)) + 1;
+    const now = new Date().toISOString();
+    this.db.prepare("update files set relative_path = ?, path_key = ?, path_collision = 0, content_type = ?, version = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
+      .run(targetPath, targetKey, contentTypeForPath(targetPath), version, input.actorUserId, now, existing.id);
+    if (version !== existing.version) {
+      // Preserve the old version row; a new current version references the identical content.
+      this.db.prepare("insert into file_versions(id, file_id, version, sha256, size_bytes, content_storage_key, created_by_user_id, created_at, blob_key, raw_size_bytes) select ?, file_id, ?, sha256, size_bytes, content_storage_key, ?, ?, blob_key, raw_size_bytes from file_versions where file_id = ? and version = ?")
+        .run(createId("ver"), version, input.actorUserId, now, existing.id, existing.version);
+    }
+    if (oldKey !== targetKey) {
+      // Retain old tombstones; each spelling can keep its version floor without occupying a live slot.
+      this.db.prepare("insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, path_key) values (?, ?, ?, 'file', ?, ?, null, null, 0, ?, ?, ?, ?, ?)")
+        .run(createId("fil"), input.roomId, oldPath, contentTypeForPath(oldPath), oldDeleteVersion, now, input.actorUserId, now, now, oldKey);
+    }
+    if (input.resolveCollision) {
+      for (const key of new Set([oldKey, targetKey])) {
+        const count = (this.db.prepare("select count(*) as n from files where room_id = ? and path_key = ? and deleted_at is null").get(input.roomId, key) as { n: number }).n;
+        this.db.prepare("update files set path_collision = ? where room_id = ? and path_key = ?").run(count > 1 ? 1 : 0, input.roomId, key);
+        if (count === 1) {
+          const live = this.db.prepare("select * from files where room_id = ? and path_key = ? and deleted_at is null").get(input.roomId, key) as FileRow;
+          const floor = this.versionFloor(input.roomId, live.relative_path, live.id);
+          if (floor >= live.version) {
+            const nextVersion = floor + 1;
+            this.db.prepare("insert into file_versions(id, file_id, version, sha256, size_bytes, content_storage_key, created_by_user_id, created_at, blob_key, raw_size_bytes) select ?, file_id, ?, sha256, size_bytes, content_storage_key, ?, ?, blob_key, raw_size_bytes from file_versions where file_id = ? and version = ?")
+              .run(createId("ver"), nextVersion, input.actorUserId, now, live.id, live.version);
+            this.db.prepare("update files set version = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
+              .run(nextVersion, input.actorUserId, now, live.id);
+            this.auditFileEvent(input.roomId, input.actorUserId, "file.portable_version_advanced", live.id, live.relative_path, nextVersion);
+          }
         }
-        if (conflict) {
-          // Remove the tombstone occupying the unique path slot, landing above its version.
-          version = Math.max(version, conflict.version + 1);
-          this.bumpCrdtEpochStatements(conflict.id);
-          this.deleteAllVersionsAndCollectBlobs(conflict.id);
-          this.db.prepare("delete from files where id = ?").run(conflict.id);
-        }
       }
-      const now = new Date().toISOString();
-      this.db
-        .prepare("update files set relative_path = ?, content_type = ?, version = ?, updated_by_user_id = ?, updated_at = ? where id = ?")
-        .run(targetPath, contentTypeForPath(targetPath), version, input.actorUserId, now, existing.id);
-      if (version !== existing.version) {
-        this.db.prepare("update file_versions set version = ? where file_id = ? and version = ?").run(version, existing.id, existing.version);
-      }
-      if (moves) {
-        // A tombstone newer than anything seen at the old path, so a file created there later continues
-        // above it rather than restarting at version 1.
-        this.db
-          .prepare(
-            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', ?, ?, null, null, 0, ?, ?, ?, ?)"
-          )
-          .run(createId("fil"), input.roomId, input.oldRelativePath, contentTypeForPath(input.oldRelativePath), existing.version + 1, now, input.actorUserId, now, now);
-      }
-      this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, targetPath, version);
-      return { ok: true as const, oldRelativePath: input.oldRelativePath, relativePath: targetPath, epoch: existing.crdt_epoch };
+    }
+    this.auditFileEvent(input.roomId, input.actorUserId, "file.renamed", existing.id, targetPath, version);
+    return { ok: true, oldRelativePath: oldPath, relativePath: targetPath, epoch: existing.crdt_epoch };
   }
 
   /** Creates an empty CRDT file row or revives its already-bumped epoch. */
@@ -358,15 +404,17 @@ export class RelayFileRepository {
   }
 
   private createCrdtFileStatements(input: CrdtCreateInput): CrdtCreateResult {
+      input.relativePath = normalizeRelativePath(input.relativePath);
       // New-note collisions disambiguate; existing notes adopt their document.
       const live = this.getFile(input.roomId, input.relativePath);
       if (input.adoptIfExists && live && !live.deleted_at) {
-        return { fileId: live.id, epoch: live.crdt_epoch, relativePath: input.relativePath };
+        return { fileId: live.id, epoch: live.crdt_epoch, relativePath: live.relative_path };
       }
+      assertPortablePath(input.relativePath);
       const relativePath = this.freeCrdtPath(input.roomId, input.relativePath, input.actorDisplayName);
       const existing = this.getFile(input.roomId, relativePath);
       const now = new Date().toISOString();
-      const version = existing ? existing.version + 1 : 1;
+      const version = Math.max(existing?.version ?? 0, this.versionFloor(input.roomId, relativePath)) + 1;
       // Deletion already bumped the epoch before tombstone revival.
       const epoch = existing ? existing.crdt_epoch : 0;
       const fileId = existing?.id ?? createId("fil");
@@ -377,15 +425,15 @@ export class RelayFileRepository {
       if (existing) {
         this.db
           .prepare(
-            "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ?, crdt_epoch = ? where id = ?"
+            "update files set relative_path = ?, path_key = ?, content_type = ?, version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, deleted_at = null, updated_by_user_id = ?, updated_at = ?, crdt_epoch = ? where id = ?"
           )
-          .run(version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, epoch, existing.id);
+          .run(relativePath, portablePathKey(relativePath), contentTypeForPath(relativePath), version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, epoch, existing.id);
       } else {
         this.db
           .prepare(
-            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, crdt_epoch) values (?, ?, ?, 'file', ?, ?, ?, ?, ?, null, ?, ?, ?, ?)"
+            "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, crdt_epoch, path_key) values (?, ?, ?, 'file', ?, ?, ?, ?, ?, null, ?, ?, ?, ?, ?)"
           )
-          .run(fileId, input.roomId, relativePath, contentTypeForPath(relativePath), version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, now, epoch);
+          .run(fileId, input.roomId, relativePath, contentTypeForPath(relativePath), version, sha256, sizeBytes, rawSizeBytes, input.actorUserId, now, now, epoch, portablePathKey(relativePath));
       }
       this.insertFileVersion({ fileId, version, sha256, sizeBytes, rawSizeBytes, storageKey, content: "", actorUserId: input.actorUserId, now });
       this.auditFileEvent(input.roomId, input.actorUserId, "file.crdt_created", fileId, relativePath, version);
@@ -526,7 +574,7 @@ export class RelayFileRepository {
   materializeCrdtContent(input: { fileId: string; epoch: number; content: string; actorUserId: string; blobKey?: string }): ({ version: number; sha256: string } & { orphanedBlobKeys?: string[] }) | null {
     const materialize = this.db.transaction(() => {
       const existing = this.db.prepare("select * from files where id = ?").get(input.fileId) as FileRow | undefined;
-      if (!existing || existing.deleted_at || existing.crdt_epoch !== input.epoch || !this.getRoom(existing.room_id)?.crdt_enabled) {
+      if (!existing || existing.deleted_at || existing.path_collision || existing.crdt_epoch !== input.epoch || !this.getRoom(existing.room_id)?.crdt_enabled) {
         return null;
       }
       const sha256 = sha256Text(input.content);
@@ -534,7 +582,7 @@ export class RelayFileRepository {
       const rawSizeBytes = this.decodedByteLength(input.content, contentTypeForPath(existing.relative_path));
       const now = new Date().toISOString();
       const storageKey = input.blobKey ? `blob:${input.blobKey}` : `sha256:${sha256}`;
-      const version = existing.version + 1;
+      const version = Math.max(existing.version, this.versionFloor(existing.room_id, existing.relative_path)) + 1;
       this.db
         .prepare(
           "update files set version = ?, sha256 = ?, size_bytes = ?, raw_size_bytes = ?, updated_by_user_id = ?, updated_at = ? where id = ?"

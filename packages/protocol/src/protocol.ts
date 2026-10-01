@@ -1,7 +1,7 @@
 import type { ErrorCode } from "./errors.js";
 
 /** Optional capabilities default to false for older clients. */
-export type SyncClientCapabilities = { crdt?: boolean; presence?: boolean; extendedBinarySync?: boolean };
+export type SyncClientCapabilities = { crdt?: boolean; presence?: boolean; extendedBinarySync?: boolean; portablePaths?: boolean };
 
 /** JSON-serialized Yjs relative positions. */
 export type PresenceCursor = {
@@ -99,7 +99,7 @@ export type SyncServerMessage =
       userId: string;
       deviceId: string;
       /** Relay-owned capabilities. Optional so older hello_ok frames stay valid. */
-      capabilities?: { crdtOperationReceipts?: boolean };
+      capabilities?: { crdtOperationReceipts?: boolean; portablePaths?: boolean };
     }
   | {
       type: "hello_error";
@@ -112,7 +112,7 @@ export type SyncServerMessage =
       type: "room_snapshot";
       requestId: string;
       roomId: string;
-      files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean; crdtEpoch?: number }>;
+      files: Array<{ relativePath: string; version: number; sha256: string | null; deleted: boolean; crdtEpoch?: number; pathCollision?: boolean; fileId?: string }>;
     }
   | { type: "file_change_ack"; requestId: string; roomId: string; relativePath: string; version: number; sha256: string }
   | { type: "file_delete_ack"; requestId: string; roomId: string; relativePath: string; version: number }

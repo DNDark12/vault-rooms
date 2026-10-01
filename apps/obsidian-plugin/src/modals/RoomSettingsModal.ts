@@ -1,10 +1,12 @@
 import { ButtonComponent, Modal, Notice, Setting } from "obsidian";
-import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
+import { assertPortablePath } from "@vault-rooms/protocol";
+import type { AclRuleSummary, PathCollisionGroup, RoomSummary } from "../apiClient.js";
 import { EDITOR_PERMISSION_SET, accessRulePresentation } from "../accessPresentation.js";
 import { userFacingError } from "../errorMessages.js";
 import type VaultRoomsPlugin from "../main.js";
 import { setDestructiveCompat } from "../obsidianCompat.js";
 import { sanitizeRoomMountName } from "../onboarding.js";
+import { PANEL_COPY } from "../views/panelCopy.js";
 import { confirmModal } from "./ConfirmModal.js";
 import { pluginOptions, VaultPathSuggestModal } from "./pickers.js";
 
@@ -40,6 +42,11 @@ export class RoomSettingsModal extends Modal {
   private crdtEnabled: boolean;
   private capabilities: CapabilityDraft[];
   private aclRules: AclRuleSummary[] = [];
+  private pathCollisions: PathCollisionGroup[] = [];
+  private pathCollisionsLoading = false;
+  private pathCollisionsUnavailable = false;
+  private renamePaths = new Map<string, string>();
+  private renamingFileId?: string;
 
   private advancedExpanded = false;
   private accessFormExpanded = false;
@@ -76,6 +83,24 @@ export class RoomSettingsModal extends Modal {
   onOpen(): void {
     this.render();
     void this.loadAccessData();
+    void this.loadPathCollisions();
+  }
+
+  private async loadPathCollisions(): Promise<void> {
+    if (!this.scrollEl || !this.isOwnRoom() || this.pathCollisionsLoading) return;
+    this.pathCollisionsLoading = true;
+    this.pathCollisionsUnavailable = false;
+    this.render();
+    try {
+      this.pathCollisions = await this.plugin.listRoomPathCollisions(this.room.id);
+    } catch {
+      // This endpoint does not exist on older relays. Recovery availability must not block the
+      // ordinary settings/access form, and non-owners never request this owner-only data.
+      this.pathCollisionsUnavailable = true;
+    } finally {
+      this.pathCollisionsLoading = false;
+      if (this.scrollEl) this.render();
+    }
   }
 
   private async loadAccessData(): Promise<void> {
@@ -108,6 +133,7 @@ export class RoomSettingsModal extends Modal {
     const scroll = contentEl.createDiv({ cls: "vault-rooms-settings-scroll" });
     this.scrollEl = scroll;
     this.renderSharing(scroll);
+    this.renderPathCollisions(scroll);
     this.renderAccess(scroll);
     this.renderAdvanced(scroll);
     this.renderDangerZone(scroll);
@@ -160,6 +186,70 @@ export class RoomSettingsModal extends Modal {
         await this.saveChanges();
       })
     );
+  }
+
+  private renderPathCollisions(parent: HTMLElement): void {
+    if (!this.isOwnRoom()) return;
+    if (!this.pathCollisionsLoading && !this.pathCollisionsUnavailable && this.pathCollisions.length === 0) return;
+    const copy = PANEL_COPY.pathCollisions;
+    const section = parent.createDiv({ cls: "vault-rooms-path-collisions" });
+    new Setting(section).setName(copy.heading).setHeading();
+    if (this.pathCollisionsLoading) {
+      section.createDiv({ cls: "vault-rooms-setting-hint", text: copy.loading });
+    }
+    if (this.pathCollisionsUnavailable) {
+      section.createDiv({ cls: "vault-rooms-setting-hint", text: copy.unavailable });
+      new Setting(section).addButton((button) => {
+        button.setButtonText(copy.retry).onClick(() => this.loadPathCollisions());
+        button.buttonEl.disabled = this.renamingFileId !== undefined;
+      });
+      return;
+    }
+    if (this.pathCollisions.length === 0) return;
+    section.createDiv({ cls: "vault-rooms-setting-hint", text: copy.description });
+    for (const group of this.pathCollisions) {
+      const card = section.createDiv({ cls: "vault-rooms-settings-card vault-rooms-path-collision-group" });
+      for (const file of group.files) {
+        const row = new Setting(card).setName(file.relativePath).setDesc(copy.newPath);
+        row.settingEl.dataset.fileId = file.fileId;
+        const disabled = this.renamingFileId !== undefined || this.pathCollisionsLoading;
+        row.addText((text) => {
+          text.setValue(this.renamePaths.get(file.fileId) ?? file.relativePath)
+            .onChange((value) => this.renamePaths.set(file.fileId, value));
+          text.inputEl.setAttribute("aria-label", copy.newPath);
+          text.inputEl.disabled = disabled;
+        });
+        row.addButton((button) => {
+          button.setButtonText(this.renamingFileId === file.fileId ? copy.renaming : copy.rename)
+            .onClick(() => this.renameCollisionFile(file.fileId, file.relativePath));
+          button.buttonEl.disabled = disabled;
+        });
+      }
+    }
+  }
+
+  private async renameCollisionFile(fileId: string, originalPath: string): Promise<void> {
+    if (!this.isOwnRoom() || this.renamingFileId !== undefined || this.pathCollisionsLoading) return;
+    const relativePath = this.renamePaths.get(fileId) ?? originalPath;
+    try {
+      assertPortablePath(relativePath);
+    } catch (error) {
+      new Notice(userFacingError(error, PANEL_COPY.pathCollisions.renameFailed));
+      return;
+    }
+    this.renamingFileId = fileId;
+    this.render();
+    try {
+      await this.plugin.renameRoomFile(this.room.id, { fileId, relativePath });
+      this.renamePaths.delete(fileId);
+      new Notice(PANEL_COPY.pathCollisions.renamed);
+      await this.loadPathCollisions();
+    } catch (error) {
+      new Notice(userFacingError(error, PANEL_COPY.pathCollisions.renameFailed));
+    } finally {
+      this.renamingFileId = undefined;
+      if (this.scrollEl) this.render();
+    }
   }
 
   private renderAccess(parent: HTMLElement): void {

@@ -60,6 +60,38 @@ function asDataAdapter(adapter: FakeDataAdapter): DataAdapter {
 }
 
 describe("CrdtDocStore", () => {
+  it("retains prior epochs when saving a quarantined document", async () => {
+    const store = new CrdtDocStore(asDataAdapter(new FakeDataAdapter()), "vault-rooms/crdt");
+    await store.save("r", "Note.md", 2, new Uint8Array([1]));
+    await store.save("r", "Note.md", 0, new Uint8Array([2]), true);
+    expect(await store.load("r", "Note.md", 2)).toEqual(new Uint8Array([1]));
+    expect(await store.load("r", "Note.md", 0)).toEqual(new Uint8Array([2]));
+  });
+
+  it("discovers interrupted replacement backups and retains complete temporary state for preservation", async () => {
+    const adapter = new FakeDataAdapter();
+    const store = new CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    await store.save("r", "Note.md", 2, new Uint8Array([1]));
+    const path = [...adapter.store.keys()][0]!;
+    await adapter.rename(path, `${path}.replace-backup`);
+    await expect(store.loadAllEpochs("r", "Note.md")).resolves.toEqual([{ epoch: 2, state: new Uint8Array([1]) }]);
+    await adapter.writeBinary(`${path}.tmp`, new Uint8Array([2]).buffer);
+    await expect(store.loadAllEpochs("r", "Note.md")).resolves.toEqual([
+      { epoch: 2, state: new Uint8Array([1]) }, { epoch: 2, state: new Uint8Array([2]) }
+    ]);
+  });
+
+  it("loads all stored epochs for one spelling without touching other room documents", async () => {
+    const adapter = new FakeDataAdapter();
+    const store = new CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    await store.save("r", "Note.md", 3, new Uint8Array([1, 2]));
+    await store.save("r", "Other.md", 0, new Uint8Array([9]));
+    await expect(store.loadAllEpochs("r", "Note.md")).resolves.toEqual([{ epoch: 3, state: new Uint8Array([1, 2]) }]);
+    await expect(store.loadAllEpochs("r", "note.md")).resolves.toEqual([]);
+    await expect(store.loadAllEpochs("unknown", "Note.md")).resolves.toEqual([]);
+    expect(await store.load("r", "Other.md", 0)).toEqual(new Uint8Array([9]));
+  });
+
   it("returns null for a path/epoch that was never persisted", async () => {
     const store = new CrdtDocStore(asDataAdapter(new FakeDataAdapter()), "vault-rooms/crdt");
     expect(await store.load("room_1", "Notes/Board.md", 0)).toBeNull();

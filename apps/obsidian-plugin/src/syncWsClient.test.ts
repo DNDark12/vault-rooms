@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestUrl } from "obsidian";
 import { RoomSyncSocket, toWsUrl, type RoomSyncSocketDeps } from "./syncWsClient.js";
-import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
+import { isMountedPathBlocked, VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAdapter } from "./syncClient.js";
 import type { ServerConnection } from "./settings.js";
 import type { RelayApiClient } from "./apiClient.js";
 import type { CrdtWsBridge } from "./crdtSession.js";
@@ -980,7 +980,7 @@ describe("RoomSyncSocket.reconcileSnapshot", () => {
       onRoomSnapshotApplied,
       crdt: {
         handleServerMessage: async () => undefined,
-        handleRoomSnapshot: () => order.push("epochs"),
+        handleRoomSnapshot: () => { order.push("epochs"); },
         onConnected: () => undefined,
         onDisconnected: () => undefined,
         registerKnownEpoch: () => undefined,
@@ -1098,7 +1098,7 @@ describe("RoomSyncSocket presence negotiation", () => {
     // extendedBinarySync (2026-08-03 sync-widening): this build always advertises it too - see
     // isLegacyEligiblePath's doc comment in @vault-rooms/protocol for why an older build must never
     // advertise this unconditionally the way crdt/presence are.
-    expect(hello?.capabilities).toEqual({ crdt: true, presence: true, extendedBinarySync: true });
+    expect(hello?.capabilities).toEqual({ crdt: true, presence: true, extendedBinarySync: true, portablePaths: true });
     socket.disconnect();
   });
 
@@ -1109,7 +1109,7 @@ describe("RoomSyncSocket presence negotiation", () => {
     const deps = createDeps();
     const socket = new RoomSyncSocket(createServer(), {
       ...deps,
-      getMountedRoom: () => ({ unmounted: false }) as unknown as MountedRoomState,
+      getMountedRoom: () => ({ ...createRoom(), unmounted: false }),
       crdt: {
         handleServerMessage: async (message) => {
           seen.push(message.type);
@@ -1219,6 +1219,123 @@ describe("RoomSyncSocket presence negotiation", () => {
     await flushAsyncWork();
 
     expect(disconnects).toBeGreaterThanOrEqual(1);
+    socket.disconnect();
+  });
+});
+
+
+describe("portable snapshot safety", () => {
+  it("passes durable quarantine spellings into a fresh bridge and pauses until the survivor pull completes", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Room/Note.md", "unique local");
+    const api = new FakeApi();
+    let finishPull!: (value: Awaited<ReturnType<FakeApi["readFile"]>>) => void;
+    vi.spyOn(api, "readFile").mockImplementation(() => new Promise((resolve) => { finishPull = resolve; }));
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", pathCollisionKeys: ["note.md"], files: {
+      "Note.md": { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: true }
+    } };
+    const bridge = new FakeCrdtBridge(false);
+    const snapshot = vi.spyOn(bridge, "handleRoomSnapshot");
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), crdt: bridge, getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient, syncEngine: new VaultSyncEngine(vault, api) });
+    const recovering = (socket as unknown as { handleMessage(raw: string): Promise<void> }).handleMessage(JSON.stringify({
+      type: "room_snapshot", roomId: "r", files: [{ relativePath: "note.md", version: 6, sha256: "server-6", deleted: false, crdtEpoch: 0 }]
+    }));
+    await vi.waitFor(() => expect(api.readFile).toHaveBeenCalled());
+    expect(snapshot).toHaveBeenCalledWith("r", expect.any(Array), expect.arrayContaining(["note.md", "Note.md"]));
+    expect(isMountedPathBlocked(room, "NOTE.MD")).toBe(true);
+    finishPull({ relativePath: "note.md", version: 6, sha256: "server-6", content: "survivor" });
+    await recovering;
+    expect(isMountedPathBlocked(room, "NOTE.MD")).toBe(false);
+    expect(vault.files.get("Room/Note.md")).toBe("survivor");
+  });
+
+  it("keeps recovery durable after a failed survivor pull and retries preservation before the next pull", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Room/Note.md", "unique local");
+    const api = new FakeApi();
+    vi.spyOn(api, "readFile").mockRejectedValueOnce(new Error("pull failed"));
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", pathCollisionKeys: ["note.md"], files: {
+      "Note.md": { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: true }
+    } };
+    const engine = new VaultSyncEngine(vault, api);
+    const preserve = vi.spyOn(engine, "preserveRecoveredLocalFile");
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient, syncEngine: engine });
+    const handle = (socket as unknown as { handleMessage(raw: string): Promise<void> }).handleMessage.bind(socket);
+    const snapshot = JSON.stringify({ type: "room_snapshot", roomId: "r", files: [{ relativePath: "note.md", version: 6, sha256: "server-6", deleted: false }] });
+    await handle(snapshot);
+    expect(isMountedPathBlocked(room, "NOTE.MD")).toBe(true);
+    const restored = JSON.parse(JSON.stringify(room)) as MountedRoomState;
+    expect(isMountedPathBlocked(restored, "note.md")).toBe(true);
+    await handle(snapshot);
+    expect(preserve).toHaveBeenCalledTimes(2);
+    expect(isMountedPathBlocked(room, "NOTE.MD")).toBe(false);
+    errorLog.mockRestore();
+  });
+
+  it("retains quarantined tracking and skips reads and fanout for every alias", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Room/Note.md", "keep local");
+    const api = new FakeApi();
+    const readFile = vi.spyOn(api, "readFile");
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", files: {
+      "Note.md": { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: true }
+    } };
+    const before = JSON.stringify(room.files);
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient, syncEngine: new VaultSyncEngine(vault, api) });
+    const handle = (socket as unknown as { handleMessage(raw: string): Promise<void> }).handleMessage.bind(socket);
+    await handle(JSON.stringify({ type: "room_snapshot", roomId: "r", files: [
+      { relativePath: "NOTE.md", version: 3, sha256: "one", deleted: false, pathCollision: true },
+      { relativePath: "note.md", version: 4, sha256: "two", deleted: false, pathCollision: true }
+    ] }));
+    await handle(JSON.stringify({ type: "remote_file_delete", roomId: "r", relativePath: "NOTE.md", version: 9,
+      deletedBy: { displayName: "peer" } }));
+    expect(readFile).not.toHaveBeenCalled();
+    expect(room.pathCollisionKeys).toEqual(["note.md"]);
+    expect(JSON.stringify(room.files)).toBe(before);
+    expect(vault.files.get("Room/Note.md")).toBe("keep local");
+  });
+});
+
+
+describe("portable live and tombstone aliases", () => {
+  it("does not apply an aliased tombstone over a live snapshot entry", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Room/note.md", "live");
+    const api = new FakeApi();
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", files: {
+      "note.md": { serverVersion: 5, serverSha256: "live", localSha256: "live", dirty: false }
+    } };
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), getMountedRoom: () => room,
+      getApi: () => api as unknown as RelayApiClient, syncEngine: new VaultSyncEngine(vault, api) });
+    await (socket as unknown as { handleMessage(raw: string): Promise<void> }).handleMessage(JSON.stringify({
+      type: "room_snapshot", roomId: "r", files: [
+        { relativePath: "Note.md", version: 5, sha256: null, deleted: true },
+        { relativePath: "note.md", version: 5, sha256: "live", deleted: false }
+      ]
+    }));
+    expect(vault.files.get("Room/note.md")).toBe("live");
+    expect(room.files["note.md"]?.serverSha256).toBe("live");
+  });
+});
+
+
+describe("snapshot refresh", () => {
+  it("requests a fresh snapshot for a room already subscribed", async () => {
+    const sockets = stubControllableWebSockets();
+    vi.mocked(requestUrl).mockResolvedValue({ status: 200 } as Awaited<ReturnType<typeof requestUrl>>);
+    const socket = new RoomSyncSocket(createServer(), createDeps());
+    socket.subscribe("r");
+    socket.connect();
+    await flushAsyncWork();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "hello_ok" }) });
+    await flushAsyncWork();
+    socket.refreshRoom("r");
+    expect(sockets[0]?.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === "subscribe_room")).toHaveLength(2);
     socket.disconnect();
   });
 });

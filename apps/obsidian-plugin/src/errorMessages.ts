@@ -9,6 +9,7 @@ const BY_CODE = {
   FILE_DELETED: "That file has been deleted in this room.",
   FILE_TOO_LARGE: "That file is larger than this server accepts.",
   INVALID_PATH: "That file name or folder path isn't allowed.",
+  PATH_COLLISION: "These file names overlap on another computer. Ask the room owner to rename one before syncing.",
   NOT_FOUND: "That item no longer exists on this server.",
   VALIDATION_ERROR: "This server rejected the request.",
   ADAPTER_CONFLICT: "Another Vault Rooms window is already using this vault.",

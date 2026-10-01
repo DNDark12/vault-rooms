@@ -1,6 +1,7 @@
 import { createId, type Permission } from "@vault-rooms/protocol";
 import { BLOCKED_PERMISSIONS, isExactPermissionSet, READER_PERMISSIONS } from "@vault-rooms/policy";
 import type { RelayDb, RelayDbReader } from "./sqlJsAdapter.js";
+import { migratePortablePaths } from "./portablePathsMigration.js";
 
 const CURRENT_ROOMS_COLUMNS_SQL = `
   id text primary key,
@@ -221,6 +222,7 @@ export function runMigrations(db: RelayDb): void {
     db.prepare("insert or replace into server_meta(key, value) values ('legacy_v01_migrated', '1')").run();
   }
   migrateReaderDenyRulesToBlocked(db);
+  migratePortablePaths(db);
   // Quota accounting is exact before writes are accepted.
   recomputeStorageUsage(db);
 }

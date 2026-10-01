@@ -1178,3 +1178,201 @@ describe("CrdtSessionManager - room disposal", () => {
     expect(harness.sent.filter((message) => message.type === "crdt_update")).toHaveLength(0);
   });
 });
+
+
+describe("portable CRDT identity", () => {
+  it("adopts snapshot spelling and shares a session for case/NFD aliases", async () => {
+    const h = createHarness();
+    h.disk.set("r/cafe\u0301.MD", "disk");
+    h.manager.handleRoomSnapshot("r", [{ relativePath: "Café.md", crdtEpoch: 3 }]);
+    const opening = h.manager.ensureSession("r", "cafe\u0301.MD");
+    await vi.waitFor(() => expect(h.sent.length).toBeGreaterThan(0));
+    expect(h.sent.some((m) => m.type === "crdt_create")).toBe(false);
+    const session = await opening;
+    expect(session.relativePath).toBe("Café.md");
+    expect(session.ytext.toString()).toBe("");
+    expect(h.manager.isSessionOpen("r", "CAFÉ.MD")).toBe(true);
+    expect(await h.manager.ensureSession("r", "Café.md")).toBe(session);
+    h.manager.dispose();
+  });
+
+  it("blocks quarantined aliases before session creation and reconnect handshake", async () => {
+    const h = createHarness();
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 2, pathCollision: true }]);
+    const sentBefore = h.sent.length;
+    h.manager.onConnected();
+    expect(h.sent).toHaveLength(sentBefore);
+    await expect(h.manager.ensureSession("r", "NOTE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    expect(h.sent).toHaveLength(sentBefore);
+    expect(session.ytext.toString()).toBe("");
+    h.manager.dispose();
+  });
+});
+
+
+describe("CRDT collision recovery", () => {
+  it("persists unsaved quarantined text and retains paused caches when the room is unmounted", async () => {
+    const store = makeDocStore();
+    const h = createHarness({}, store);
+    h.disk.set("r/Note.md", "local text");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, pathCollision: true }]);
+    const prior = new Y.Doc();
+    prior.getText(CRDT_TEXT_KEY).insert(0, "different prior epoch");
+    await store.save("r", "Note.md", 2, Y.encodeStateAsUpdate(prior));
+    session.ytext.insert(session.ytext.length, " unsaved edit");
+    await h.manager.disposeRoom("r");
+    const saved = await store.load("r", "Note.md", 0);
+    expect(saved).not.toBeNull();
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, saved!);
+    expect(doc.getText(CRDT_TEXT_KEY).toString()).toBe("local text unsaved edit");
+    expect(await store.load("r", "Note.md", 2)).not.toBeNull();
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(false);
+    const restarted = createHarness({}, store);
+    await restarted.manager.disposeRoom("r", ["note.md", "Note.md"]);
+    expect(await store.load("r", "Note.md", 0)).not.toBeNull();
+    h.manager.dispose();
+    restarted.manager.dispose();
+    doc.destroy();
+    prior.destroy();
+  });
+
+  it("waits for an in-flight save and persists the latest blocked text before teardown", async () => {
+    const store = makeDocStore();
+    const save = store.save.bind(store);
+    let finishSave!: () => void;
+    const saving = new Promise<void>((resolve) => { finishSave = resolve; });
+    vi.spyOn(store, "save").mockImplementation(async (...args) => { await saving; await save(...args); });
+    const timers: Array<() => void> = [];
+    const h = createHarness({ schedule: (fn) => { timers.push(fn); return timers.length; }, cancel: vi.fn() }, store);
+    h.disk.set("r/Note.md", "local");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    session.ytext.insert(session.ytext.length, " queued");
+    timers[0]!();
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, pathCollision: true }]);
+    session.ytext.insert(session.ytext.length, " latest");
+    let disposed = false;
+    const disposing = h.manager.disposeRoom("r").then(() => { disposed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(disposed).toBe(false);
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    finishSave();
+    await disposing;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, (await store.load("r", "Note.md", 0))!);
+    expect(doc.getText(CRDT_TEXT_KEY).toString()).toBe("local queued latest");
+    doc.destroy();
+    h.manager.dispose();
+  });
+
+  it("keeps a blocked session recoverable when saving it during unmount fails", async () => {
+    const store = makeDocStore();
+    const h = createHarness({}, store);
+    h.disk.set("r/Note.md", "unique unsaved");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, pathCollision: true }]);
+    vi.spyOn(store, "save").mockRejectedValue(new Error("disk full"));
+    await expect(h.manager.disposeRoom("r")).rejects.toThrow("disk full");
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    expect(session.ytext.toString()).toBe("unique unsaved");
+    await expect(h.manager.ensureSession("r", "NOTE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    h.manager.dispose();
+  });
+
+  it("keeps the cache and path paused if no text-preservation callback is available", async () => {
+    const store = makeDocStore();
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "must keep");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(doc));
+    const h = createHarness({}, store);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, pathCollision: true }]);
+    await expect(h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }])).rejects.toThrow("preserv");
+    expect(await store.load("r", "Note.md", 0)).not.toBeNull();
+    await expect(h.manager.ensureSession("r", "NOTE.md")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    h.manager.dispose();
+    doc.destroy();
+  });
+
+  it("waits for an already running persisted write before removing the ambiguous cache", async () => {
+    const store = makeDocStore();
+    const save = store.save.bind(store);
+    let finishSave!: () => void;
+    const blockedSave = new Promise<void>((resolve) => { finishSave = resolve; });
+    vi.spyOn(store, "save").mockImplementation(async (...args) => { await blockedSave; await save(...args); });
+    const timers: Array<() => void> = [];
+    const h = createHarness({ preserveRecoveredText: vi.fn(async () => undefined), schedule: (fn) => { timers.push(fn); return timers.length; }, cancel: vi.fn() }, store);
+    h.disk.set("r/Note.md", "local text");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    session.ytext.insert(session.ytext.length, " saved edit");
+    timers[0]!();
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, pathCollision: true }]);
+    let recovered = false;
+    const recovery = h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }]).then(() => { recovered = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(recovered).toBe(false);
+    finishSave();
+    await recovery;
+    expect(await store.load("r", "Note.md", 0)).toBeNull();
+    h.manager.dispose();
+  });
+
+  it("preserves persisted aliases across restart before discarding every ambiguous epoch", async () => {
+    const store = makeDocStore();
+    const oldDoc = new Y.Doc();
+    oldDoc.getText(CRDT_TEXT_KEY).insert(0, "unique old cache");
+    await store.save("r", "Café.md", 2, Y.encodeStateAsUpdate(oldDoc));
+    const sameEpochDoc = new Y.Doc();
+    sameEpochDoc.getText(CRDT_TEXT_KEY).insert(0, "same epoch ambiguous");
+    await store.save("r", "cafe\u0301.MD", 0, Y.encodeStateAsUpdate(sameEpochDoc));
+    const preserved = vi.fn(async () => undefined);
+    const h = createHarness({ preserveRecoveredText: preserved }, store);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "cafe\u0301.MD", crdtEpoch: 0, sha256: "survivor" }], ["Café.md", "cafe\u0301.MD"]);
+    expect(preserved).toHaveBeenCalledWith("r", "Café.md", "unique old cache", "survivor");
+    expect(preserved).toHaveBeenCalledWith("r", "cafe\u0301.MD", "same epoch ambiguous", "survivor");
+    expect(await store.load("r", "Café.md", 2)).toBeNull();
+    expect(await store.load("r", "cafe\u0301.MD", 0)).toBeNull();
+    const adopted = await h.manager.ensureSession("r", "CAFÉ.MD");
+    expect(adopted.ytext.toString()).toBe("");
+    h.manager.dispose();
+    oldDoc.destroy();
+    sameEpochDoc.destroy();
+  });
+
+  it("blocks edits and reconnect handshakes while recovery preservation is awaiting", async () => {
+    let finish!: () => void;
+    const preserving = new Promise<void>((resolve) => { finish = resolve; });
+    const preserved = vi.fn(async () => preserving);
+    const h = createHarness({ preserveRecoveredText: preserved });
+    h.disk.set("r/Note.md", "ambiguous doc");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, pathCollision: true }]);
+    const recovery = h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, sha256: "survivor" }]);
+    await vi.waitFor(() => expect(preserved).toHaveBeenCalled());
+    const sentBefore = h.sent.length;
+    session.ytext.insert(session.ytext.length, " extra edit");
+    h.manager.onConnected();
+    expect(h.sent).toHaveLength(sentBefore);
+    await expect(h.manager.ensureSession("r", "NOTE.md")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    finish();
+    await recovery;
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "ambiguous doc extra edit", "survivor");
+    h.manager.dispose();
+  });
+
+  it("preserves and retires an ambiguous doc before adopting a survivor with the same epoch", async () => {
+    const preserved = vi.fn(async () => undefined);
+    const h = createHarness({ preserveRecoveredText: preserved });
+    h.disk.set("r/Note.md", "ambiguous doc");
+    const old = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, pathCollision: true }]);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, sha256: "survivor" }]);
+    const adopted = await h.manager.ensureSession("r", "NOTE.MD");
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "ambiguous doc", "survivor");
+    expect(adopted).not.toBe(old);
+    expect(adopted.ytext.toString()).toBe("");
+    expect(adopted.relativePath).toBe("note.md");
+    h.manager.dispose();
+  });
+});

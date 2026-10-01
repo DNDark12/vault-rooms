@@ -14,6 +14,7 @@ import type { RoomRow } from "../db/schema.js";
 import { requestTransport, type RequestTransport } from "../routes/security.routes.js";
 import { authenticateActiveDeviceToken } from "../services/authService.js";
 import { assertRoomPermission, hasRoomPermission } from "../services/policyService.js";
+import { roomSnapshot, visibleRoomFiles } from "../services/roomSnapshot.js";
 import { formatFileLimit } from "../services/userFacingMessages.js";
 import { fileContentByteLength } from "../services/fileContentSize.js";
 import { ConnectionRegistry, sendJson, type SyncConnection, type SyncSocket } from "./connectionRegistry.js";
@@ -218,7 +219,7 @@ async function handleMessage(
           requestId: message.requestId,
           userId: current.userId,
           deviceId: current.deviceId,
-          capabilities: { crdtOperationReceipts: true }
+          capabilities: { crdtOperationReceipts: true, portablePaths: true }
         });
         return;
       }
@@ -230,7 +231,8 @@ async function handleMessage(
       connection.capabilities = {
         crdt: Boolean(message.capabilities?.crdt),
         presence: Boolean(message.capabilities?.crdt && message.capabilities?.presence),
-        extendedBinarySync: Boolean(message.capabilities?.extendedBinarySync)
+        extendedBinarySync: Boolean(message.capabilities?.extendedBinarySync),
+        portablePaths: Boolean(message.capabilities?.portablePaths)
       };
       options.onAuthenticated();
       repo.audit({
@@ -247,7 +249,7 @@ async function handleMessage(
         requestId: message.requestId,
         userId: principal.userId,
         deviceId: principal.deviceId,
-        capabilities: { crdtOperationReceipts: true }
+        capabilities: { crdtOperationReceipts: true, portablePaths: true }
       });
     } catch {
       // A malformed/missing token, or any other unexpected failure - treat it the same as an
@@ -323,6 +325,7 @@ async function handleMessage(
         });
         return;
       }
+      visibleRoomFiles(repo, connection.principal, room, connection.capabilities);
       connection.subscriptions.add(room.id);
       // Lease this user's room-session cursor colour now, so hues follow join order. Only for a
       // CRDT-enabled room: nothing else has cursors. Idempotent, so a re-subscribe on reconnect keeps
@@ -342,7 +345,7 @@ async function handleMessage(
       // already current, so this is a cheap comparison per file in the common case.
       if (room.crdt_enabled) {
         for (const file of repo.listFiles(room.id)) {
-          if (file.deleted_at || !isCrdtEligiblePath(file.relative_path)) continue;
+          if (file.deleted_at || file.path_collision || !isCrdtEligiblePath(file.relative_path)) continue;
           try {
             const materializedContent = await options.contentWriteService.readFileContent({
               roomId: room.id,
@@ -359,41 +362,7 @@ async function handleMessage(
           }
         }
       }
-      const snapshotAclRules = repo.listAclRulesForRoom(room.id);
-      sendJson(connection.socket, {
-        type: "room_snapshot",
-        requestId: message.requestId,
-        roomId: room.id,
-        files: repo
-          .listFiles(room.id)
-          .filter((file) =>
-            hasRoomPermission({
-              repo,
-              principal: connection.principal!,
-              room,
-              permission: "file:read",
-              relativePath: file.relative_path,
-              aclRules: snapshotAclRules
-            })
-          )
-          // Mixed-version compatibility (2026-08-03 sync-widening): a connection that hasn't
-          // advertised extendedBinarySync never learns a legacy-ineligible path exists in this room
-          // at all - the same "invisible unless you opt in" treatment CRDT already gets from older
-          // clients. Filtering it out of the snapshot (rather than sending it and letting the client
-          // choke) is what keeps an old build from ever attempting to materialize content it would
-          // misinterpret as UTF-8 text.
-          .filter((file) => connection.capabilities.extendedBinarySync || isLegacyEligiblePath(file.relative_path))
-          .map((file) => ({
-            relativePath: file.relative_path,
-            version: file.version,
-            sha256: file.sha256,
-            deleted: Boolean(file.deleted_at),
-            // Contract 1.11: only advertise a CRDT epoch for paths actually eligible for the CRDT
-            // lane in a room that has opted in - otherwise omit the field entirely (not 0/null)
-            // so an older client's type narrowing on "crdtEpoch in file" keeps working unchanged.
-            ...(room.crdt_enabled && isCrdtEligiblePath(file.relative_path) ? { crdtEpoch: file.crdt_epoch } : {})
-          }))
-      });
+      sendJson(connection.socket, roomSnapshot(repo, connection.principal, requireRoom(repo, room.id), connection.capabilities, message.requestId));
     } catch (error) {
       sendRejection(connection.socket, message.requestId, error);
     }
@@ -450,7 +419,7 @@ async function handleMessage(
         type: "file_change_ack",
         requestId: message.requestId,
         roomId: room.id,
-        relativePath,
+        relativePath: result.relativePath,
         version: result.version,
         sha256: result.sha256
       });
@@ -460,7 +429,7 @@ async function handleMessage(
         {
           type: "remote_file_change",
           roomId: room.id,
-          relativePath,
+          relativePath: result.relativePath,
           version: result.version,
           sha256: result.sha256,
           content: message.content,

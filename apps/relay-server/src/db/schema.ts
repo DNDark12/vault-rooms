@@ -112,6 +112,8 @@ export type FileRow = {
   crdt_epoch: number;
   /** Real decoded size; null until legacy backfill completes. */
   raw_size_bytes: number | null;
+  path_key: string;
+  path_collision: 0 | 1;
 };
 
 export type CrdtUpdateRow = {

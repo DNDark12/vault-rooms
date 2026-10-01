@@ -84,6 +84,22 @@ describe("classifyRenameEvent", () => {
   });
 });
 
+describe("portable mount prefixes", () => {
+  const room: MountedRoomState = { roomId: "r", mountPath: "Rooms/Café", files: {} };
+
+  it("matches case and NFD aliases by segments without slicing away filename characters", () => {
+    expect(isWatchableChange({ type: "modify", path: "rooms/cafe\u0301/Note.md" }, room, CONFIG_DIR)).toBe("Note.md");
+    expect(classifyRenameEvent("ROOMS/CAFÉ/Old.md", "rooms/cafe\u0301/New.md", room, CONFIG_DIR)).toEqual({
+      kind: "rename", oldRelativePath: "Old.md", relativePath: "New.md"
+    });
+    expect(isWatchableChange({ type: "modify", path: "Rooms/Caféteria/Note.md" }, room, CONFIG_DIR)).toBeNull();
+  });
+
+  it("excludes a case or Unicode alias of a custom configuration directory", () => {
+    expect(isWatchableChange({ type: "modify", path: "Rooms/Café/Cafe\u0301Config/settings.json" }, room, "CaféConfig")).toBeNull();
+  });
+});
+
 describe("registerMountedRoomWatcher with rename events", () => {
   it("dispatches a rename inside the room as a delete of the old path plus a create of the new path", () => {
     const vault = new FakeVaultAdapter();

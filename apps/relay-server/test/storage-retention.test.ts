@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createId } from "@vault-rooms/protocol";
+import { createId, portablePathKey } from "@vault-rooms/protocol";
 import { recomputeStorageUsage, runMigrations } from "../src/db/migrations.js";
 import { RelayRepository } from "../src/db/repositories/relayRepository.js";
 import { openSqlJsDb, type RelayDb } from "../src/db/sqlJsAdapter.js";
@@ -762,8 +762,8 @@ function seedLegacyFileHistory(db: RelayDb, roomId: string, relativePath: string
   const now = new Date().toISOString();
   const latestContent = contents[contents.length - 1]!;
   db.prepare(
-    "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at) values (?, ?, ?, 'file', 'markdown', ?, ?, ?, null, null, 'usr_owner', ?, ?)"
-  ).run(fileId, roomId, relativePath, contents.length, sha256Hex(latestContent), Buffer.byteLength(latestContent, "utf8"), now, now);
+    "insert into files(id, room_id, relative_path, kind, content_type, version, sha256, size_bytes, raw_size_bytes, deleted_at, updated_by_user_id, updated_at, created_at, path_key) values (?, ?, ?, 'file', 'markdown', ?, ?, ?, null, null, 'usr_owner', ?, ?, ?)"
+  ).run(fileId, roomId, relativePath, contents.length, sha256Hex(latestContent), Buffer.byteLength(latestContent, "utf8"), now, now, portablePathKey(relativePath));
   contents.forEach((content, index) => {
     const version = index + 1;
     const sha = sha256Hex(content);

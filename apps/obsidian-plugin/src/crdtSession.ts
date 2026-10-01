@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { isCrdtEligiblePath, type SyncClientMessage, type SyncServerMessage } from "@vault-rooms/protocol";
+import { assertPortablePath, isCrdtEligiblePath, portablePathKey, type SyncClientMessage, type SyncServerMessage } from "@vault-rooms/protocol";
 import { CRDT_TEXT_KEY } from "vault-rooms-relay/embedded-core";
 import type { CrdtDocStore } from "./crdtDocStore.js";
 import { reconcileYTextWithDiskText } from "./crdtReconcile.js";
@@ -35,7 +35,7 @@ function fromBase64(value: string): Uint8Array {
 }
 
 function sessionKey(roomId: string, relativePath: string): string {
-  return `${roomId}\0${relativePath}`;
+  return `${roomId}\0${portablePathKey(relativePath)}`;
 }
 
 /** CRDT rejection that preserves the server error code for recovery decisions. */
@@ -84,6 +84,10 @@ export type CrdtSessionManagerDeps = {
   send: (message: SyncClientMessage) => boolean | void;
   docStore: CrdtDocStore;
   isRoomCrdtEnabled: (roomId: string) => boolean;
+  /** Persist unique quarantined text before discarding its old identity. Recovery refuses to
+   * remove any cached/live document when this callback is absent. */
+  preserveRecoveredText?: (roomId: string, relativePath: string, text: string, expectedSha256: string | null) => Promise<void>;
+  isPathBlocked?: (roomId: string, relativePath: string) => boolean;
   /** Pending structural journal paths must not adopt a reconnect snapshot before their receipt is
    *  resolved, or an unrelated server document can overwrite the offline local note. */
   isPathProtectedByJournal?: (roomId: string, relativePath: string) => boolean;
@@ -116,7 +120,7 @@ export type CrdtSessionManagerDeps = {
  *  without a circular import. */
 export interface CrdtWsBridge {
   handleServerMessage(message: SyncServerMessage): Promise<void>;
-  handleRoomSnapshot(roomId: string, files: Array<{ relativePath: string; crdtEpoch?: number }>): void;
+  handleRoomSnapshot(roomId: string, files: Array<{ relativePath: string; crdtEpoch?: number; pathCollision?: boolean; sha256?: string | null; deleted?: boolean }>, previousCollisionPaths?: string[]): void | Promise<void>;
   /** Re-runs the outbound half of the bidirectional handshake for every currently-active session -
    *  call this once the socket (re)connects (contract 1.3, blocker 1: this is what recovers a local
    *  edit made while offline, since the server's reply to this step1 request is what will surface
@@ -148,6 +152,10 @@ export interface CrdtWsBridge {
 export class CrdtSessionManager implements CrdtWsBridge {
   private readonly sessions = new Map<string, CrdtSession>();
   private readonly knownEpoch = new Map<string, number>();
+  private readonly knownPaths = new Map<string, string>();
+  private readonly collisionKeys = new Set<string>();
+  private readonly collisionPaths = new Map<string, Set<string>>();
+  private readonly recoveringCollisionKeys = new Set<string>();
   private readonly pendingCreate = new Map<
     string,
     {
@@ -179,6 +187,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    *  `renameSession` for the self-collision this closes. */
   private readonly pendingRenameTargets = new Set<string>();
   private readonly persistTimers = new Map<string, number>();
+  private readonly persistWrites = new Map<string, Promise<void>>();
   private readonly materializeTimers = new Map<string, number>();
   private readonly schedule: (fn: () => void, ms: number) => number;
   private readonly cancel: (id: number) => void;
@@ -192,10 +201,84 @@ export class CrdtSessionManager implements CrdtWsBridge {
 
   /** Feeds per-file known epochs from a `room_snapshot` (contract 1.11) - the only source of epoch
    *  info for a document this device hasn't created itself in this session. */
-  handleRoomSnapshot(roomId: string, files: Array<{ relativePath: string; crdtEpoch?: number }>): void {
+  async handleRoomSnapshot(roomId: string, files: Array<{ relativePath: string; crdtEpoch?: number; pathCollision?: boolean; sha256?: string | null; deleted?: boolean }>, previousCollisionPaths: string[] = []): Promise<void> {
+    const previousCollisions = new Set(this.collisionKeys);
+    for (const path of previousCollisionPaths) {
+      const key = sessionKey(roomId, path);
+      previousCollisions.add(key);
+      this.collisionKeys.add(key);
+      const paths = this.collisionPaths.get(key) ?? new Set<string>();
+      paths.add(path);
+      this.collisionPaths.set(key, paths);
+    }
     for (const file of files) {
-      if (file.crdtEpoch !== undefined && !this.deps.isPathProtectedByJournal?.(roomId, file.relativePath)) {
+      if (!file.pathCollision) continue;
+      const key = sessionKey(roomId, file.relativePath);
+      this.collisionKeys.add(key);
+      const paths = this.collisionPaths.get(key) ?? new Set<string>();
+      paths.add(file.relativePath);
+      this.collisionPaths.set(key, paths);
+    }
+    const liveKeys = new Set(files.filter((file) => !file.deleted).map((file) => sessionKey(roomId, file.relativePath)));
+    for (const file of files) {
+      const key = sessionKey(roomId, file.relativePath);
+      if (file.pathCollision || (file.deleted && liveKeys.has(key))) continue;
+      if (!previousCollisions.has(key) && this.isPathBlocked(roomId, file.relativePath)) continue;
+      if (previousCollisions.has(key)) {
+        const session = this.sessions.get(key);
+        this.recoveringCollisionKeys.add(key);
+        try {
+          // Detach editor bindings before asynchronous preservation; keep the doc alive on a
+          // failed write so the next snapshot can retry without losing unsaved text.
+          if (session) this.deps.onSessionRetiring?.(roomId, session.relativePath);
+          await this.persistWrites.get(key);
+          const paths = new Set([...(this.collisionPaths.get(key) ?? []), file.relativePath]);
+          if (session) paths.add(session.relativePath);
+          const knownPath = this.knownPaths.get(key);
+          if (knownPath) paths.add(knownPath);
+          const persisted: Array<{ path: string; epoch: number; text: string }> = [];
+          for (const path of paths) {
+            for (const saved of await this.deps.docStore.loadAllEpochs(roomId, path)) {
+              const doc = new Y.Doc();
+              try {
+                Y.applyUpdate(doc, saved.state, HYDRATE_ORIGIN);
+                persisted.push({ path, epoch: saved.epoch, text: doc.getText(CRDT_TEXT_KEY).toString() });
+              } finally {
+                doc.destroy();
+              }
+            }
+          }
+          if (!this.deps.preserveRecoveredText && (session || persisted.length > 0)) {
+            throw new Error("Cannot recover a quarantined document without preserving its local text.");
+          }
+          const preserved = new Set<string>();
+          const preserve = async (path: string, text: string) => {
+            if (preserved.has(text)) return;
+            await this.deps.preserveRecoveredText?.(roomId, path, text, file.sha256 ?? null);
+            preserved.add(text);
+          };
+          for (const saved of persisted) await preserve(saved.path, saved.text);
+          if (session) {
+            // Updates stay gated while awaiting the copy. Preserve any edit that landed during
+            // that await before retiring the old identity.
+            do {
+              await preserve(session.relativePath, session.ytext.toString());
+            } while (!preserved.has(session.ytext.toString()));
+            this.teardownSession(session);
+            this.sessions.delete(key);
+          }
+          for (const saved of persisted) await this.deps.docStore.deleteEpoch(roomId, saved.path, saved.epoch);
+          this.knownEpoch.delete(key);
+          this.knownPaths.delete(key);
+          this.collisionPaths.delete(key);
+          this.collisionKeys.delete(key);
+        } finally {
+          this.recoveringCollisionKeys.delete(key);
+        }
+      }
+      if (!file.deleted && file.crdtEpoch !== undefined && !this.deps.isPathProtectedByJournal?.(roomId, file.relativePath)) {
         this.knownEpoch.set(sessionKey(roomId, file.relativePath), file.crdtEpoch);
+        this.knownPaths.set(sessionKey(roomId, file.relativePath), file.relativePath);
       }
     }
   }
@@ -204,7 +287,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    *  of a local edit made while offline). */
   onConnected(): void {
     for (const session of this.sessions.values()) {
-      if (this.deps.isPathProtectedByJournal?.(session.roomId, session.relativePath)) continue;
+      if (this.isPathBlocked(session.roomId, session.relativePath) || this.deps.isPathProtectedByJournal?.(session.roomId, session.relativePath)) continue;
       this.startHandshake(session);
     }
   }
@@ -261,7 +344,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * touches an already-open session (that path has its own epoch/handshake handling).
    */
   registerKnownEpoch(roomId: string, relativePath: string, epoch: number): void {
-    if (!isCrdtEligiblePath(relativePath) || !this.deps.isRoomCrdtEnabled(roomId)) {
+    if (this.isPathBlocked(roomId, relativePath) || !isCrdtEligiblePath(relativePath) || !this.deps.isRoomCrdtEnabled(roomId)) {
       return;
     }
     const key = sessionKey(roomId, relativePath);
@@ -273,6 +356,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
       return;
     }
     this.knownEpoch.set(key, epoch);
+    this.knownPaths.set(key, relativePath);
   }
 
   /**
@@ -295,6 +379,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (
       !this.deps.isRoomCrdtEnabled(roomId) ||
       !isCrdtEligiblePath(relativePath) ||
+      this.isPathBlocked(roomId, relativePath) ||
       this.deps.isPathProtectedByJournal?.(roomId, relativePath)
     ) {
       return undefined;
@@ -334,6 +419,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (!this.deps.isRoomCrdtEnabled(roomId) || !isCrdtEligiblePath(relativePath)) {
       throw new Error(`ensureSession called for a non-CRDT target: ${roomId}/${relativePath}`);
     }
+    if (this.isPathBlocked(roomId, relativePath)) throw new CrdtRejectedError("PATH_COLLISION", "This path has a collision and cannot sync yet.");
     const key = sessionKey(roomId, relativePath);
     // A rename is already in flight to move an existing document onto this exact path. Creating one
     // here would race it and win, so the rename would then collide with this device's own brand-new
@@ -403,6 +489,8 @@ export class CrdtSessionManager implements CrdtWsBridge {
     // and the rename then collided with the document its own device had just created ~5ms earlier
     // (`FILE_EXISTS`).
     // `ensureSession` consults this set and waits for the rename instead of creating.
+    if (this.isPathBlocked(roomId, oldRelativePath) || this.isPathBlocked(roomId, newRelativePath)) throw new CrdtRejectedError("PATH_COLLISION", "This path has a collision and cannot sync yet.");
+    assertPortablePath(newRelativePath);
     const destinationKey = sessionKey(roomId, newRelativePath);
     this.pendingRenameTargets.add(destinationKey);
     const previous = this.renameChains.get(roomId) ?? Promise.resolve();
@@ -525,7 +613,9 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
 
     this.knownEpoch.delete(oldKey);
+    this.knownPaths.delete(oldKey);
     this.knownEpoch.set(newKey, epoch);
+    this.knownPaths.set(newKey, newRelativePath);
     await this.deps.docStore.rename(roomId, oldRelativePath, newRelativePath, epoch);
 
     // Re-offer whatever the document holds now, under the path it actually lives at. An edit typed while
@@ -549,6 +639,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     operationId?: string
   ): Promise<CrdtSession> {
     const created = await this.ensureEpoch(roomId, requestedPath, brandNewNote, operationId);
+    if (this.isPathBlocked(roomId, created.relativePath)) throw new CrdtRejectedError("PATH_COLLISION", "This path has a collision and cannot sync yet.");
     const epoch = created.epoch;
     let relativePath = requestedPath;
     let key = requestedKey;
@@ -657,6 +748,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
         }
         return;
       }
+      if (this.isPathBlocked(session.roomId, session.relativePath)) return;
       this.deps.send({
         type: "crdt_update",
         requestId: this.createRequestId(),
@@ -729,7 +821,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
    * ignored until this attempt settles.
    */
   private async recoverMissingDocument(roomId: string, relativePath: string): Promise<void> {
-    if (!isCrdtEligiblePath(relativePath) || !this.deps.isRoomCrdtEnabled(roomId)) {
+    if (this.isPathBlocked(roomId, relativePath) || !isCrdtEligiblePath(relativePath) || !this.deps.isRoomCrdtEnabled(roomId)) {
       return;
     }
     const key = sessionKey(roomId, relativePath);
@@ -756,9 +848,34 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
   }
 
-  /** Drops every in-memory session for `roomId` and deletes their persisted state (contract 1.12:
-   *  cleanup on leaving/unmounting a room). */
-  async disposeRoom(roomId: string): Promise<void> {
+  /** Ordinary rooms follow contract 1.12 cleanup. Paused rooms retain their caches until owner
+   * recovery can preserve them; a blocked session must be durable before destroying its doc. */
+  async disposeRoom(roomId: string, previousCollisionPaths: string[] = []): Promise<void> {
+    for (const path of previousCollisionPaths) {
+      const key = sessionKey(roomId, path);
+      this.collisionKeys.add(key);
+      const paths = this.collisionPaths.get(key) ?? new Set<string>();
+      paths.add(path);
+      this.collisionPaths.set(key, paths);
+    }
+    const blocked = [...this.sessions.values()].filter((session) => session.roomId === roomId && this.isPathBlocked(roomId, session.relativePath));
+    const paused = blocked.length > 0 || [...this.collisionKeys].some((key) => key.startsWith(`${roomId}\0`));
+    for (const session of blocked) {
+      this.recoveringCollisionKeys.add(sessionKey(roomId, session.relativePath));
+      this.deps.onSessionRetiring?.(roomId, session.relativePath);
+    }
+    try {
+      await Promise.all([...this.persistWrites.entries()].filter(([key]) => key.startsWith(`${roomId}\0`)).map(([, writing]) => writing));
+      for (const session of blocked) {
+        let revision: number;
+        do {
+          revision = session.revision;
+          await this.deps.docStore.save(roomId, session.relativePath, session.epoch, Y.encodeStateAsUpdate(session.doc), true);
+        } while (session.revision !== revision);
+      }
+    } finally {
+      for (const session of blocked) this.recoveringCollisionKeys.delete(sessionKey(roomId, session.relativePath));
+    }
     for (const [key, session] of [...this.sessions.entries()]) {
       if (session.roomId === roomId) {
         this.teardownSession(session);
@@ -768,6 +885,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     for (const key of [...this.knownEpoch.keys()]) {
       if (key.startsWith(`${roomId}\0`)) {
         this.knownEpoch.delete(key);
+        this.knownPaths.delete(key);
       }
     }
     for (const [requestId, pending] of [...this.pendingCreate.entries()]) {
@@ -776,7 +894,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
         pending.reject(new Error(`CRDT room ${roomId} was disposed.`));
       }
     }
-    await this.deps.docStore.deleteRoom(roomId);
+    if (!paused) await this.deps.docStore.deleteRoom(roomId);
   }
 
   /** Cancels all pending timers and clears in-memory state - call on plugin unload / server switch. */
@@ -790,6 +908,8 @@ export class CrdtSessionManager implements CrdtWsBridge {
 
   async handleServerMessage(message: SyncServerMessage): Promise<void> {
     if (this.disposed) return;
+    if ("roomId" in message && "relativePath" in message && message.type !== "crdt_created" && message.type !== "crdt_renamed" && message.type !== "crdt_rejected" &&
+      (this.isPathBlocked(message.roomId, message.relativePath) || ("oldRelativePath" in message && this.isPathBlocked(message.roomId, message.oldRelativePath)))) return;
     switch (message.type) {
       case "crdt_created": {
         // Keyed by the path the server actually assigned, which may differ from the requested one on a
@@ -797,6 +917,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
         // knownEpoch pointing at a path no document lives at.
         const key = sessionKey(message.roomId, message.relativePath);
         this.knownEpoch.set(key, message.epoch);
+        this.knownPaths.set(key, message.relativePath);
         const pending = this.pendingCreate.get(message.requestId);
         if (pending) {
           this.pendingCreate.delete(message.requestId);
@@ -956,7 +1077,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     if (known !== undefined && !operationId) {
       // An epoch we already knew (room snapshot, announce, earlier open) always describes a document
       // that exists server-side, so its content comes from the handshake - never from seeding.
-      return { epoch: known, relativePath, documentCreatedNow: false };
+      return { epoch: known, relativePath: this.knownPaths.get(key) ?? relativePath, documentCreatedNow: false };
     }
     // Only ever called from openSession, which ensureSession's pendingSessionOpen already
     // serializes per key - so there is no concurrent-caller case to coalesce here.
@@ -964,6 +1085,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     // of a path keeps it, and a second device creating its own new note at the same path (every new
     // Obsidian note starts with the same default name) is assigned a disambiguated one instead. The
     // `crdt_created` handler resolves this promise with whatever path was actually assigned.
+    assertPortablePath(relativePath);
     const requestId = this.createRequestId();
     return new Promise<{ epoch: number; relativePath: string; documentCreatedNow: boolean }>((resolve, reject) => {
       this.pendingCreate.set(requestId, { key, resolve, reject });
@@ -1021,7 +1143,12 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
   }
 
+  private isPathBlocked(roomId: string, relativePath: string): boolean {
+    return this.collisionKeys.has(sessionKey(roomId, relativePath)) || this.deps.isPathBlocked?.(roomId, relativePath) === true;
+  }
+
   private startHandshake(session: CrdtSession): void {
+    if (this.isPathBlocked(session.roomId, session.relativePath)) return;
     const requestId = this.createRequestId();
     this.pendingHandshake.set(requestId, sessionKey(session.roomId, session.relativePath));
     this.deps.send({
@@ -1036,14 +1163,24 @@ export class CrdtSessionManager implements CrdtWsBridge {
 
   private schedulePersist(session: CrdtSession): void {
     const key = sessionKey(session.roomId, session.relativePath);
+    if (this.recoveringCollisionKeys.has(key)) return;
     const existingTimer = this.persistTimers.get(key);
     if (existingTimer !== undefined) {
       this.cancel(existingTimer);
     }
     const timer = this.schedule(() => {
       this.persistTimers.delete(key);
-      if (this.disposed || this.sessions.get(key) !== session) return;
-      void this.deps.docStore.save(session.roomId, session.relativePath, session.epoch, Y.encodeStateAsUpdate(session.doc));
+      if (this.disposed || this.recoveringCollisionKeys.has(key) || this.sessions.get(key) !== session) return;
+      const state = Y.encodeStateAsUpdate(session.doc);
+      const writing = (this.persistWrites.get(key) ?? Promise.resolve()).then(() => this.deps.docStore.save(session.roomId, session.relativePath, session.epoch, state, this.isPathBlocked(session.roomId, session.relativePath)));
+      this.persistWrites.set(key, writing);
+      void writing.then(
+        () => { if (this.persistWrites.get(key) === writing) this.persistWrites.delete(key); },
+        (error) => {
+          if (this.persistWrites.get(key) === writing) this.persistWrites.delete(key);
+          console.error(`Vault Rooms: failed to persist CRDT document "${session.relativePath}"`, error);
+        }
+      );
     }, PERSIST_DEBOUNCE_MS);
     this.persistTimers.set(key, timer);
   }
@@ -1056,7 +1193,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
     const timer = this.schedule(() => {
       this.materializeTimers.delete(key);
-      if (this.disposed || this.sessions.get(key) !== session || session.boundToEditor) return;
+      if (this.disposed || this.isPathBlocked(session.roomId, session.relativePath) || this.sessions.get(key) !== session || session.boundToEditor) return;
       void this.deps.writeDiskText(session.roomId, session.relativePath, session.ytext.toString());
     }, MATERIALIZE_DEBOUNCE_MS);
     this.materializeTimers.set(key, timer);
@@ -1084,7 +1221,7 @@ export class CrdtSessionManager implements CrdtWsBridge {
     }
     this.cancel(timer);
     this.materializeTimers.delete(key);
-    if (this.disposed || this.sessions.get(key) !== session || session.boundToEditor) {
+    if (this.disposed || this.isPathBlocked(session.roomId, session.relativePath) || this.sessions.get(key) !== session || session.boundToEditor) {
       return;
     }
     await this.deps.writeDiskText(session.roomId, session.relativePath, session.ytext.toString());

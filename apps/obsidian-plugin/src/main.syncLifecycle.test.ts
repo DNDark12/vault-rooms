@@ -330,3 +330,24 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
     expect(manager.deps.send({ type: "crdt_create" })).toBe(false);
   });
 });
+
+
+describe("owner path collision integration", () => {
+  it("lists collision groups and refreshes the mounted snapshot after a stable-ID rename", async () => {
+    const active = server();
+    const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
+    plugin.settings = settings(active);
+    plugin.settings.mountedRooms.r = { roomId: "r", serverId: active.id, mountPath: "Room", files: {} };
+    const listPathCollisions = vi.fn(async () => ({ groups: [{ pathKey: "note.md", files: [] }] }));
+    const renameRoomFile = vi.fn(async () => ({ ok: true, fileId: "f", oldRelativePath: "Note.md", relativePath: "Recovered.md", epoch: 0, version: 8 }));
+    const refreshRoom = vi.fn();
+    const internals = plugin as unknown as { requireActiveServer(): ServerConnection; apiFor(): unknown; syncSocket: unknown };
+    internals.requireActiveServer = () => active;
+    internals.apiFor = () => ({ listPathCollisions, renameRoomFile });
+    internals.syncSocket = { refreshRoom };
+    expect(await plugin.listRoomPathCollisions("r")).toEqual([{ pathKey: "note.md", files: [] }]);
+    await plugin.renameRoomFile("r", { fileId: "f", relativePath: "Recovered.md" });
+    expect(renameRoomFile).toHaveBeenCalledWith("r", { fileId: "f", relativePath: "Recovered.md" });
+    expect(refreshRoom).toHaveBeenCalledWith("r");
+  });
+});

@@ -1,8 +1,15 @@
 import { Notice } from "obsidian";
-import { isCrdtEligiblePath } from "@vault-rooms/protocol";
+import { isCrdtEligiblePath, portablePathKey } from "@vault-rooms/protocol";
 import type { RoomSummary } from "../apiClient.js";
-import { isSyncableRelativePath } from "../fileWatcher.js";
+import type { CrdtWsBridge } from "../crdtSession.js";
+import { isSyncableRelativePath, relativePathWithinMount } from "../fileWatcher.js";
 import {
+  getMountedFileEntry,
+  collisionRecoveryPaths,
+  completePathRecovery,
+  isMountedPathBlocked,
+  updatePathCollisionKeys,
+  localPortablePathError,
   canonicalPathForConflictCopy,
   isConflictCopyPath,
   resolveRoomMountPath,
@@ -17,9 +24,11 @@ export type RoomMountControllerDeps = Pick<
   "app" | "settings" | "visibleRooms" | "apiFor" | "requireActiveServer" | "saveSettings" | "renderOpenRoomsViews"
 > & {
   vaultAdapter: VaultAdapter;
+  onInvalidLocalPath?(roomId: string, relativePath: string, error: Error): void;
   getSyncEngine(): VaultSyncEngine;
   /** Opens/seeds a pre-existing local Markdown note through the CRDT lane during initial mount. */
   ensureCrdtSession(roomId: string, relativePath: string, brandNewNote: boolean): Promise<void>;
+  handleCrdtRoomSnapshot?: CrdtWsBridge["handleRoomSnapshot"];
   stopWatchingRoom(roomId: string): void;
   watchMountedRoom(roomId: string): void;
   subscribeRoom(roomId: string): void;
@@ -33,6 +42,8 @@ export type RoomMountControllerDeps = Pick<
 
 /** Owns local mount/unmount state, conflict discovery, and mount-time reconciliation. */
 export class RoomMountController {
+  private readonly invalidNamesNotified = new Set<string>();
+
   constructor(private readonly deps: RoomMountControllerDeps) {}
 
   async mountFirstVisibleRoom(): Promise<void> {
@@ -92,23 +103,34 @@ export class RoomMountController {
     // file whose server version hasn't changed, silently downloading over the local edit. Re-hash
     // every already-tracked file first so such edits are treated as dirty-equivalent and get a
     // conflict copy instead of being clobbered.
-    await syncEngine.reconcileLocalEdits(state);
     const api = this.deps.apiFor(server);
     const files = await api.listFiles(room.id);
-    const knownRelativePaths = new Set(files.files.map((file) => file.relativePath));
+    const previousPaths = collisionRecoveryPaths(state);
+    const previousCollisions = new Set(previousPaths.map(portablePathKey));
+    updatePathCollisionKeys(state, files.files);
+    await this.deps.handleCrdtRoomSnapshot?.(room.id, files.files, previousPaths);
+    await syncEngine.reconcileLocalEdits(state);
+    const knownRelativePaths = new Set(files.files.map((file) => portablePathKey(file.relativePath)));
+    const liveKeys = new Set(files.files.filter((file) => !file.deleted).map((file) => portablePathKey(file.relativePath)));
     for (const file of files.files) {
-      const tracked = state.files[file.relativePath];
+      if (file.deleted && liveKeys.has(portablePathKey(file.relativePath))) continue;
+      const recovering = previousCollisions.has(portablePathKey(file.relativePath));
+      if (isMountedPathBlocked(state, file.relativePath, recovering)) continue;
+      if (recovering) await syncEngine.preserveRecoveredLocalFile(state, file, server.deviceName);
+      const tracked = getMountedFileEntry(state, file.relativePath)?.[1];
       if (file.deleted) {
         if (tracked) {
-          await syncEngine.applyRemoteDelete(state, { relativePath: file.relativePath, version: file.version }, server.deviceName);
+          await syncEngine.applyRemoteDelete(state, { relativePath: file.relativePath, version: file.version }, server.deviceName, recovering, recovering);
         }
+        if (recovering) completePathRecovery(state, file.relativePath);
         continue;
       }
-      if (tracked && !tracked.dirty && tracked.serverVersion === file.version) {
+      if (!previousCollisions.has(portablePathKey(file.relativePath)) && tracked && !tracked.dirty && tracked.serverVersion === file.version) {
         continue;
       }
       const content = await api.readFile(room.id, file.relativePath);
-      await syncEngine.applyRemoteChange(state, content, server.deviceName);
+      await syncEngine.applyRemoteChange(state, content, server.deviceName, recovering, recovering);
+      if (recovering) completePathRecovery(state, file.relativePath);
     }
 
     // The server's listing only covers what's already been synced. On the room owner's own
@@ -124,11 +146,18 @@ export class RoomMountController {
       const configDir = this.deps.app.vault.configDir.replace(/\/+$/, "");
       const pushablePaths: string[] = [];
       for (const localPath of localPaths) {
-        if (!mountPath && (localPath === configDir || localPath.startsWith(`${configDir}/`))) {
+        const relativePath = relativePathWithinMount(localPath, mountPath);
+        if (relativePath === null || !isSyncableRelativePath(relativePath, configDir) || knownRelativePaths.has(portablePathKey(relativePath)) || isMountedPathBlocked(state, relativePath)) {
           continue;
         }
-        const relativePath = mountPath ? localPath.slice(mountPath.length + 1) : localPath;
-        if (!isSyncableRelativePath(relativePath, configDir) || knownRelativePaths.has(relativePath)) {
+        const error = localPortablePathError(relativePath);
+        if (error) {
+          const key = `${room.id}\0${relativePath}\0${error.message}`;
+          if (!this.invalidNamesNotified.has(key)) {
+            this.invalidNamesNotified.add(key);
+            if (this.deps.onInvalidLocalPath) this.deps.onInvalidLocalPath(room.id, relativePath, error);
+            else new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${error.message}`);
+          }
           continue;
         }
         pushablePaths.push(relativePath);

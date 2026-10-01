@@ -1,8 +1,8 @@
 import { normalizePath } from "obsidian";
-import { isValidUtf8 } from "@vault-rooms/protocol";
-import type { Plugin, TFile } from "obsidian";
+import { isValidUtf8, portablePathKey } from "@vault-rooms/protocol";
+import type { Plugin, TAbstractFile, TFile } from "obsidian";
 import type { VaultAdapter, VaultChangeEvent } from "./syncClient.js";
-import { isFile, listFiles } from "./vaultTraversal.js";
+import { isFile, isFolder, listFiles } from "./vaultTraversal.js";
 
 export class ObsidianVaultAdapter implements VaultAdapter {
   constructor(private readonly plugin: Plugin) {}
@@ -18,7 +18,7 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async write(path: string, content: string): Promise<void> {
     const normalized = normalizePath(path);
-    const existing = this.app.vault.getAbstractFileByPath(normalized);
+    const existing = this.resolvePath(normalized);
     if (existing && isFile(existing)) {
       // Vault.process() (not modify()) for writes that can land on a file the user currently has
       // open: process() reads the file fresh and applies the returned content atomically, so it
@@ -30,8 +30,7 @@ export class ObsidianVaultAdapter implements VaultAdapter {
       await this.app.vault.process(existing, () => content);
       return;
     }
-    await this.ensureFolder(normalized);
-    await this.app.vault.create(normalized, content);
+    await this.app.vault.create(await this.ensureFolder(normalized), content);
   }
 
   async readBinary(path: string): Promise<ArrayBuffer> {
@@ -48,53 +47,51 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
     const normalized = normalizePath(path);
-    const existing = this.app.vault.getAbstractFileByPath(normalized);
+    const existing = this.resolvePath(normalized);
     if (existing && isFile(existing)) {
       await this.app.vault.modifyBinary(existing, data);
       return;
     }
-    await this.ensureFolder(normalized);
-    await this.app.vault.createBinary(normalized, data);
+    await this.app.vault.createBinary(await this.ensureFolder(normalized), data);
   }
 
   async rename(oldPath: string, newPath: string): Promise<void> {
     const normalizedOld = normalizePath(oldPath);
     const normalizedNew = normalizePath(newPath);
-    const existing = this.app.vault.getAbstractFileByPath(normalizedOld);
+    const existing = this.resolvePath(normalizedOld);
     if (!existing) {
-      return;
-    }
-    if (normalizedOld === normalizedNew) {
       return;
     }
     // Obsidian throws "Destination file already exists!" rather than reporting it, and that rejection
     // used to propagate all the way out of a remote-rename apply as an uncaught error. Treat an
     // already-occupied destination as nothing-to-do: the local vault, not this move, decides what
     // lives at that path, and the room's next reconciliation settles any real divergence.
-    if (this.app.vault.getAbstractFileByPath(normalizedNew)) {
+    const destination = this.resolvePath(normalizedNew);
+    if (destination && destination !== existing) {
       return;
     }
-    await this.ensureFolder(normalizedNew);
+    const destinationPath = await this.ensureFolder(normalizedNew);
+    if (existing.path === destinationPath) return;
     // FileManager.renameFile (not Vault#rename) so backlinks get updated the same way they would
     // for a user-driven rename in Obsidian's own UI - this is applying someone else's rename, not
     // a raw file-system move.
-    await this.app.fileManager.renameFile(existing, normalizedNew);
+    await this.app.fileManager.renameFile(existing, destinationPath);
   }
 
   async delete(path: string): Promise<void> {
-    const existing = this.app.vault.getAbstractFileByPath(normalizePath(path));
+    const existing = this.resolvePath(normalizePath(path));
     if (existing) {
       await this.app.fileManager.trashFile(existing);
     }
   }
 
   async exists(path: string): Promise<boolean> {
-    return this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null;
+    return this.resolvePath(normalizePath(path)) !== null;
   }
 
   async list(prefix: string): Promise<string[]> {
     const normalizedPrefix = normalizePath(prefix).replace(/\/+$/, "");
-    const root = normalizedPrefix ? this.app.vault.getAbstractFileByPath(normalizedPrefix) : this.app.vault.getRoot();
+    const root = this.resolvePath(normalizedPrefix);
     if (!root) {
       return [];
     }
@@ -128,21 +125,45 @@ export class ObsidianVaultAdapter implements VaultAdapter {
   }
 
   private getFile(path: string): TFile {
-    const file = this.app.vault.getAbstractFileByPath(path);
+    const file = this.resolvePath(path);
     if (!file || !isFile(file)) {
       throw new Error(`File not found: ${path}`);
     }
     return file;
   }
 
-  private async ensureFolder(path: string): Promise<void> {
-    const slash = path.lastIndexOf("/");
-    if (slash <= 0) {
-      return;
+  /** Obsidian's path cache is exact even on insensitive filesystems. Walk only the requested
+   * ancestors so aliases resolve without enumerating the vault or selecting an ambiguous child. */
+  private resolvePath(path: string): TAbstractFile | null {
+    let current: TAbstractFile = this.app.vault.getRoot();
+    for (const segment of path.split("/").filter(Boolean)) {
+      if (!isFolder(current)) return null;
+      const children = current.children.filter((child) => portablePathKey(child.path.slice(child.path.lastIndexOf("/") + 1)) === portablePathKey(segment));
+      if (children.length > 1) {
+        throw Object.assign(new Error(`Local path has a collision: ${path}`), { code: "PATH_COLLISION" });
+      }
+      if (!children[0]) return null;
+      current = children[0];
     }
-    const folder = path.slice(0, slash);
-    if (!this.app.vault.getAbstractFileByPath(folder)) {
-      await this.app.vault.createFolder(folder);
+    return current;
+  }
+
+  /** Returns the requested filename under the actual spelling of its parent folders. */
+  private async ensureFolder(path: string): Promise<string> {
+    const segments = path.split("/");
+    const filename = segments.pop()!;
+    let parent = "";
+    for (const segment of segments) {
+      const requested = parent ? `${parent}/${segment}` : segment;
+      const folder = this.resolvePath(requested);
+      if (folder) {
+        if (!isFolder(folder)) throw new Error(`Not a folder: ${requested}`);
+        parent = folder.path;
+      } else {
+        const created = await this.app.vault.createFolder(requested);
+        parent = created.path;
+      }
     }
+    return parent ? `${parent}/${filename}` : filename;
   }
 }

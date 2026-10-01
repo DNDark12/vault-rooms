@@ -1,3 +1,4 @@
+import { portablePathKey } from "@vault-rooms/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import type WebSocket from "ws";
 import * as Y from "yjs";
@@ -55,10 +56,14 @@ type Client = {
 
 class FakeVaultAdapter implements VaultAdapter {
   files = new Map<string, string>();
+  constructor(readonly caseInsensitive = false) {}
+  private actualPath(path: string): string {
+    return this.caseInsensitive ? [...this.files.keys()].find((candidate) => portablePathKey(candidate) === portablePathKey(path)) ?? path : path;
+  }
   private listener: ((event: VaultChangeEvent) => void) | null = null;
 
   async read(path: string): Promise<string> {
-    const content = this.files.get(path);
+    const content = this.files.get(this.actualPath(path));
     if (content === undefined) {
       throw new Error(`Missing file: ${path}`);
     }
@@ -66,11 +71,11 @@ class FakeVaultAdapter implements VaultAdapter {
   }
 
   async write(path: string, content: string): Promise<void> {
-    this.files.set(path, content);
+    this.files.set(this.actualPath(path), content);
   }
 
   async readBinary(path: string): Promise<ArrayBuffer> {
-    const content = this.files.get(path);
+    const content = this.files.get(this.actualPath(path));
     if (content === undefined) {
       throw new Error(`Missing file: ${path}`);
     }
@@ -79,22 +84,22 @@ class FakeVaultAdapter implements VaultAdapter {
   }
 
   async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
-    this.files.set(path, Buffer.from(data).toString("base64"));
+    this.files.set(this.actualPath(path), Buffer.from(data).toString("base64"));
   }
 
   async delete(path: string): Promise<void> {
-    this.files.delete(path);
+    this.files.delete(this.actualPath(path));
   }
 
   async rename(oldPath: string, newPath: string): Promise<void> {
-    const content = this.files.get(oldPath);
+    const content = this.files.get(this.actualPath(oldPath));
     if (content === undefined) return;
-    this.files.delete(oldPath);
+    this.files.delete(this.actualPath(oldPath));
     this.files.set(newPath, content);
   }
 
   async exists(path: string): Promise<boolean> {
-    return this.files.has(path);
+    return this.files.has(this.actualPath(path));
   }
 
   async list(prefix: string): Promise<string[]> {
@@ -169,8 +174,9 @@ function buildClient(input: {
   roomId: string;
   mountPath: string;
   preExistingFiles?: MountedRoomState["files"];
+  caseInsensitive?: boolean;
 }): Client {
-  const vault = new FakeVaultAdapter();
+  const vault = new FakeVaultAdapter(input.caseInsensitive);
   const server: ServerConnection = {
     id: "server_1",
     baseUrl: input.baseUrl,
@@ -220,8 +226,8 @@ function buildClient(input: {
   const unsubscribeWatcher = registerMountedRoomWatcher(
     vault,
     room,
-    (event, relativePath) => {
-      coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath);
+    (event, relativePath, renameHint) => {
+      coordinator.handleLocalChange(event.type as "create" | "modify" | "delete", relativePath, renameHint);
     },
     ".obsidian"
   );
@@ -829,3 +835,29 @@ async function rawSyncSocket(app: Awaited<ReturnType<typeof createApp>>, token: 
   await next("room_snapshot");
   return { send, next };
 }
+
+
+describe("portable CAS two-client identity", () => {
+  it("updates an NFD/case alias and propagates a case-only rename on insensitive vaults", async () => {
+    const { app, baseUrl } = await startRelay();
+    const { owner, member, room } = await setupRoomWithTwoMembers(app);
+    const a = buildClient({ baseUrl, deviceToken: owner.deviceToken, deviceName: "A", roomId: room.id, mountPath: "A", caseInsensitive: true });
+    const b = buildClient({ baseUrl, deviceToken: member.deviceToken, deviceName: "B", roomId: room.id, mountPath: "B", caseInsensitive: true });
+    await connectAndSubscribe(a);
+    await connectAndSubscribe(b);
+    await a.vault.write("A/Café.txt", "original");
+    a.vault.fire({ type: "create", path: "A/Café.txt" });
+    await waitFor(() => b.vault.files.get("B/Café.txt") === "original", "peer's original file");
+    await b.vault.write("B/cafe\u0301.TXT", "edited through alias");
+    b.vault.fire({ type: "modify", path: "B/cafe\u0301.TXT" });
+    await waitFor(() => a.vault.files.get("A/Café.txt") === "edited through alias", "alias edit to converge");
+    expect(Object.keys(b.room.files)).toEqual(["Café.txt"]);
+    await a.vault.rename("A/Café.txt", "A/café.txt");
+    a.vault.fire({ type: "rename", oldPath: "A/Café.txt", path: "A/café.txt" });
+    await waitFor(() => b.vault.files.get("B/café.txt") === "edited through alias", "case-only rename to converge");
+    expect([...a.vault.files.keys()]).toEqual(["A/café.txt"]);
+    expect([...b.vault.files.keys()]).toEqual(["B/café.txt"]);
+    const listing = await a.api.listFiles(room.id);
+    expect(listing.files.filter((file) => !file.deleted).map((file) => file.relativePath)).toEqual(["café.txt"]);
+  });
+});

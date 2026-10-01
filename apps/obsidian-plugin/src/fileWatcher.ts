@@ -1,5 +1,14 @@
-import { isCrdtEligiblePath } from "@vault-rooms/protocol";
+import { isCrdtEligiblePath, portablePathKey } from "@vault-rooms/protocol";
 import { isConflictCopyPath, type MountedRoomState, type VaultAdapter, type VaultChangeEvent } from "./syncClient.js";
+
+/** Match mount ancestors by portable identity while retaining the original filename spelling.
+ * Segment offsets, unlike string lengths, remain correct when NFC and NFD lengths differ. */
+export function relativePathWithinMount(path: string, mountPath: string): string | null {
+  const mountSegments = mountPath.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+  const segments = path.split("/");
+  if (mountSegments.some((segment, index) => portablePathKey(segment) !== portablePathKey(segments[index] ?? ""))) return null;
+  return segments.slice(mountSegments.length).join("/");
+}
 
 /** File-sync scope shared by the live watcher and mount-time enumeration. Extension is deliberately
  * unrestricted; these exclusions are local/private/generated paths that must never enter either
@@ -10,7 +19,7 @@ export function isSyncableRelativePath(relativePath: string, configDir: string):
   }
   const normalizedConfigDir = configDir.replace(/^\/+|\/+$/g, "");
   if (
-    (normalizedConfigDir && (relativePath === normalizedConfigDir || relativePath.startsWith(`${normalizedConfigDir}/`))) ||
+    (normalizedConfigDir && relativePathWithinMount(relativePath, normalizedConfigDir) !== null) ||
     relativePath.endsWith(".tmp") ||
     isConflictCopyPath(relativePath)
   ) {
@@ -27,13 +36,8 @@ export function isSyncableRelativePath(relativePath: string, configDir: string):
  *  folder, so callers must always pass it explicitly rather than risk silently assuming a
  *  default that may not match. */
 function relativePathIfWatchable(path: string, room: MountedRoomState, configDir: string): string | null {
-  const mountPath = room.mountPath.replace(/^\/+|\/+$/g, "");
-  const prefix = mountPath ? `${mountPath}/` : "";
-  if (prefix && !path.startsWith(prefix)) {
-    return null;
-  }
-  const relativePath = prefix ? path.slice(prefix.length) : path;
-  if (!isSyncableRelativePath(relativePath, configDir)) {
+  const relativePath = relativePathWithinMount(path, room.mountPath);
+  if (relativePath === null || !isSyncableRelativePath(relativePath, configDir)) {
     return null;
   }
   return relativePath;

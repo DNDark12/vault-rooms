@@ -623,3 +623,26 @@ describe("CrdtOperationJournal", () => {
     expect(onReplayError).toHaveBeenCalledOnce();
   });
 });
+
+
+describe("portable journal identity", () => {
+  it("coalesces an unattempted alias rename and protects every spelling", async () => {
+    const h = harness();
+    await h.journal.recordCreate("room_1", "Café.md");
+    await h.journal.recordRename("room_1", "cafe\u0301.MD", "Final.md");
+    expect(h.initialRoom.pendingCrdtOperations).toHaveLength(1);
+    expect(h.initialRoom.pendingCrdtOperations?.[0]?.relativePath).toBe("Final.md");
+    expect(h.journal.isPathProtected("room_1", "FINAL.MD")).toBe(true);
+  });
+
+  it("retains quarantined operations without sending or marking attempted", async () => {
+    const h = harness();
+    h.initialRoom.pathCollisionKeys = ["note.md"];
+    h.existingPaths.add("Note.md");
+    await h.journal.recordCreate("room_1", "Note.md");
+    h.journal.markSnapshotReady("room_1", true);
+    await h.journal.drain("room_1");
+    expect(h.sends).toEqual([]);
+    expect(h.initialRoom.pendingCrdtOperations?.[0]?.attemptedAt).toBeUndefined();
+  });
+});

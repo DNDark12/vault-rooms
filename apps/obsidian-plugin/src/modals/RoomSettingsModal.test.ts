@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AclRuleSummary, RoomSummary } from "../apiClient.js";
+import { Notice } from "obsidian";
+import type { AclRuleSummary, PathCollisionGroup, RoomSummary } from "../apiClient.js";
 import { EDITOR_PERMISSION_SET } from "../accessPresentation.js";
 import { RoomSettingsModal } from "./RoomSettingsModal.js";
 import { confirmModal } from "./ConfirmModal.js";
@@ -111,7 +112,7 @@ vi.mock("obsidian", () => {
   return {
     ButtonComponent,
     Modal,
-    Notice: class Notice {},
+    Notice: vi.fn(),
     Setting
   };
 });
@@ -210,6 +211,8 @@ function harness(
     friends: [{ id: "hung", displayName: "hung", revokedAt: null, teams: [] }],
     refreshTeams: vi.fn(async () => undefined),
     listRoomAcl: vi.fn(async () => rules),
+    listRoomPathCollisions: vi.fn(async (): Promise<PathCollisionGroup[]> => []),
+    renameRoomFile: vi.fn(async (): Promise<void> => undefined),
     roomMountPathFor: vi.fn(() => "Vault Rooms/Daily Report"),
     getActiveServer: vi.fn(() => ({ userId: "owner" })),
     canManageRoom: vi.fn(() => true),
@@ -379,5 +382,175 @@ describe("RoomSettingsModal low-tech access contract", () => {
       pathPattern: "**/*",
       preset: "blocked"
     });
+  });
+});
+
+const collisions: PathCollisionGroup[] = [
+  { pathKey: "notes/café.md", files: [
+    { fileId: "file_1", relativePath: "Notes/Café.md", version: 3, crdtEpoch: 2 },
+    { fileId: "file_2", relativePath: "notes/Cafe\u0301.md", version: 5, crdtEpoch: 1 }
+  ] },
+  { pathKey: "image.png", files: [
+    { fileId: "file_3", relativePath: "IMAGE.png", version: 1, crdtEpoch: 1 },
+    { fileId: "file_4", relativePath: "image.png", version: 2, crdtEpoch: 1 }
+  ] }
+];
+
+function collisionRow(modal: RoomSettingsModal, fileId: string): HTMLElement {
+  const row = modal.contentEl.querySelector<HTMLElement>(`[data-file-id="${fileId}"]`);
+  if (!row) throw new Error(`Missing collision file: ${fileId}`);
+  return row;
+}
+
+describe("RoomSettingsModal owner path recovery", () => {
+  it("shows separate collision groups with explicit rename actions and original path spelling", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockResolvedValue(collisions);
+    await open(modal);
+
+    expect(plugin.listRoomPathCollisions).toHaveBeenCalledWith("daily");
+    expect(modal.contentEl.querySelectorAll(".vault-rooms-path-collision-group")).toHaveLength(2);
+    for (const group of collisions) {
+      for (const file of group.files) {
+        const row = collisionRow(modal, file.fileId);
+        expect(row.textContent).toContain(file.relativePath);
+        expect(row.querySelector<HTMLInputElement>("input")?.value).toBe(file.relativePath);
+        expect(button(row, "Rename file")).toBeDefined();
+      }
+    }
+    expect(plugin.renameRoomFile).not.toHaveBeenCalled();
+  });
+
+  it("does not offer or request collision recovery for a server manager who does not own the room", async () => {
+    const { modal, plugin } = harness();
+    plugin.getActiveServer.mockReturnValue({ userId: "server-owner" });
+    plugin.listRoomPathCollisions.mockResolvedValue(collisions);
+    await open(modal);
+
+    expect(plugin.canManageRoom()).toBe(true);
+    expect(plugin.listRoomPathCollisions).not.toHaveBeenCalled();
+    expect(modal.contentEl.querySelector(".vault-rooms-path-collisions")).toBeNull();
+    expect(button(modal.contentEl, "Save room settings")).toBeDefined();
+  });
+
+  it("uses the stable file ID and preserves a chosen Unicode spelling, then refreshes the groups", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockResolvedValueOnce(collisions).mockResolvedValueOnce([]);
+    await open(modal);
+    const row = collisionRow(modal, "file_2");
+    const input = row.querySelector<HTMLInputElement>("input")!;
+    input.value = "Notes/Cafe\u0301 Recovery.md";
+    input.dispatchEvent(new Event("input"));
+
+    button(row, "Rename file").click();
+    await vi.waitFor(() => expect(plugin.listRoomPathCollisions).toHaveBeenCalledTimes(2));
+
+    expect(plugin.renameRoomFile).toHaveBeenCalledExactlyOnceWith("daily", {
+      fileId: "file_2", relativePath: "Notes/Cafe\u0301 Recovery.md"
+    });
+    expect(modal.contentEl.querySelector(".vault-rooms-path-collision-group")).toBeNull();
+    expect(Notice).toHaveBeenCalledWith("File renamed. Its content and history are preserved.");
+  });
+
+  it.each(["CON.md", "Notes/note.md ", "Notes/name?.md", "../note.md"])(
+    "rejects the invalid portable path %s before sending a rename",
+    async (relativePath) => {
+      const { modal, plugin } = harness();
+      plugin.listRoomPathCollisions.mockResolvedValue(collisions);
+      await open(modal);
+      const row = collisionRow(modal, "file_2");
+      const input = row.querySelector<HTMLInputElement>("input")!;
+      input.value = relativePath;
+      input.dispatchEvent(new Event("input"));
+
+      button(row, "Rename file").click();
+      await Promise.resolve();
+
+      expect(plugin.renameRoomFile).not.toHaveBeenCalled();
+      expect(Notice).toHaveBeenCalledWith(expect.any(String));
+      expect(input.value).toBe(relativePath);
+    }
+  );
+
+  it("keeps an entered path after a rejected rename so the owner can correct it", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockResolvedValue(collisions);
+    plugin.renameRoomFile.mockRejectedValue(new Error("A file with that name already exists in this room."));
+    await open(modal);
+    const input = collisionRow(modal, "file_2").querySelector<HTMLInputElement>("input")!;
+    input.value = "Notes/Other.md";
+    input.dispatchEvent(new Event("input"));
+
+    button(collisionRow(modal, "file_2"), "Rename file").click();
+    await vi.waitFor(() => expect(Notice).toHaveBeenCalledWith("A file with that name already exists in this room."));
+
+    expect(collisionRow(modal, "file_2").querySelector<HTMLInputElement>("input")?.value).toBe("Notes/Other.md");
+    expect(button(collisionRow(modal, "file_2"), "Rename file").disabled).toBe(false);
+    expect(plugin.listRoomPathCollisions).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables recovery inputs while the rename is pending", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockResolvedValue(collisions);
+    let finishRename!: () => void;
+    plugin.renameRoomFile.mockImplementation(() => new Promise<void>((resolve) => { finishRename = resolve; }));
+    await open(modal);
+    const input = collisionRow(modal, "file_2").querySelector<HTMLInputElement>("input")!;
+    input.value = "Notes/Recovered.md";
+    input.dispatchEvent(new Event("input"));
+
+    button(collisionRow(modal, "file_2"), "Rename file").click();
+
+    const rows = Array.from(modal.contentEl.querySelectorAll<HTMLElement>("[data-file-id]"));
+    for (const row of rows) {
+      expect(row.querySelector<HTMLInputElement>("input")?.disabled).toBe(true);
+      expect(row.querySelector<HTMLButtonElement>("button")?.disabled).toBe(true);
+    }
+    button(collisionRow(modal, "file_1"), "Rename file").click();
+    expect(plugin.renameRoomFile).toHaveBeenCalledTimes(1);
+    finishRename();
+    await vi.waitFor(() => expect(plugin.listRoomPathCollisions).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps ordinary room settings usable when an old server cannot list collisions", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockRejectedValue(Object.assign(new Error("NOT_FOUND"), { code: "NOT_FOUND" }));
+    await open(modal);
+
+    expect(button(modal.contentEl, "Save room settings")).toBeDefined();
+    expect(modal.contentEl.textContent).toContain("Can edit · everything here");
+    expect(modal.contentEl.textContent).toContain("File name recovery is unavailable. Try again, or ask whoever hosts this server to update it.");
+    expect(Notice).not.toHaveBeenCalled();
+  });
+
+  it("lets the owner retry a failed collision load", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockRejectedValueOnce(new Error("Offline")).mockResolvedValueOnce(collisions);
+    await open(modal);
+
+    button(modal.contentEl, "Try again").click();
+    await vi.waitFor(() => expect(modal.contentEl.querySelectorAll(".vault-rooms-path-collision-group")).toHaveLength(2));
+
+    expect(plugin.listRoomPathCollisions).toHaveBeenCalledTimes(2);
+    expect(modal.contentEl.textContent).not.toContain("File name recovery is unavailable.");
+  });
+
+  it("does not refill a closed modal when a pending rename succeeds", async () => {
+    const { modal, plugin } = harness();
+    plugin.listRoomPathCollisions.mockResolvedValue(collisions);
+    let finishRename!: () => void;
+    plugin.renameRoomFile.mockImplementation(() => new Promise<void>((resolve) => { finishRename = resolve; }));
+    await open(modal);
+    const input = collisionRow(modal, "file_2").querySelector<HTMLInputElement>("input")!;
+    input.value = "Notes/Recovered.md";
+    input.dispatchEvent(new Event("input"));
+    button(collisionRow(modal, "file_2"), "Rename file").click();
+    modal.onClose();
+
+    finishRename();
+    await vi.waitFor(() => expect(Notice).toHaveBeenCalledWith("File renamed. Its content and history are preserved."));
+
+    expect(modal.contentEl.childElementCount).toBe(0);
+    expect(plugin.listRoomPathCollisions).toHaveBeenCalledTimes(1);
   });
 });

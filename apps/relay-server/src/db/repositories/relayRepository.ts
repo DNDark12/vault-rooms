@@ -1104,6 +1104,14 @@ export class RelayRepository {
     return this.files.listFiles(roomId);
   }
 
+  listPathCollisions(roomId: string) {
+    return this.files.listPathCollisions(roomId);
+  }
+
+  renameFileById(input: { roomId: string; fileId: string; relativePath: string; actorUserId: string }) {
+    return this.files.renameFileById(input);
+  }
+
   getFile(roomId: string, relativePath: string): FileRow | null {
     return this.files.getFile(roomId, relativePath);
   }

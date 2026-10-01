@@ -1,6 +1,6 @@
 import { MarkdownView, Notice, Plugin, type Editor, type ObsidianProtocolData } from "obsidian";
 import type { EditorView } from "@codemirror/view";
-import { isCrdtEligiblePath } from "@vault-rooms/protocol";
+import { isCrdtEligiblePath, portablePathKey } from "@vault-rooms/protocol";
 import {
   RelayApiClient,
   type AclRuleSummary,
@@ -8,6 +8,9 @@ import {
   type FriendSummary,
   type InviteLinkResponse,
   type RoomSummary,
+  type PathCollisionGroup,
+  type RenameRoomFileInput,
+  type RenameRoomFileResponse,
   type TeamDirectoryEntry,
   type TeamMemberSummary,
   type TeamSummary
@@ -17,7 +20,7 @@ import { CrdtDocStore } from "./crdtDocStore.js";
 import { CrdtSessionManager } from "./crdtSession.js";
 import { CrdtOperationJournal } from "./crdtOperationJournal.js";
 import { isTransportFailure, userFacingError } from "./errorMessages.js";
-import { isCrdtManagedLocalChange, registerMountedRoomWatcher } from "./fileWatcher.js";
+import { isCrdtManagedLocalChange, registerMountedRoomWatcher, relativePathWithinMount } from "./fileWatcher.js";
 import { confirmModal } from "./modals/ConfirmModal.js";
 import {
   DEFAULT_SETTINGS,
@@ -36,7 +39,7 @@ import { InviteMemberModal } from "./modals/InviteMemberModal.js";
 import { JoinTeamModal } from "./modals/JoinTeamModal.js";
 import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
-import { isConflictCopyPath, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, VaultSyncEngine, type MountedRoomState, type PendingCrdtOperation } from "./syncClient.js";
+import { collisionRecoveryPaths, getMountedFileEntry, isMountedPathBlocked, localPortablePathError, isConflictCopyPath, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, VaultSyncEngine, type MountedRoomState, type PendingCrdtOperation } from "./syncClient.js";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
@@ -57,7 +60,7 @@ import {
 import { notifyIfUpdateAvailable } from "./updateNotice.js";
 
 function crdtRenameMarkerKey(roomId: string, oldRelativePath: string, newRelativePath: string): string {
-  return `${roomId} ${oldRelativePath} ${newRelativePath}`;
+  return `${roomId} ${portablePathKey(oldRelativePath)} ${portablePathKey(newRelativePath)}`;
 }
 
 export default class VaultRoomsPlugin extends Plugin {
@@ -108,6 +111,7 @@ export default class VaultRoomsPlugin extends Plugin {
    *  pushes a crdt_rename the server must reject - which is what turned a name collision into an
    *  unbounded rename/announce loop between two devices. Consumed (removed) by the first matching
    *  watcher event; see renameCrdtDiskFile and watchMountedRoom's callback. */
+  private invalidNamesNotified = new Set<string>();
   private readonly selfInflictedRenames = new Set<string>();
   private readonly crdtEditorController: CrdtEditorController = new CrdtEditorController({
     getSessionManager: () => this.crdtSessionManager ?? undefined,
@@ -133,7 +137,17 @@ export default class VaultRoomsPlugin extends Plugin {
       return self.vaultAdapter;
     },
     getSyncEngine: () => self.syncEngine,
+    onInvalidLocalPath: (roomId, relativePath, error) => self.notifyInvalidLocalPath(roomId, relativePath, error),
+    handleCrdtRoomSnapshot: async (roomId, files, previousPaths) => {
+      const manager = self.crdtSessionManager;
+      if (manager) await manager.handleRoomSnapshot(roomId, files, previousPaths);
+      else if (previousPaths?.length && files.some((file) => file.crdtEpoch !== undefined)) {
+        throw new Error("The CRDT session manager must be available before recovering a quarantined document.");
+      }
+    },
     ensureCrdtSession: async (roomId, relativePath, brandNewNote) => {
+      const state = self.settings.mountedRooms[roomId];
+      if (!state || isMountedPathBlocked(state, relativePath)) return;
       if (brandNewNote) {
         await self.crdtOperationJournal.recordCreate(roomId, relativePath);
         return;
@@ -151,7 +165,10 @@ export default class VaultRoomsPlugin extends Plugin {
     },
     unsubscribeRoom: (roomId) => self.syncSocket?.unsubscribe(roomId),
     unbindCrdtRoom: (roomId) => self.crdtEditorController.unbindRoom(roomId),
-    disposeCrdtRoom: async (roomId) => self.crdtSessionManager?.disposeRoom(roomId)
+    disposeCrdtRoom: async (roomId) => {
+      const room = self.settings.mountedRooms[roomId];
+      await self.crdtSessionManager?.disposeRoom(roomId, room ? collisionRecoveryPaths(room) : []);
+    }
   }))(this);
   private readonly serverConnectionManager: ServerConnectionManager = new ServerConnectionManager(this.ctx);
 
@@ -1327,6 +1344,26 @@ export default class VaultRoomsPlugin extends Plugin {
     new JoinTeamModal(this).open();
   }
 
+  async listRoomPathCollisions(roomId: string): Promise<PathCollisionGroup[]> {
+    return (await this.apiFor(this.requireActiveServer()).listPathCollisions(roomId)).groups;
+  }
+
+  async renameRoomFile(roomId: string, input: RenameRoomFileInput): Promise<RenameRoomFileResponse> {
+    const server = this.requireActiveServer();
+    const result = await this.apiFor(server).renameRoomFile(roomId, input);
+    const room = this.settings.mountedRooms[roomId];
+    if (room && !room.unmounted && room.serverId === server.id) this.syncSocket?.refreshRoom(roomId);
+    return result;
+  }
+
+  private notifyInvalidLocalPath(roomId: string, relativePath: string, error: Error): void {
+    const key = `${roomId}\0${relativePath}\0${error.message}`;
+    const notified = (this.invalidNamesNotified ??= new Set<string>());
+    if (notified.has(key)) return;
+    notified.add(key);
+    new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "Choose a portable file name.")}`);
+  }
+
   openRoomSettingsModal(room: RoomSummary): void {
     new RoomSettingsModal(this, room).open();
   }
@@ -1364,14 +1401,12 @@ export default class VaultRoomsPlugin extends Plugin {
       // resolves (see refreshRooms) so a room whose freshest state flips enablement rebinds too.
       const room = this.visibleRooms.find((candidate) => candidate.id === roomId);
       if (!resolveRoomCrdtEnabled(room, roomState)) continue;
-      const prefix = `${roomState.mountPath.replace(/\/+$/, "")}/`;
-      if (!vaultPath.startsWith(prefix)) continue;
-      const relativePath = vaultPath.slice(prefix.length);
+      const relativePath = relativePathWithinMount(vaultPath, roomState.mountPath);
       // A conflict copy is a local-only artifact (see isConflictCopyPath) never known to the server
       // under this relativePath - the watcher path already filters these out before they ever reach
       // isCrdtManagedLocalChange (see relativePathIfWatchable in fileWatcher.ts), but opening one
       // directly in an editor bypasses that filter, so it's repeated here explicitly.
-      if (!relativePath || isConflictCopyPath(relativePath) || !isCrdtEligiblePath(relativePath)) continue;
+      if (!relativePath || isMountedPathBlocked(roomState, relativePath) || isConflictCopyPath(relativePath) || !isCrdtEligiblePath(relativePath)) continue;
       return { roomId, relativePath };
     }
     return undefined;
@@ -1511,29 +1546,29 @@ export default class VaultRoomsPlugin extends Plugin {
    *  yet (nothing to reconcile against). */
   private async readCrdtDiskText(roomId: string, relativePath: string): Promise<string | null> {
     const roomState = this.settings.mountedRooms[roomId];
-    if (!roomState) return null;
+    if (!roomState || isMountedPathBlocked(roomState, relativePath)) return null;
     const path = `${roomState.mountPath.replace(/\/+$/, "")}/${relativePath}`;
     if (!(await this.vaultAdapter.exists(path))) return null;
     return this.vaultAdapter.read(path);
   }
 
   private isCrdtTextPending(roomId: string, relativePath: string): boolean {
-    return this.settings.mountedRooms[roomId]?.pendingCrdtTextPaths?.includes(relativePath) ?? false;
+    return this.settings.mountedRooms[roomId]?.pendingCrdtTextPaths?.some((path) => portablePathKey(path) === portablePathKey(relativePath)) ?? false;
   }
 
   private queuePendingCrdtText(roomId: string, relativePath: string): void {
     const room = this.settings.mountedRooms[roomId];
     if (!room) return;
     const paths = (room.pendingCrdtTextPaths ??= []);
-    if (paths.includes(relativePath)) return;
+    if (paths.some((path) => portablePathKey(path) === portablePathKey(relativePath))) return;
     paths.push(relativePath);
     void this.saveSettings();
   }
 
   private async clearPendingCrdtText(roomId: string, relativePath: string): Promise<void> {
     const room = this.settings.mountedRooms[roomId];
-    if (!room?.pendingCrdtTextPaths?.includes(relativePath)) return;
-    room.pendingCrdtTextPaths = room.pendingCrdtTextPaths.filter((path) => path !== relativePath);
+    if (!room?.pendingCrdtTextPaths?.some((path) => portablePathKey(path) === portablePathKey(relativePath))) return;
+    room.pendingCrdtTextPaths = room.pendingCrdtTextPaths.filter((path) => portablePathKey(path) !== portablePathKey(relativePath));
     await this.saveSettings();
   }
 
@@ -1544,6 +1579,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const room = this.settings.mountedRooms[roomId];
     if (!room || room.unmounted || room.canPushLocalEdits !== true) return;
     for (const relativePath of [...(room.pendingCrdtTextPaths ?? [])]) {
+      if (isMountedPathBlocked(room, relativePath)) continue;
       const visible = this.visibleRooms.find((candidate) => candidate.id === roomId);
       if (!resolveRoomCrdtEnabled(visible, room)) {
         const coordinator = this.roomCoordinators.get(roomId);
@@ -1569,7 +1605,7 @@ export default class VaultRoomsPlugin extends Plugin {
    *  editor (coexistence: an unopened CRDT file's on-disk copy still needs to stay current). */
   private async writeCrdtDiskText(roomId: string, relativePath: string, text: string): Promise<void> {
     const roomState = this.settings.mountedRooms[roomId];
-    if (!roomState) return;
+    if (!roomState || isMountedPathBlocked(roomState, relativePath)) return;
     const path = `${roomState.mountPath.replace(/\/+$/, "")}/${relativePath}`;
     await this.vaultAdapter.write(path, text);
   }
@@ -1608,7 +1644,7 @@ export default class VaultRoomsPlugin extends Plugin {
       throw new Error("The room's server is not active, so its resolved delete could not be queued.");
     }
     const current = await this.apiFor(server).readFile(roomId, relativePath);
-    room.files[relativePath] = {
+    room.files[getMountedFileEntry(room, relativePath)?.[0] ?? relativePath] = {
       serverVersion: current.version,
       serverSha256: current.sha256,
       localSha256: null,
@@ -1638,7 +1674,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const trackServerFile = async (relativePath: string): Promise<boolean> => {
       try {
         const current = await this.apiFor(server).readFile(roomId, relativePath);
-        room.files[relativePath] = {
+        room.files[getMountedFileEntry(room, relativePath)?.[0] ?? relativePath] = {
           serverVersion: current.version,
           serverSha256: current.sha256,
           localSha256: null,
@@ -1659,7 +1695,10 @@ export default class VaultRoomsPlugin extends Plugin {
         );
       }
       await trackServerFile(outcome.relativePath);
-      if (operation.kind === "rename") delete room.files[operation.oldRelativePath];
+      if (operation.kind === "rename" && portablePathKey(operation.oldRelativePath) !== portablePathKey(outcome.relativePath)) {
+        const oldEntry = getMountedFileEntry(room, operation.oldRelativePath);
+        if (oldEntry) delete room.files[oldEntry[0]];
+      }
       coordinator.handleLocalChange(operation.deleteAfterAck ? "delete" : "modify", outcome.relativePath);
     } else if (operation.deleteAfterAck) {
       if (operation.kind === "rename" && await trackServerFile(operation.oldRelativePath)) {
@@ -1667,9 +1706,9 @@ export default class VaultRoomsPlugin extends Plugin {
       }
     } else {
       if (operation.kind === "rename" && await trackServerFile(operation.oldRelativePath)) {
-        coordinator.handleLocalChange("delete", operation.oldRelativePath);
+        coordinator.handleLocalChange("delete", operation.oldRelativePath, { renamedToRelativePath: outcome.relativePath });
       }
-      coordinator.handleLocalChange("create", outcome.relativePath);
+      coordinator.handleLocalChange("create", outcome.relativePath, operation.kind === "rename" ? { renamedFromRelativePath: operation.oldRelativePath } : undefined);
     }
     await this.saveSettings();
   }
@@ -1726,6 +1765,10 @@ export default class VaultRoomsPlugin extends Plugin {
         // Without this, a rejected push (unsupported file type, size limit, stale permissions,
         // etc.) vanished silently - the file just never showed up for teammates with no
         // indication anything went wrong.
+        if ((error as { code?: unknown })?.code === "INVALID_PATH") {
+          this.notifyInvalidLocalPath(roomId, relativePath, error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
         console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
         new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "the server rejected the change.")}`);
       },
@@ -1744,6 +1787,11 @@ export default class VaultRoomsPlugin extends Plugin {
         // "modify" | "delete". A rename fully inside the room additionally carries renameHint on
         // each of the two calls (see fileWatcher.ts's RenameHint doc comment).
         const changeType = event.type as "create" | "modify" | "delete";
+        if (isMountedPathBlocked(roomState, relativePath)) return;
+        if (renameHint) {
+          const otherPath = "renamedToRelativePath" in renameHint ? renameHint.renamedToRelativePath : renameHint.renamedFromRelativePath;
+          if (isMountedPathBlocked(roomState, otherPath)) return;
+        }
         // Use persisted CRDT mode until the first room refresh completes.
         const crdtEnabled = resolveRoomCrdtEnabled(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
         // Third-hardware-testing-round item 1's invariant, resolved early here too (not just at its
@@ -1787,6 +1835,13 @@ export default class VaultRoomsPlugin extends Plugin {
           }
         }
 
+        if (canPushLocalEdits && crdtEnabled) {
+          const newPath = renameHint && "renamedToRelativePath" in renameHint ? renameHint.renamedToRelativePath :
+            changeType !== "delete" && !getMountedFileEntry(roomState, relativePath)?.[1].serverSha256 ? relativePath : undefined;
+          const error = newPath ? localPortablePathError(newPath) : undefined;
+          if (error) { this.notifyInvalidLocalPath(roomId, newPath!, error); return; }
+        }
+
         if (
           changeType === "delete" &&
           crdtEnabled &&
@@ -1828,7 +1883,7 @@ export default class VaultRoomsPlugin extends Plugin {
         // resolves true) opens the session then. Same "unknown/stale state must never risk a push"
         // invariant the CAS lane already enforces below (third-hardware-testing-round item 1).
         if (canPushLocalEdits && isCrdtManagedLocalChange({ crdtEnabled }, changeType, relativePath)) {
-          if (changeType === "create") {
+          if (changeType === "create" && !getMountedFileEntry(roomState, relativePath)?.[1].serverSha256) {
             void this.crdtOperationJournal.recordCreate(roomId, relativePath).catch((error) => {
               console.error(`Vault Rooms: couldn't journal CRDT create for "${relativePath}"`, error);
             });
@@ -1884,7 +1939,7 @@ export default class VaultRoomsPlugin extends Plugin {
         if (!canPushLocalEdits) {
           return;
         }
-        coordinator.handleLocalChange(changeType, relativePath);
+        coordinator.handleLocalChange(changeType, relativePath, renameHint);
       },
       this.app.vault.configDir
     );
@@ -1947,6 +2002,14 @@ export default class VaultRoomsPlugin extends Plugin {
           const roomState = this.settings.mountedRooms[roomId];
           return Boolean(roomState && !roomState.unmounted) && resolveRoomCrdtEnabled(this.visibleRooms.find((room) => room.id === roomId), roomState);
         },
+        isPathBlocked: (roomId, relativePath) => {
+          const room = this.settings.mountedRooms[roomId];
+          return !room || isMountedPathBlocked(room, relativePath);
+        },
+        preserveRecoveredText: async (roomId, relativePath, text, expectedSha256) => {
+          const room = this.settings.mountedRooms[roomId];
+          if (room) await this.syncEngine.preserveRecoveredText(room, relativePath, text, expectedSha256, server.deviceName);
+        },
         isPathProtectedByJournal: (roomId, relativePath) => this.crdtOperationJournal.isPathProtected(roomId, relativePath),
         readDiskText: (roomId, relativePath) => this.readCrdtDiskText(roomId, relativePath),
         writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
@@ -1997,6 +2060,7 @@ export default class VaultRoomsPlugin extends Plugin {
       onRoomSnapshotApplied: (roomId, receiptsSupported) => {
         this.crdtOperationJournal.markSnapshotReady(roomId, receiptsSupported);
         void this.reconcilePendingCrdtText(roomId);
+        this.roomCoordinators.get(roomId)?.retryPending();
         this.handleActiveEditorChanged();
       },
       onStateChange: (state) => {
@@ -2053,7 +2117,9 @@ export default class VaultRoomsPlugin extends Plugin {
         if (state) state.unmounted = true;
         this.stopWatchingRoom(roomId);
         this.crdtEditorController.unbindRoom(roomId);
-        void this.crdtSessionManager?.disposeRoom(roomId);
+        void this.crdtSessionManager?.disposeRoom(roomId, state ? collisionRecoveryPaths(state) : []).catch((error) => {
+          console.error(`Vault Rooms: couldn't retire CRDT state for room ${roomId}`, error);
+        });
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`${room?.name ?? "A room"} was deleted by the owner/admin.`);
@@ -2065,7 +2131,9 @@ export default class VaultRoomsPlugin extends Plugin {
         if (state) state.unmounted = true;
         this.stopWatchingRoom(roomId);
         this.crdtEditorController.unbindRoom(roomId);
-        void this.crdtSessionManager?.disposeRoom(roomId);
+        void this.crdtSessionManager?.disposeRoom(roomId, state ? collisionRecoveryPaths(state) : []).catch((error) => {
+          console.error(`Vault Rooms: couldn't retire CRDT state for room ${roomId}`, error);
+        });
         void this.saveSettings();
         this.renderOpenRoomsViews();
         new Notice(`Your access to ${room?.name ?? "a room"} was revoked.`);
@@ -2089,7 +2157,9 @@ export default class VaultRoomsPlugin extends Plugin {
           // presence facades they own) have to come down with it - otherwise a pane keeps a compartment
           // pointed at a session the engine no longer maintains.
           this.crdtEditorController.unbindRoom(roomId);
-          void this.crdtSessionManager?.disposeRoom(roomId);
+          void this.crdtSessionManager?.disposeRoom(roomId, roomState ? collisionRecoveryPaths(roomState) : []).catch((error) => {
+            console.error(`Vault Rooms: couldn't retire CRDT state for room ${roomId}`, error);
+          });
           void this.reconcilePendingCrdtText(roomId);
         }
         // Harmless when enabling, and necessary so open panes rebind once the fresh snapshot this same

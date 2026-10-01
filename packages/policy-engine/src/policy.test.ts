@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AclRule, Permission } from "@vault-rooms/protocol";
-import { BLOCKED_PERMISSIONS, EDITOR_PERMISSIONS, evaluatePolicy, expandPreset, isPermissionPreset } from "./index.js";
+import { BLOCKED_PERMISSIONS, EDITOR_PERMISSIONS, evaluatePolicy, expandPreset, isPermissionPreset, pathMatches } from "./index.js";
 
 const baseRule = {
   id: "acl_1",
@@ -22,6 +22,40 @@ function decide(permission: Permission, rules: AclRule[] = [], overrides = {}) {
     ...overrides
   });
 }
+
+describe("portable ACL path matching", () => {
+  it.each([
+    ["Secret/Café.md", "secret/Cafe\u0301.MD"],
+    ["SECRET/CAFE\u0301.MD", "Secret/Café.md"],
+    ["Secret/Café/**/*", "secret/Cafe\u0301/Nội dung.md"],
+    ["SECRET/CAFE\u0301/**/*", "Secret/Café/Nội dung.md"],
+    ["Secret/Café/*.MD", "secret/Cafe\u0301/Plan.md"],
+    ["SECRET/CAFE\u0301/*.md", "Secret/Café/Plan.MD"],
+    ["Secret/**/Café.*", "secret/nested/Cafe\u0301.MD"],
+    ["SECRET/**/CAFE\u0301.*", "Secret/nested/Café.md"]
+  ])("matches %s against the case/Unicode alias %s", (pattern, path) => {
+    expect(pathMatches(pattern, path)).toBe(true);
+  });
+
+  it("preserves folder boundaries and single-wildcard depth", () => {
+    expect(pathMatches("Secret/Café/**/*", "secret/caféteria/Note.md")).toBe(false);
+    expect(pathMatches("Secret/*.md", "secret/nested/Note.md")).toBe(false);
+    expect(pathMatches("Secret/Note.md", "other/Note.md")).toBe(false);
+  });
+
+  it.each(["Secret/Café/Plan.md", "Secret/Café/**/*", "Secret/Café/*.md"])("preserves explicit deny for aliases under %s", (pathPattern) => {
+    const rules: AclRule[] = [
+      { ...baseRule, id: "allow", permissions: ["file:write"] },
+      { ...baseRule, id: "deny", effect: "deny", permissions: ["file:write"], pathPattern }
+    ];
+    const decision = decide("file:write", rules, {
+      resource: { type: "file", roomId: "room_1", roomOwnerUserId: "usr_a", relativePath: "SECRET/CAFE\u0301/PLAN.MD" }
+    });
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBe("explicit deny");
+    expect(decision.matchedRuleIds).toEqual(["deny"]);
+  });
+});
 
 describe("policy engine", () => {
   it("a blocked preset denies every data operation a grant can give", () => {

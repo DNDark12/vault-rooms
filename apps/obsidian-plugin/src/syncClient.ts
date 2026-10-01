@@ -1,4 +1,4 @@
-import { isCrdtEligiblePath, isEligibleBinaryPath } from "@vault-rooms/protocol";
+import { assertPortablePath, isCrdtEligiblePath, isEligibleBinaryPath, portablePathKey } from "@vault-rooms/protocol";
 
 export type VaultChangeEvent = { type: "create" | "modify" | "delete"; path: string } | { type: "rename"; path: string; oldPath: string };
 
@@ -42,6 +42,8 @@ export type MountedFileState = {
    *  re-pushed" (localDeleted). Optional/additive so settings saved before this field existed load
    *  unaffected (treated as "no pending delete"). */
   localDeleted?: boolean;
+  /** Durable CAS case-only rename intent; delete the old name before creating this spelling. */
+  renamedToRelativePath?: string;
   /** Set when the last push attempt for this path failed with a terminal (non-retryable) error,
    *  e.g. FILE_TOO_LARGE or INVALID_PATH - see pushCoordinator.ts's isTerminalSyncError. Retrying a
    *  terminal error can never succeed without the user changing something, so the retry driver
@@ -98,7 +100,62 @@ export type MountedRoomState = {
    *  started while the relay was stopped). Snapshot/materialized-file handling protects these
    *  paths until the next CRDT handshake has merged the on-disk text. */
   pendingCrdtTextPaths?: string[];
+  /** Quarantined server identities. Never infer a local deletion from these entries. */
+  pathCollisionKeys?: string[];
+  /** Resolved keys remain paused until local preservation and authoritative pull finish. */
+  pathRecoveryKeys?: string[];
+  /** Retain original spellings to recover exact-hashed CRDT caches across a restart. */
+  pathCollisionPaths?: string[];
 };
+
+/** Looks up tracking by portable identity while retaining the stored spelling. */
+export function getMountedFileEntry(room: MountedRoomState, relativePath: string): [string, MountedFileState] | undefined {
+  const key = portablePathKey(relativePath);
+  const entries = Object.entries(room.files).filter(([path]) => portablePathKey(path) === key);
+  const live = entries.filter(([, state]) => state.serverSha256 !== null || state.dirty);
+  const candidates = live.length > 0 ? live : entries;
+  return candidates.find(([path]) => path === relativePath) ?? candidates[0];
+}
+
+/** Conflicting legacy tracking is preserved and paused instead of choosing a local winner. */
+export function isMountedPathBlocked(room: MountedRoomState, relativePath: string, allowRecovery = false): boolean {
+  const key = portablePathKey(relativePath);
+  if (room.pathCollisionKeys?.some((path) => portablePathKey(path) === key)) return true;
+  if (!allowRecovery && room.pathRecoveryKeys?.some((path) => portablePathKey(path) === key)) return true;
+  const live = Object.entries(room.files).filter(([path, state]) =>
+    portablePathKey(path) === key && (state.serverSha256 !== null || state.dirty));
+  return live.length > 1;
+}
+
+export function updatePathCollisionKeys(room: MountedRoomState, files: Array<{ relativePath: string; pathCollision?: boolean }>): void {
+  const priorPaths = collisionRecoveryPaths(room);
+  const collisionPaths = files.filter((file) => file.pathCollision).map((file) => file.relativePath);
+  const currentKeys = new Set(collisionPaths.map(portablePathKey));
+  room.pathCollisionKeys = [...currentKeys];
+  room.pathRecoveryKeys = [...new Set(priorPaths.map(portablePathKey))].filter((key) => !currentKeys.has(key));
+  room.pathCollisionPaths = [...new Set([...priorPaths, ...collisionPaths])];
+}
+
+export function collisionRecoveryPaths(room: MountedRoomState): string[] {
+  const keys = new Set([...(room.pathCollisionKeys ?? []), ...(room.pathRecoveryKeys ?? [])].map(portablePathKey));
+  return [...new Set([...(room.pathCollisionPaths ?? []), ...keys, ...Object.keys(room.files).filter((path) => keys.has(portablePathKey(path)))])];
+}
+
+export function completePathRecovery(room: MountedRoomState, relativePath: string): void {
+  const key = portablePathKey(relativePath);
+  room.pathRecoveryKeys = room.pathRecoveryKeys?.filter((path) => portablePathKey(path) !== key);
+  room.pathCollisionPaths = room.pathCollisionPaths?.filter((path) => portablePathKey(path) !== key);
+}
+
+/** Only names about to be created/changed use portable validation; legacy reads/deletes remain valid. */
+export function localPortablePathError(relativePath: string): Error | undefined {
+  try {
+    assertPortablePath(relativePath);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
 
 /**
  * Resolves whether a room is CRDT-enabled with a safe startup fallback chain: prefer the freshest,
@@ -257,14 +314,45 @@ export class VaultSyncEngine {
     await this.vault.write(path, content);
   }
 
+  /** Protect data kept while a server key was quarantined before pulling its surviving identity. */
+  async preserveRecoveredLocalFile(
+    room: MountedRoomState,
+    remote: { relativePath: string; sha256: string | null },
+    deviceName: string
+  ): Promise<void> {
+    if (isMountedPathBlocked(room, remote.relativePath, true)) return;
+    const entry = getMountedFileEntry(room, remote.relativePath);
+    const relativePath = entry?.[0] ?? remote.relativePath;
+    const path = mountedPath(room, relativePath);
+    if (await this.vault.exists(path)) {
+      const content = await this.readContent(path, relativePath);
+      await this.preserveRecoveredText(room, relativePath, content, remote.sha256, deviceName);
+    }
+    // The preserved copy owns divergence now; authoritative recovery must pull before any retry.
+    if (entry) room.files[entry[0]] = { ...entry[1], dirty: false, localDeleted: false, renamedToRelativePath: undefined, syncError: undefined };
+  }
+
+  async preserveRecoveredText(room: MountedRoomState, relativePath: string, content: string, expectedSha256: string | null, deviceName: string): Promise<void> {
+    if (await VaultSyncEngine.sha256(content) === expectedSha256) return;
+    const path = mountedPath(room, relativePath);
+    await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), relativePath, content);
+  }
+
   async applyRemoteChange(
     room: MountedRoomState,
     remote: { relativePath: string; version: number; sha256: string; content: string; contentEncoding?: "utf8" | "base64" },
     deviceName: string,
-    allowSameVersion = false
+    allowSameVersion = false,
+    recoveringCollision = false
   ): Promise<void> {
-    const path = mountedPath(room, remote.relativePath);
-    const existingState = room.files[remote.relativePath];
+    if (isMountedPathBlocked(room, remote.relativePath, recoveringCollision)) return;
+    const entry = getMountedFileEntry(room, remote.relativePath);
+    const trackedPath = entry?.[0] ?? remote.relativePath;
+    const existingState = entry?.[1];
+    // A case-only CAS rename arrives as delete/create. Its tombstone may retain the old
+    // spelling in tracking, but the recreated file must use the new server spelling on disk.
+    const diskRelativePath = existingState?.serverSha256 === null ? remote.relativePath : trackedPath;
+    const path = mountedPath(room, diskRelativePath);
     if (existingState && (remote.version < existingState.serverVersion || (!allowSameVersion && remote.version === existingState.serverVersion))) {
       return;
     }
@@ -274,7 +362,7 @@ export class VaultSyncEngine {
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
     await this.writeContent(path, remote.relativePath, remote.content, remote.contentEncoding);
-    room.files[remote.relativePath] = {
+    room.files[trackedPath] = {
       serverVersion: remote.version,
       serverSha256: remote.sha256,
       localSha256: await VaultSyncEngine.sha256(remote.content),
@@ -286,10 +374,14 @@ export class VaultSyncEngine {
     room: MountedRoomState,
     remote: { relativePath: string; version: number },
     deviceName: string,
-    allowSameVersion = false
+    allowSameVersion = false,
+    recoveringCollision = false
   ): Promise<void> {
-    const path = mountedPath(room, remote.relativePath);
-    const existingState = room.files[remote.relativePath];
+    if (isMountedPathBlocked(room, remote.relativePath, recoveringCollision)) return;
+    const entry = getMountedFileEntry(room, remote.relativePath);
+    const trackedPath = entry?.[0] ?? remote.relativePath;
+    const path = mountedPath(room, trackedPath);
+    const existingState = entry?.[1];
     if (existingState && (remote.version < existingState.serverVersion || (!allowSameVersion && remote.version === existingState.serverVersion))) {
       return;
     }
@@ -302,7 +394,7 @@ export class VaultSyncEngine {
     if (await this.vault.exists(path)) {
       await this.vault.delete(path);
     }
-    room.files[remote.relativePath] = {
+    room.files[trackedPath] = {
       serverVersion: remote.version,
       serverSha256: null,
       localSha256: null,
@@ -311,7 +403,7 @@ export class VaultSyncEngine {
   }
 
   async pushLocalChange(room: MountedRoomState, relativePath: string, deviceName: string): Promise<void> {
-    if (isConflictCopyPath(relativePath)) {
+    if (isConflictCopyPath(relativePath) || isMountedPathBlocked(room, relativePath)) {
       return;
     }
     const path = mountedPath(room, relativePath);
@@ -323,10 +415,12 @@ export class VaultSyncEngine {
       return;
     }
     const content = await this.readContent(path, relativePath, { forPush: true });
-    const current = room.files[relativePath];
+    const entry = getMountedFileEntry(room, relativePath);
+    const trackedPath = entry?.[0] ?? relativePath;
+    const current = entry?.[1];
     const localSha = await VaultSyncEngine.sha256(content);
     if (current?.serverSha256 === localSha) {
-      room.files[relativePath] = { ...current, localSha256: localSha, dirty: false, localDeleted: false };
+      room.files[trackedPath] = { ...current, localSha256: localSha, dirty: false, localDeleted: false };
       return;
     }
 
@@ -336,9 +430,10 @@ export class VaultSyncEngine {
     // non-null. Otherwise a file recreated after a remote delete would send the tombstone's real
     // (non-zero) version and the server would unconditionally reject it with FILE_DELETED.
     const baseVersion = current?.serverSha256 != null ? current.serverVersion : 0;
+    if (baseVersion === 0) assertPortablePath(relativePath);
     try {
-      const result = await this.api.writeFile(room.roomId, relativePath, baseVersion, content);
-      room.files[relativePath] = {
+      const result = await this.api.writeFile(room.roomId, trackedPath, baseVersion, content);
+      room.files[trackedPath] = {
         serverVersion: result.version,
         serverSha256: result.sha256,
         localSha256: localSha,
@@ -348,7 +443,7 @@ export class VaultSyncEngine {
       if (isVersionConflict(error)) {
         await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), relativePath, content);
         await this.writeContent(path, relativePath, error.serverContent);
-        room.files[relativePath] = {
+        room.files[trackedPath] = {
           serverVersion: error.serverVersion,
           serverSha256: error.serverSha256,
           localSha256: await VaultSyncEngine.sha256(error.serverContent),
@@ -368,22 +463,24 @@ export class VaultSyncEngine {
    * rename bounce within one debounce window), the delete is skipped rather than deleting a file
    * that's actually back - whatever recreated it will push its own create/modify separately.
    */
-  async pushLocalDelete(room: MountedRoomState, relativePath: string): Promise<void> {
-    if (isConflictCopyPath(relativePath)) {
+  async pushLocalDelete(room: MountedRoomState, relativePath: string, options: { renamedToRelativePath?: string } = {}): Promise<void> {
+    if (isConflictCopyPath(relativePath) || isMountedPathBlocked(room, relativePath)) {
       return;
     }
-    const current = room.files[relativePath];
+    const entry = getMountedFileEntry(room, relativePath);
+    const trackedPath = entry?.[0] ?? relativePath;
+    const current = entry?.[1];
     if (!current || current.serverSha256 === null) {
-      delete room.files[relativePath];
+      delete room.files[trackedPath];
       return;
     }
     const path = mountedPath(room, relativePath);
-    if (await this.vault.exists(path)) {
-      room.files[relativePath] = { ...current, localDeleted: false };
+    if (!options.renamedToRelativePath && await this.vault.exists(path)) {
+      room.files[trackedPath] = { ...current, localDeleted: false };
       return;
     }
-    await this.api.deleteFile(room.roomId, relativePath, current.serverVersion);
-    delete room.files[relativePath];
+    await this.api.deleteFile(room.roomId, trackedPath, current.serverVersion);
+    delete room.files[trackedPath];
   }
 
   /**
@@ -432,7 +529,7 @@ export class VaultSyncEngine {
       return;
     }
     for (const [relativePath, tracked] of Object.entries(room.files)) {
-      if (tracked.dirty || tracked.serverSha256 === null) {
+      if (isMountedPathBlocked(room, relativePath) || tracked.dirty || tracked.serverSha256 === null) {
         continue;
       }
       // CRDT writes bypass CAS hashes and are not local divergence.

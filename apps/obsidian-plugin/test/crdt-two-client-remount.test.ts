@@ -23,7 +23,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { DataAdapter } from "obsidian";
 import WsWebSocket from "ws";
 import * as Y from "yjs";
-import type { SyncClientMessage, SyncServerMessage } from "@vault-rooms/protocol";
+import { portablePathKey, type SyncClientMessage, type SyncServerMessage } from "@vault-rooms/protocol";
 import { createApp } from "vault-rooms-relay/app";
 import { RelayApiClient } from "../src/apiClient.js";
 import { CrdtDocStore } from "../src/crdtDocStore.js";
@@ -80,15 +80,19 @@ async function waitFor(check: () => boolean | Promise<boolean>, description: str
 /** In-memory vault: `files` doubles as "what the user sees on disk". */
 class FakeVaultAdapter implements VaultAdapter {
   readonly files = new Map<string, string>();
+  caseInsensitive = false;
+  private actualPath(path: string): string {
+    return this.caseInsensitive ? [...this.files.keys()].find((candidate) => portablePathKey(candidate) === portablePathKey(path)) ?? path : path;
+  }
   onWrite: ((path: string, content: string) => void) | undefined;
   private listener: ((event: VaultChangeEvent) => void) | null = null;
 
   async read(path: string): Promise<string> {
-    return this.files.get(path) ?? "";
+    return this.files.get(this.actualPath(path)) ?? "";
   }
   async write(path: string, content: string): Promise<void> {
-    const existed = this.files.has(path);
-    this.files.set(path, content);
+    const existed = this.files.has(this.actualPath(path));
+    this.files.set(this.actualPath(path), content);
     this.onWrite?.(path, content);
     this.listener?.({ type: existed ? "modify" : "create", path });
   }
@@ -97,18 +101,18 @@ class FakeVaultAdapter implements VaultAdapter {
   }
   async writeBinary(): Promise<void> {}
   async delete(path: string): Promise<void> {
-    this.files.delete(path);
+    this.files.delete(this.actualPath(path));
     this.listener?.({ type: "delete", path });
   }
   async rename(oldPath: string, newPath: string): Promise<void> {
-    const content = this.files.get(oldPath);
+    const content = this.files.get(this.actualPath(oldPath));
     if (content === undefined) return;
-    this.files.delete(oldPath);
+    this.files.delete(this.actualPath(oldPath));
     this.files.set(newPath, content);
     this.listener?.({ type: "rename", path: newPath, oldPath });
   }
   async exists(path: string): Promise<boolean> {
-    return this.files.has(path);
+    return this.files.has(this.actualPath(path));
   }
   async list(prefix: string): Promise<string[]> {
     return [...this.files.keys()].filter((path) => path.startsWith(prefix));
@@ -1060,5 +1064,31 @@ describe("CRDT two-client: live cursors", () => {
     b.type("!");
     await waitFor(() => a.editorText() === "hello **world**!", "A to receive B's keystroke after the format");
     expect(b.editorText()).toBe("hello **world**!");
+  });
+});
+
+
+describe("portable CRDT two-client identity", () => {
+  it("keeps one document across aliases and a case-only rename on insensitive vaults", { timeout: 30_000 }, async () => {
+    const { app, room, a, b } = await setupCrdtRoomWithTwoDevices();
+    a.vault.caseInsensitive = b.vault.caseInsensitive = true;
+    await a.vault.write(`${MOUNT}/Café.md`, "portable text");
+    const original = await a.crdt.ensureSession(room.id, "Café.md", { brandNewNote: true });
+    await original.initialSync;
+    await waitFor(() => b.crdt.isSessionOpen(room.id, "Café.md"), "peer CRDT session");
+    const alias = await b.crdt.ensureSession(room.id, "cafe\u0301.MD");
+    await alias.initialSync;
+    expect(alias.relativePath).toBe("Café.md");
+    expect(alias.ytext.toString()).toBe("portable text");
+    const repo = (app as unknown as { testRepo: { getFile(roomId: string, relativePath: string): { id: string } | null } }).testRepo;
+    const identity = repo.getFile(room.id, "Café.md")!.id;
+    await a.vault.rename(`${MOUNT}/Café.md`, `${MOUNT}/café.md`);
+    await a.crdt.renameSession(room.id, "Café.md", "café.md");
+    await waitFor(() => [...b.vault.files.keys()].includes(`${MOUNT}/café.md`), "peer's physical case-only rename");
+    expect(a.crdt.isSessionOpen(room.id, "CAFÉ.MD")).toBe(true);
+    expect(repo.getFile(room.id, "cafe\u0301.MD")!.id).toBe(identity);
+    alias.ytext.insert(alias.ytext.length, " from peer");
+    await waitFor(() => original.ytext.toString() === "portable text from peer", "post-rename text convergence");
+    expect([...b.vault.files.keys()].filter((path) => portablePathKey(path) === portablePathKey(`${MOUNT}/Café.md`))).toEqual([`${MOUNT}/café.md`]);
   });
 });

@@ -76,6 +76,20 @@ describe("panel copy contract", () => {
     expect(PANEL_COPY.connection.ownedBy("Huy")).not.toBe(PANEL_COPY.connection.someoneElse);
   });
 
+  it("keeps owner path recovery copy centralized and actionable", () => {
+    expect(PANEL_COPY.pathCollisions.heading).toBe("File names need a choice");
+    expect(PANEL_COPY.pathCollisions.rename).toBe("Rename file");
+    expect(PANEL_COPY.pathCollisions.newPath).toBe("New path inside this room");
+    expect(PANEL_COPY.pathCollisions.description).toMatch(/rename/i);
+    expect(PANEL_COPY.pathCollisions.description).toMatch(/distinct/i);
+    expect(PANEL_COPY.pathCollisions.unavailable).toMatch(/try again/i);
+    const modalSource = readFileSync(new URL("../modals/RoomSettingsModal.ts", import.meta.url), "utf8");
+    const retyped = stringLeaves(PANEL_COPY.pathCollisions)
+      .map(([, value]) => value)
+      .filter((value) => modalSource.includes(`"${value}"`));
+    expect(retyped).toEqual([]);
+  });
+
   it("covers every function-valued copy member", () => {
     expect(functionPaths(PANEL_COPY).sort()).toEqual([
       "connection.ownedBy",
