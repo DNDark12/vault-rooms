@@ -99,6 +99,8 @@ Below that are three tabs:
 
 - **Rooms** - the working list. Each row says where the room is on this computer and offers **Open**,
   **Add to this computer**, **Remove from this computer**, or **Switch**, plus **Manage**.
+  A paused-name count and **Review paused files** appear when server names overlap, local aliases collide,
+  or saved work still needs recovery. Other files in that room continue syncing.
 - **People** - grouped by what someone can actually reach (**Can edit**/**Can view** and whether it comes
   through a team), not by Friends versus Teams. Teams are listed below with their own **Manage**.
 - **Activity** - the audit log. It is **not shown at all** unless you can read it: the server owner and team
@@ -123,6 +125,10 @@ Access can be withdrawn at four granularities, all enforced by the relay:
 - **A team membership** - they keep access granted directly or via another team.
 - **A whole user** - revokes their account and all their device tokens, closing their live sessions.
 - **A single device** - for a lost or compromised machine, without touching that person's other devices.
+
+**Blocked** denies every data permission for the selected path scope, including reading, writing, creating,
+deleting and renaming. On upgrade, old deny rules containing exactly the former View-only permission set are
+widened to this full block. Custom partial deny rules keep their explicit permissions.
 
 Deleting a **room** removes it and its history from the server; files already downloaded to someone's vault stay
 on their disk, only the sync tracking is dropped. Deleting a **team** removes its memberships and grants, not the
@@ -210,6 +216,15 @@ Vault Rooms never grants permission to run someone else's plugin code.
   filesystem-specific equivalences; real Windows/macOS vault validation is still required before release.
   Ambiguous local tracking and pending offline CRDT structural operations remain paused after server repair;
   their local files and quarantined caches are retained, including across unmount, without blind replay.
+  **Review paused files** explains which side needs repair: an owner repairs server names in **Manage**, while
+  each device can rename an exact local file or folder to a distinct name. Ambiguous pending operations require
+  explicit preservation and reload; their original intent is kept in recovery history. Do not delete recovery
+  copies until you have checked their contents.
+- A file classified as text must contain valid UTF-8. Other encodings are rejected with a visible sync error
+  and retained locally, rather than decoded with damaged characters. Convert such files to UTF-8 before syncing.
+- Plugin reload retains pending CRDT saves within the same Obsidian process and refuses recovery if those saves
+  fail. Forced process termination can still lose edits that have not reached disk. After a relay restart,
+  durable CRDT updates are materialized when a device subscribes; until then the whole-file copy may be older.
 - Whole-file retention is latest-only. Superseded and deleted content is reference-checked and collected; a
   default 256 MiB stored-content ceiling prevents unbounded growth. Lowering the ceiling never blocks reads,
   deletes, cleanup, or a replacement that reduces usage. The physical SQLite file only returns freed pages to
@@ -283,6 +298,28 @@ whether this device's login still works - then names the step that failed.
 - **"Invalid or expired credentials" on one server only:** that server's data was reset after your token was
   issued. Forget the stale entry in Settings → Vault Rooms → Servers, then join again.
 - **Writes are denied:** check the access rules for that user or team and path pattern.
+- **A room reports paused file names:** open **Rooms → Review paused files**. Server collisions require the
+  room owner to rename the server files; local collisions can be repaired on this computer. Failed recovery
+  stays paused and offers **Retry recovery**, preserving local work.
+
+## Installing the Obsidian plugin manually
+
+Build with `pnpm build:plugin`, then copy root `manifest.json`, `main.js` and `styles.css` into
+`<vault>/.obsidian/plugins/vault-rooms/` and reload Obsidian. Keep the three files from the same build.
+
+## Release checklist
+
+1. Update both manifests, every workspace package version and `versions.json` together. The current prepared
+   version is **0.2.9**; see [release notes and verification](docs/superpowers/specs/2026-10-02-release-0.2.9.md).
+2. Run `pnpm typecheck`, `pnpm test`, `pnpm build:plugin` and `pnpm audit --prod`. The build includes the bundle
+   scan. Commit the regenerated root assets and verify that a rebuild leaves them unchanged.
+3. Push `develop` and check its CI, then integrate into `main` and check that CI too. Branch CI validates
+   metadata, typechecks, tests and builds; a branch push does not publish a release.
+4. Complete Windows/macOS filesystem checks and two-device Obsidian smoke for sync/CRDT changes. Two vaults on
+   one Mac are a useful local smoke, but do not prove the two-machine LAN or Windows behavior.
+5. Only after the release gates pass, push an annotated tag matching the manifest version exactly, without a
+   `v` prefix. `.github/workflows/release.yml` builds that tag and creates a **draft** GitHub release containing
+   `main.js`, `manifest.json` and `styles.css`. Review the notes and assets before publishing.
 
 ## License
 

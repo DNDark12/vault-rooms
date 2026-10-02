@@ -288,6 +288,46 @@ describe("CrdtSessionManager - first create", () => {
     expect(session.epoch).toBe(3);
   });
 
+  it.each([
+    ["Live.md", "live.md"],
+    ["Café.md", "Cafe\u0301.md"]
+  ])("keeps an editor alias %s → %s from undoing a pending portable rename", async (oldPath, newPath) => {
+    const reassigned = vi.fn();
+    const harness = createHarness({ onPathReassigned: reassigned });
+    harness.disk.set(`room_1/${oldPath}`, "unique editor text");
+    const session = await openFreshlyCreatedSession(harness, "room_1", oldPath, 3);
+    harness.manager.bindToEditor("room_1", oldPath);
+    // Obsidian moves the active pane before the vault rename event reaches the journal.
+    // The portable key already has this session, whose spelling is still the old server name.
+    harness.disk.delete(`room_1/${oldPath}`);
+    harness.disk.set(`room_1/${newPath}`, "unique editor text");
+    expect(await harness.manager.ensureSession("room_1", newPath)).toBe(session);
+    expect(harness.renames).toEqual([]);
+    expect(reassigned).not.toHaveBeenCalled();
+
+    const renaming = harness.manager.renameSession("room_1", oldPath, newPath);
+    await vi.waitFor(() => expect(harness.sent.some(message => message.type === "crdt_rename")).toBe(true));
+    const request = harness.sent.find(message => message.type === "crdt_rename") as Extract<SyncClientMessage, { type: "crdt_rename" }>;
+    await ack(harness, { type: "crdt_renamed", requestId: request.requestId, roomId: "room_1", oldRelativePath: oldPath, relativePath: newPath, epoch: 3 });
+    await expect(renaming).resolves.toEqual({ relativePath: newPath });
+    expect(session.relativePath).toBe(newPath);
+    expect(session.ytext.toString()).toBe("unique editor text");
+    expect(harness.disk.get(`room_1/${newPath}`)).toBe("unique editor text");
+    expect(harness.renames).toEqual([]);
+    await harness.manager.dispose();
+  });
+
+  it("adopts the stored spelling of a portable alias without reporting a different-file collision", async () => {
+    const reassigned = vi.fn();
+    const harness = createHarness({ onPathReassigned: reassigned });
+    harness.manager.registerKnownEpoch("room_1", "Live.md", 3);
+    const session = await harness.manager.ensureSession("room_1", "live.md");
+    expect(session.relativePath).toBe("Live.md");
+    expect(harness.renames).toEqual([]);
+    expect(reassigned).not.toHaveBeenCalled();
+    await harness.manager.dispose();
+  });
+
   // Tenth hardware-testing round (2026-07-24): the WS log showed an endless
   // crdt_update -> crdt_rejected stream while the note refused to sync. A rejection with no
   // currentEpoch (NOT_FOUND: no document at this path at all) had no recovery, so the session kept

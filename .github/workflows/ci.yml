@@ -1,0 +1,50 @@
+name: Check Vault Rooms
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check release metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import assert from "node:assert/strict";
+          const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+          const manifest = read("manifest.json");
+          assert.deepEqual(manifest, read("apps/obsidian-plugin/manifest.json"));
+          for (const path of ["package.json", "apps/obsidian-plugin/package.json", "apps/relay-server/package.json", "packages/protocol/package.json", "packages/policy-engine/package.json"])
+            assert.equal(read(path).version, manifest.version, path);
+          assert.equal(read("versions.json")[manifest.version], manifest.minAppVersion);
+          NODE
+      - name: Typecheck and test
+        run: |
+          pnpm run typecheck
+          pnpm run test
+      - name: Build and scan plugin
+        run: pnpm run build:plugin
+      - name: Check committed release assets
+        run: git diff --exit-code -- main.js manifest.json styles.css

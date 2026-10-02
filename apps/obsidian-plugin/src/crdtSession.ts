@@ -689,18 +689,17 @@ export class CrdtSessionManager implements CrdtWsBridge {
     const created = await this.ensureEpoch(roomId, requestedPath, brandNewNote, operationId);
     this.assertOpenCurrent(roomId, requestedPath, requestedKey, requestedGeneration);
     const epoch = created.epoch;
-    let relativePath = requestedPath;
-    let key = requestedKey;
-    const assignedKey = sessionKey(roomId, created.relativePath);
-    const assignedGeneration = this.identityGenerations.get(assignedKey) ?? 0;
-    this.assertOpenCurrent(roomId, created.relativePath, assignedKey, assignedGeneration);
-    if (created.relativePath !== requestedPath) {
+    const relativePath = created.relativePath;
+    const key = sessionKey(roomId, relativePath);
+    const assignedGeneration = this.identityGenerations.get(key) ?? 0;
+    this.assertOpenCurrent(roomId, relativePath, key, assignedGeneration);
+    // Case/normalization aliases still name this document. The vault rename journal owns any
+    // pending spelling change; an editor opening the alias must not move the file back.
+    if (key !== requestedKey) {
       // Name collision: someone else already owns this path, so the server gave *this* note its own
       // disambiguated one. Move the local vault file to match before opening the session, so the
       // file the user is looking at and the document being synced are the same thing. Everything
       // below then proceeds entirely under the assigned path.
-      relativePath = created.relativePath;
-      key = sessionKey(roomId, relativePath);
       await this.deps.renameDiskFile(roomId, requestedPath, relativePath);
       this.assertOpenCurrent(roomId, requestedPath, requestedKey, requestedGeneration);
       this.assertOpenCurrent(roomId, relativePath, key, assignedGeneration);
