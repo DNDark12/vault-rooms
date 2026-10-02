@@ -1,6 +1,6 @@
 # Portable room paths: integrity design
 
-**Workflow:** refactor. **Status:** implemented and locally verified on `develop`; initial fixes are preserved in `fd5885a`. No push or release.
+**Workflow:** refactor. **Status:** implemented and locally verified on `develop`; initial fixes are preserved in `fd5885a`. The evidence below describes the initial delivery. Follow-up recovery/native smoke and approved branch integration are recorded in [0.2.9 delivery](2026-10-02-release-0.2.9.md); no release tag has been published.
 
 ## Problem and scope
 
@@ -32,7 +32,7 @@ Path identity and sync are non-trivial integrity changes. Verify Unicode/case al
 - Independent protocol and server review was performed; the main agent reviewed plugin integration and the final diff. No dependencies or live data were changed.
 - Final verification on 2026-10-01: `node_modules/.bin/vitest run` passed **95 suites / 1246 tests** (including both two-client CAS/CRDT integration suites and the embedded concurrent-persistence regression); `node_modules/.bin/tsc -b` passed.
 - Plugin build (`node esbuild.config.mjs`), root asset sync and `node scripts/scan-bundle.mjs` passed; root `main.js` is **1,852,357 bytes**. No scanner allowances changed for this task. `git diff --check` passed.
-- Remaining release gate: real Windows/macOS filesystem and two-device Obsidian smoke have not been performed. Ambiguous local tracking/journal intents deliberately remain paused and require manual resolution; their data is retained.
+- Initial release gates were real Windows/macOS filesystem and two-device Obsidian smoke. Native two-vault macOS smoke was subsequently performed; Windows and two physical machines remain gates. Ambiguous local tracking/journal intents deliberately remain paused and require explicit recovery; their data is retained.
 
 Auto-Dispatch invariants: Inv-0 main agent chose the route; Inv-1 this full artifact exists; Inv-2 sync identity/integrity stayed non-trivial; Inv-3 the sole primary label is `refactor`; Inv-4 planning, TDD, review and verification were supporting workflows.
 

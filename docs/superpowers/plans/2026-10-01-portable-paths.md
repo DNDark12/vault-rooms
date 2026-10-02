@@ -1,6 +1,6 @@
 # Portable Room Paths Implementation Plan
 
-> **For agentic workers:** Execute task by task with TDD; parallelize independent plugin and owner-UI assignments only after the server contract exists. No dependency changes or push.
+> **Original implementation scope:** Execute task by task with TDD; parallelize independent plugin and owner-UI assignments only after the server contract exists. That delivery excluded dependency changes and push. Later approved updates and branch integration are covered by [0.2.9 release preparation](../specs/2026-10-02-release-0.2.9.md).
 
 **Goal:** One portable path identity across ACLs, DB and clients, with lossless owner recovery for legacy collisions.
 
@@ -38,3 +38,5 @@
 - [x] Review committed baseline plus all task changes/untracked files; run focused tests, `node_modules/.bin/tsc -b`, full Vitest, plugin build/asset sync, bundle scan and `git diff --check`. Record evidence and remaining hardware checks in the spec.
 
 Final local verification: **95 suites / 1246 tests**, typecheck, plugin build/asset sync, bundle scan and whitespace check passed on 2026-10-01. Root `main.js` rebuilt. Hardware smoke remains a release gate, not a claim from the case-insensitive fixtures. No dependency changes, push or release.
+
+Follow-up recovery fixes and native-editor rename verification are complete in the [current delivery evidence](../specs/2026-10-02-release-0.2.9.md); the counts above describe this plan's initial implementation.

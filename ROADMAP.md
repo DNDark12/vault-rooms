@@ -75,6 +75,18 @@ plugin does today and [SECURITY.md](SECURITY.md) for the threat model.
   unusable, reports how many files went unsynced, and the prompt is raised once per connection even when
   requests fail concurrently.
 
+## Prepared for 0.2.9 — release gates pending
+
+- **Portable names and recovery.** Shared path identity across the relay, ACLs and clients; legacy collisions
+  remain paused until the owner and affected devices preserve their work and repair names. The panel exposes
+  paused files and recovery actions. Case-only editor renames preserve the intended spelling.
+- **Sync integrity fixes.** Blob deletion follows durable metadata, Live editing mode changes coordinate CRDT
+  saves, and recovery/reload retain local edits and pending intentions. Blocked denies all data permissions.
+- **Transport and validation fixes.** Pinned raw uploads, request authentication/CORS, observable embedded DB
+  flush failures, LAN discovery without interface inventory, and invalid UTF-8 rejection.
+- Local automated checks and a native two-vault macOS smoke pass. Windows and two physical machines remain
+  required before a release tag. See [0.2.9 release notes and evidence](docs/superpowers/specs/2026-10-02-release-0.2.9.md).
+
 ## Next up
 
 - **Raw binary sync framing (Phase C).** Replace base64-over-JSON for capable peers with raw WebSocket frames and

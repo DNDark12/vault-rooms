@@ -1,6 +1,6 @@
 # Portable recovery bug fixes
 
-Primary workflow: bug-triage. User authorized all seven findings in the follow-up RCA. Work on existing develop; no new branch or dependencies.
+Primary workflow: bug-triage. User authorized all seven findings in the follow-up RCA. Original recovery work used existing develop without a new branch or dependency changes. Later release/dependency approvals are recorded in [0.2.9 delivery](../specs/2026-10-02-release-0.2.9.md).
 
 Status: all five execution steps completed. Independent review findings were reproduced and fixed before final verification. See the paired RCA for implementation details and remaining release gates.
 
@@ -26,4 +26,4 @@ Tests use deterministic controlled promises and real classes. No timers increase
 - Typecheck, plugin build, asset sync, bundle scan and whitespace check pass; root main.js rebuilt.
 - Bounded independent review: 7 scratch regressions and 194 tests / 8 focused suites pass, with no remaining actionable findings in the reviewed boundaries.
 - Additional review fixes cover non-awaited module reload and failed-save handoff, queued stale rename, cached text beneath an ambiguous folder, and rollback preserving unrelated concurrent journal intentions.
-- Real Obsidian, Windows/macOS and two-device smoke remain required before release. No push or live-vault mutation is part of this delivery.
+- At this recovery delivery, real Obsidian and hardware smoke remained unverified and no push/live-vault mutation occurred. The subsequent native two-vault macOS smoke passed; Windows and two physical machines remain release gates. See [current verification and branch delivery](../specs/2026-10-02-release-0.2.9.md).
