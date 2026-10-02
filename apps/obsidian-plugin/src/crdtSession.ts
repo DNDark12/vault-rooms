@@ -969,12 +969,15 @@ export class CrdtSessionManager implements CrdtWsBridge {
       for (const snapshot of snapshots.filter(({ session }) => session.roomId === roomId)) {
         const { session } = snapshot;
         if (this.sessions.get(sessionKey(roomId, session.relativePath)) !== session) continue;
+        let savedLatestRevision: boolean;
         do {
           await this.deps.docStore.save(roomId, session.relativePath, session.epoch, snapshot.state, snapshot.retainPriorEpochs);
-          if (session.revision === snapshot.revision) break;
-          snapshot.revision = session.revision;
-          snapshot.state = Y.encodeStateAsUpdate(session.doc);
-        } while (true);
+          savedLatestRevision = session.revision === snapshot.revision;
+          if (!savedLatestRevision) {
+            snapshot.revision = session.revision;
+            snapshot.state = Y.encodeStateAsUpdate(session.doc);
+          }
+        } while (!savedLatestRevision);
       }
       // A later plugin instance may execute this retained save after the original caller failed.
       // Retire its successfully persisted documents here so that handoff also stops presence.

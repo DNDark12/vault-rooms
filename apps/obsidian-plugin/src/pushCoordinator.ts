@@ -234,7 +234,7 @@ export class RoomPushCoordinator {
           if (state) {
             // `syncError` is rendered in the rooms panel, so it is a display sink. `onError` below
             // still receives the raw error for logging and diagnostics.
-            this.deps.room.files[entry![0]] = {
+            this.deps.room.files[entry[0]] = {
               ...state,
               syncError: userFacingError(error, "The file could not be synced.")
             };

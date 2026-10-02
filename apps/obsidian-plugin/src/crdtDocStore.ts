@@ -5,12 +5,12 @@ type RoomCacheAccess = {
   tail: Promise<void>;
   failedRetirement?: () => Promise<unknown>;
 };
-type RuntimeCacheAccess = WeakMap<DataAdapter, Map<string, RoomCacheAccess>>;
-const CACHE_ACCESS_KEY = Symbol.for("vault-rooms.crdt-cache-access.v1");
 /** Deliberately shared volatile ownership: Obsidian unload cannot await final writes, and plugin
  * reload evaluates a new module while the old one may still own the same adapter/cache directory.
- * Keep failed final saves available to the next instance; this is not process-crash durability. */
-const runtimeCacheAccess = (globalThis as unknown as Record<symbol, RuntimeCacheAccess | undefined>)[CACHE_ACCESS_KEY] ??= new WeakMap();
+ * Anchor the private registry to the public vault adapter so different window globals also share
+ * ownership. Keep failed final saves available to the next instance; this is not crash durability. */
+const CACHE_ACCESS_KEY = Symbol.for("vault-rooms.crdt-cache-access.v1");
+type CacheAccessAdapter = DataAdapter & { readonly [CACHE_ACCESS_KEY]?: Map<string, RoomCacheAccess> };
 
 export type CrdtRoomAccessOptions = { retainFailure?: boolean };
 
@@ -49,10 +49,11 @@ export class CrdtDocStore {
   /** Register ownership synchronously, before any await. Call store methods directly inside the
    * callback: recursively acquiring this queue for the same room would wait on itself. */
   withRoomAccess<T>(roomId: string, operation: () => Promise<T>, options: CrdtRoomAccessOptions = {}): Promise<T> {
-    let rooms = runtimeCacheAccess.get(this.adapter);
+    const adapter = this.adapter as CacheAccessAdapter;
+    let rooms = adapter[CACHE_ACCESS_KEY];
     if (!rooms) {
       rooms = new Map();
-      runtimeCacheAccess.set(this.adapter, rooms);
+      Object.defineProperty(adapter, CACHE_ACCESS_KEY, { value: rooms });
     }
     const directory = this.roomDir(roomId);
     const access = rooms.get(directory) ?? { tail: Promise.resolve() };

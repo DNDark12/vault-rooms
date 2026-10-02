@@ -1331,6 +1331,31 @@ describe("CRDT collision recovery", () => {
     await restarted.manager.dispose();
   });
 
+  it("saves a newer revision that arrives while the final disposal save is pending", async () => {
+    const store = makeDocStore();
+    const h = createHarness({}, store);
+    h.disk.set("r/Note.md", "initial text");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    const started = deferred();
+    const gate = deferred();
+    const originalSave = store.save.bind(store);
+    const save = vi.spyOn(store, "save").mockImplementationOnce(async (...args) => {
+      started.resolve();
+      await gate.promise;
+      await originalSave(...args);
+    });
+    const disposing = h.manager.dispose();
+    await started.promise;
+    session.ytext.insert(session.ytext.length, " LATE UNIQUE EDIT");
+    gate.resolve();
+    await disposing;
+    expect(save).toHaveBeenCalledTimes(2);
+    const restored = new Y.Doc();
+    Y.applyUpdate(restored, (await store.load("r", "Note.md", 0))!);
+    expect(restored.getText(CRDT_TEXT_KEY).toString()).toBe("initial text LATE UNIQUE EDIT");
+    restored.destroy();
+  });
+
   it("rejects global disposal without destroying the last unsaved quarantined document on write failure", async () => {
     const store = makeDocStore();
     const h = createHarness({}, store);

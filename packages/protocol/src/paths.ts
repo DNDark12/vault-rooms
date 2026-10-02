@@ -7,7 +7,7 @@ const ELIGIBLE_EXTENSIONS = new Set([".md", ".txt", ".canvas", ".json", ".csv", 
 // Bound paths before they reach filesystem APIs.
 const MAX_PATH_LENGTH = 1024;
 const MAX_SEGMENT_LENGTH = 255;
-const NON_PORTABLE_SEGMENT = /[\u0001-\u001f<>:"|?*]|[. ]$/;
+const NON_PORTABLE_SEGMENT = /[<>:"|?*]|[. ]$/;
 const WINDOWS_RESERVED_SEGMENT = /^(con|prn|aux|nul|(?:com|lpt)[1-9¹²³])(?:\.|$)/i;
 
 export function normalizeRelativePath(input: string): string {
@@ -36,7 +36,12 @@ export function portablePathKey(input: string): string {
 /** Validate new names without making existing non-portable names unreadable. */
 export function assertPortablePath(input: string): void {
   const normalized = normalizeRelativePath(input);
-  if (normalized.split("/").some((segment) => NON_PORTABLE_SEGMENT.test(segment) || WINDOWS_RESERVED_SEGMENT.test(segment))) {
+  if (normalized.split("/").some((segment) => {
+    for (let index = 0; index < segment.length; index++) {
+      if (segment.charCodeAt(index) < 0x20) return true;
+    }
+    return NON_PORTABLE_SEGMENT.test(segment) || WINDOWS_RESERVED_SEGMENT.test(segment);
+  })) {
     throw new AppError("INVALID_PATH", "Choose a file or folder name that works on Windows and macOS.", 422);
   }
 }

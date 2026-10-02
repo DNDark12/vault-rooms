@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { buildSync } from "esbuild";
+import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import type { DataAdapter } from "obsidian";
 import { CrdtDocStore, CrdtDocStoreQuotaExceededError, MAX_PERSISTED_CRDT_DOC_BYTES } from "./crdtDocStore.js";
 
@@ -65,7 +68,67 @@ function deferred() {
   return { promise, resolve };
 }
 
+// Independent JS globals model evaluating a reloaded module in a different window. The vault's
+// public adapter is shared, but neither module nor window-local state can carry cache ownership.
+function storeClassInAnotherWindow(): typeof CrdtDocStore {
+  const bundle = buildSync({
+    entryPoints: [fileURLToPath(new URL("./crdtDocStore.ts", import.meta.url))],
+    bundle: true,
+    format: "cjs",
+    write: false
+  });
+  const module = { exports: {} as { CrdtDocStore: typeof CrdtDocStore } };
+  runInNewContext(bundle.outputFiles[0]!.text, { module, exports: module.exports, crypto, TextEncoder, Uint8Array, ArrayBuffer });
+  return module.exports.CrdtDocStore;
+}
+
 describe("CrdtDocStore", () => {
+  it("shares pending cache ownership with a module evaluated in another window", async () => {
+    const adapter = asDataAdapter(new FakeDataAdapter());
+    const old = new CrdtDocStore(adapter, "vault-rooms/crdt");
+    await old.save("r", "Note.md", 0, new Uint8Array([1]));
+    const started = deferred();
+    const gate = deferred();
+    const writing = old.withRoomAccess("r", async () => {
+      started.resolve();
+      await gate.promise;
+      await old.save("r", "Note.md", 0, new Uint8Array([7]));
+    });
+    await started.promise;
+    const OtherWindowStore = storeClassInAnotherWindow();
+    const fresh = new OtherWindowStore(adapter, "vault-rooms/crdt");
+    const reading = vi.fn(() => fresh.load("r", "Note.md", 0));
+    const loaded = fresh.withRoomAccess("r", reading);
+    await Promise.resolve();
+    await Promise.resolve();
+    const readBeforeSave = reading.mock.calls.length;
+    gate.resolve();
+    await writing;
+    const result = await loaded;
+    expect(readBeforeSave).toBe(0);
+    expect(result).toEqual(new Uint8Array([7]));
+  });
+
+  it("retains failed final saves before recovery in another window", async () => {
+    const adapter = new FakeDataAdapter();
+    const old = new CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    await old.save("r", "Note.md", 0, new Uint8Array([1]));
+    const write = vi.spyOn(adapter, "writeBinary")
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockRejectedValueOnce(new Error("disk full"));
+    await expect(old.withRoomAccess("r", () => old.save("r", "Note.md", 0, new Uint8Array([2])), { retainFailure: true }))
+      .rejects.toThrow("disk full");
+    const OtherWindowStore = storeClassInAnotherWindow();
+    const fresh = new OtherWindowStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    const reading = vi.fn(() => fresh.load("r", "Note.md", 0));
+    await expect(fresh.withRoomAccess("r", reading)).rejects.toThrow("disk full");
+    expect(reading).not.toHaveBeenCalled();
+    expect(await fresh.load("r", "Note.md", 0)).toEqual(new Uint8Array([1]));
+    write.mockRestore();
+    expect(await fresh.withRoomAccess("r", reading)).toEqual(new Uint8Array([2]));
+    expect(reading).toHaveBeenCalledOnce();
+  });
+
   it("shares room ownership across distinct stores even after the module is reloaded", async () => {
     const adapter = asDataAdapter(new FakeDataAdapter());
     const old = new CrdtDocStore(adapter, "vault-rooms/crdt");
