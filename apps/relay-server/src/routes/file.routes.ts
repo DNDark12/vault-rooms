@@ -83,16 +83,18 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
       const result = await repo.durable(() => repo.renameFileById({ roomId: room.id, fileId: before.id, relativePath, actorUserId: principal.userId }));
       const file = repo.getFileById(before.id)!;
       const deletedVersion = Math.max(before.version + 1, ...repo.listFiles(room.id).filter(row => row.path_key === before.path_key && row.deleted_at).map(row => row.version));
-      return { before, result, blobKeys, file, deletedVersion };
+      return { before, result, blobKeys, file, deletedVersion, crdtEnabled: currentRoom.crdt_enabled };
     });
     const { before, result, file, deletedVersion } = outcome;
     const updatedBy = { userId: principal.userId, displayName: principal.userDisplayName };
+    let needsSnapshot = Boolean(before.path_collision);
     try {
       if (!before.path_collision) {
         const { content, file: current } = await options.contentWriteService.readFileContent({ roomId: room.id, relativePath: file.relative_path });
         const latest = repo.getFileById(file.id);
         const currentRoom = repo.getRoom(room.id);
         if (currentRoom && latest && !latest.deleted_at && latest.id === current.id && latest.relative_path === file.relative_path && latest.version === file.version && latest.crdt_epoch === file.crdt_epoch && current.version === file.version) {
+          needsSnapshot = currentRoom.crdt_enabled !== outcome.crdtEnabled;
           const sameKey = before.path_key === file.path_key;
           const aclRules = repo.listAclRulesForRoom(room.id);
           const canRead = (recipient: typeof principal, path: string) => hasRoomPermission({ repo, principal: recipient, room: currentRoom, permission: "file:read", relativePath: path, aclRules });
@@ -114,15 +116,18 @@ export function registerFileRoutes(app: FastifyInstance, repo: RelayRepository, 
           if (!sameKey)
             options.presenceService.removeDocument(room.id, before.relative_path, before.crdt_epoch);
         }
+        else {
+          needsSnapshot = true;
+        }
       }
     }
     catch (error) {
+      needsSnapshot = true;
       // The durable rename succeeded; a concurrent move/delete is reconciled below.
       console.warn("Vault Rooms relay: could not announce a repaired file name", error);
     }
-    // Quarantined names are ambiguous on a recipient's disk. Reconcile the repaired identities
-    // from a full ACL-filtered snapshot instead of renaming/deleting whichever alias exists locally.
-    const currentRoom = repo.getRoom(room.id);
+    // Quarantined names need a full snapshot; stale or failed fanout also reconciles current state.
+    const currentRoom = needsSnapshot ? repo.getRoom(room.id) : null;
     if (currentRoom)
       options.connectionRegistry?.broadcastToRoom(room.id, connection => roomSnapshot(repo, connection.principal!, currentRoom, connection.capabilities, createId("req")), {
         connectionFilter: connection => Boolean(connection.principal && connection.capabilities.portablePaths)

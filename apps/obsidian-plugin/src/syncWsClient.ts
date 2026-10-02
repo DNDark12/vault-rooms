@@ -565,7 +565,7 @@ export class RoomSyncSocket {
           continue;
         }
         const local = getMountedFileEntry(room, file.relativePath)?.[1];
-        if (local?.dirty || local?.localDeleted) {
+        if (!recovering && (local?.dirty || local?.localDeleted)) {
           // A local edit or delete is pending push; let the normal push/conflict path reconcile
           // this file instead of auto-applying the remote state over it (which would otherwise
           // silently resurrect a file the user just deleted, or clobber an unpushed edit).
@@ -592,9 +592,14 @@ export class RoomSyncSocket {
         }
         if (recovering) completePathRecovery(room, file.relativePath);
       } catch (error) {
+        if (previousCollisions.has(portablePathKey(file.relativePath))) {
+          (room.pathRecoveryErrors ??= {})[portablePathKey(file.relativePath)] = toError(error).message;
+          changed = true;
+        }
         console.error(`Vault Rooms: failed to reconcile snapshot file "${file.relativePath}"`, toError(error));
       }
     }
+    if (await this.deps.syncEngine.recoverAbsentSnapshotPaths(room, files, this.server.deviceName)) changed = true;
     if (changed) {
       this.deps.onApplied();
     }

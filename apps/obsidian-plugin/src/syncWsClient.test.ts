@@ -37,6 +37,14 @@ class FakeVaultAdapter implements VaultAdapter {
     this.files.delete(path);
   }
 
+  async recoverFile(path: string, copyPath: string, replacement?: { content: string; contentEncoding: "utf8" | "base64" }): Promise<void> {
+    if (this.files.has(path)) await this.rename(path, copyPath);
+    if (replacement) {
+      if (this.files.has(path)) throw new Error("Destination exists");
+      this.files.set(path, replacement.content);
+    }
+  }
+
   async rename(oldPath: string, newPath: string): Promise<void> {
     const content = this.files.get(oldPath);
     if (content === undefined) return;
@@ -1337,5 +1345,19 @@ describe("snapshot refresh", () => {
     socket.refreshRoom("r");
     expect(sockets[0]?.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === "subscribe_room")).toHaveLength(2);
     socket.disconnect();
+  });
+});
+
+describe("authoritative recovery of absent paths", () => {
+  it("preserves local data and clears abandoned intent keys absent from the snapshot", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Room/offline.md", "abandoned local edit");
+    const room: MountedRoomState = { roomId: "r", mountPath: "Room", pathRecoveryKeys: ["offline.md"], pathCollisionPaths: ["offline.md"], files: {} };
+    const socket = new RoomSyncSocket(createServer(), { ...createDeps(), getMountedRoom: () => room,
+      getApi: () => new FakeApi() as unknown as RelayApiClient, syncEngine: new VaultSyncEngine(vault, new FakeApi()) });
+    await (socket as unknown as { handleMessage(raw: string): Promise<void> }).handleMessage(JSON.stringify({ type: "room_snapshot", roomId: "r", files: [] }));
+    expect([...vault.files.values()]).toContain("abandoned local edit");
+    expect(vault.files.has("Room/offline.md")).toBe(false);
+    expect(isMountedPathBlocked(room, "offline.md")).toBe(false);
   });
 });

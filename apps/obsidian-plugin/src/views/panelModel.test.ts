@@ -156,6 +156,17 @@ describe("panelModel", () => {
     expect(descriptor.tabs.activity.attentionCount).toBe(2);
   });
 
+  it("keeps paused file names visible and actionable for a room member", () => {
+    const descriptor = panelModel({
+      ...baseState(),
+      rooms: [{ id: "paused-files", name: "Daily", mounted: true, mountedServerId: "server_active", conflictCount: 0, canManage: false, storedBytes: 0, pausedPathCount: 2 }]
+    });
+    expect(descriptor.tabs.rooms.attentionCount).toBe(1);
+    expect(descriptor.rooms[0]).toMatchObject({ attention: true, status: "2 file names are paused" });
+    expect(descriptor.rooms[0]?.actions).toContain("recover-paths");
+    expect(descriptor.rooms[0]?.actions).not.toContain("manage");
+  });
+
   it("keeps stale rows visible and marks them non-authoritative", () => {
     const descriptor = panelModel({
       ...baseState(),

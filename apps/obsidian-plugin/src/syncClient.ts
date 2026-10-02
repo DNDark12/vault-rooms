@@ -14,6 +14,14 @@ export interface VaultAdapter {
   delete(path: string): Promise<void>;
   /** Moves a file in place. */
   rename(oldPath: string, newPath: string): Promise<void>;
+  /** Move the current file to a local conflict copy, then create the survivor exclusively.
+   * Recovery must never overwrite content read before an asynchronous preservation/download. */
+  recoverFile?(path: string, conflictCopyPath: string, replacement?: { content: string; contentEncoding: "utf8" | "base64" }): Promise<void>;
+  /** Explicit local repair bypasses portable alias lookup only for the selected exact file. */
+  renameExact?(oldPath: string, newPath: string): Promise<void>;
+  /** Scoped synchronous tree discovery, including empty aliased folders. */
+  pathCollisions?(prefix: string): Array<{ key: string; paths: string[] }>;
+  isFolderExact?(path: string): boolean;
   exists(path: string): Promise<boolean>;
   list(prefix: string): Promise<string[]>;
   /** Returns an unsubscribe function - callers are responsible for calling it once they no longer
@@ -72,6 +80,11 @@ export type PendingCrdtOperation =
       deleteAfterAck?: true;
     };
 
+export type LocalPathRepairOptions = {
+  preserveCrdt(paths: string[]): Promise<void>;
+  persist(): Promise<void>;
+};
+
 export type MountedRoomState = {
   roomId: string;
   /** Which saved server (settings.servers[].id) this room's files live on. Only one server is
@@ -106,6 +119,10 @@ export type MountedRoomState = {
   pathRecoveryKeys?: string[];
   /** Retain original spellings to recover exact-hashed CRDT caches across a restart. */
   pathCollisionPaths?: string[];
+  pathLocalCollisionKeys?: string[];
+  pathRecoveryErrors?: Record<string, string>;
+  /** Local repair history retains tracking and structural intent without replaying it. */
+  pathRepairBackups?: Array<{ repairedAt: string; files: Record<string, MountedFileState>; operations: PendingCrdtOperation[] }>;
 };
 
 /** Looks up tracking by portable identity while retaining the stored spelling. */
@@ -121,6 +138,7 @@ export function getMountedFileEntry(room: MountedRoomState, relativePath: string
 export function isMountedPathBlocked(room: MountedRoomState, relativePath: string, allowRecovery = false): boolean {
   const key = portablePathKey(relativePath);
   if (room.pathCollisionKeys?.some((path) => portablePathKey(path) === key)) return true;
+  if (room.pathLocalCollisionKeys?.some((path) => pathMatchesKey(relativePath, portablePathKey(path)))) return true;
   if (!allowRecovery && room.pathRecoveryKeys?.some((path) => portablePathKey(path) === key)) return true;
   const live = Object.entries(room.files).filter(([path, state]) =>
     portablePathKey(path) === key && (state.serverSha256 !== null || state.dirty));
@@ -145,6 +163,12 @@ export function completePathRecovery(room: MountedRoomState, relativePath: strin
   const key = portablePathKey(relativePath);
   room.pathRecoveryKeys = room.pathRecoveryKeys?.filter((path) => portablePathKey(path) !== key);
   room.pathCollisionPaths = room.pathCollisionPaths?.filter((path) => portablePathKey(path) !== key);
+  if (room.pathRecoveryErrors) delete room.pathRecoveryErrors[key];
+}
+
+function pathMatchesKey(path: string, key: string): boolean {
+  const candidate = portablePathKey(path);
+  return candidate === key || candidate.startsWith(`${key}/`);
 }
 
 /** Only names about to be created/changed use portable validation; legacy reads/deletes remain valid. */
@@ -328,14 +352,22 @@ export class VaultSyncEngine {
       const content = await this.readContent(path, relativePath);
       await this.preserveRecoveredText(room, relativePath, content, remote.sha256, deviceName);
     }
-    // The preserved copy owns divergence now; authoritative recovery must pull before any retry.
-    if (entry) room.files[entry[0]] = { ...entry[1], dirty: false, localDeleted: false, renamedToRelativePath: undefined, syncError: undefined };
+    // Do not clear pending intent here: the disk may change again before the survivor arrives.
   }
 
   async preserveRecoveredText(room: MountedRoomState, relativePath: string, content: string, expectedSha256: string | null, deviceName: string): Promise<void> {
     if (await VaultSyncEngine.sha256(content) === expectedSha256) return;
     const path = mountedPath(room, relativePath);
-    await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), relativePath, content);
+    let copyPath: string;
+    try {
+      copyPath = await createConflictCopyPath(this.vault, path, deviceName, this.now());
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "PATH_COLLISION") throw error;
+      // An aliased parent folder cannot be selected even for a new child. Keep every cached
+      // text at the unambiguous room root so exact-folder repair can proceed safely.
+      copyPath = await createConflictCopyPath(this.vault, mountedPath(room, relativePath.split("/").join(" - ")), deviceName, this.now());
+    }
+    await this.writeContent(copyPath, relativePath, content);
   }
 
   async applyRemoteChange(
@@ -357,11 +389,15 @@ export class VaultSyncEngine {
       return;
     }
     // Read-only local divergence never creates a conflict copy.
-    if ((room.canPushLocalEdits ?? false) && existingState?.dirty && (await this.vault.exists(path))) {
+    if (!recoveringCollision && (room.canPushLocalEdits ?? false) && existingState?.dirty && (await this.vault.exists(path))) {
       const local = await this.readContent(path, remote.relativePath);
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
-    await this.writeContent(path, remote.relativePath, remote.content, remote.contentEncoding);
+    if (recoveringCollision) {
+      await this.replaceRecoveredFile(path, remote.relativePath, deviceName, remote);
+    } else {
+      await this.writeContent(path, remote.relativePath, remote.content, remote.contentEncoding);
+    }
     room.files[trackedPath] = {
       serverVersion: remote.version,
       serverSha256: remote.sha256,
@@ -387,11 +423,13 @@ export class VaultSyncEngine {
     }
     // Same defense-in-depth as applyRemoteChange above: never fork a conflict copy for a room this
     // device can't push to, regardless of a possibly-stale `dirty` flag.
-    if ((room.canPushLocalEdits ?? false) && existingState?.dirty && (await this.vault.exists(path))) {
+    if (!recoveringCollision && (room.canPushLocalEdits ?? false) && existingState?.dirty && (await this.vault.exists(path))) {
       const local = await this.readContent(path, remote.relativePath);
       await this.writeContent(await createConflictCopyPath(this.vault, path, deviceName, this.now()), remote.relativePath, local);
     }
-    if (await this.vault.exists(path)) {
+    if (recoveringCollision) {
+      await this.replaceRecoveredFile(path, remote.relativePath, deviceName);
+    } else if (await this.vault.exists(path)) {
       await this.vault.delete(path);
     }
     room.files[trackedPath] = {
@@ -400,6 +438,167 @@ export class VaultSyncEngine {
       localSha256: null,
       dirty: false
     };
+  }
+
+  private async replaceRecoveredFile(path: string, relativePath: string, deviceName: string,
+    replacement?: { content: string; contentEncoding?: "utf8" | "base64" }): Promise<void> {
+    if (!this.vault.recoverFile) throw new Error("This vault adapter cannot safely recover a paused file.");
+    const copyPath = await createConflictCopyPath(this.vault, path, deviceName, this.now());
+    await this.vault.recoverFile(path, copyPath, replacement && {
+      content: replacement.content,
+      contentEncoding: replacement.contentEncoding ?? (isEligibleBinaryPath(relativePath) ? "base64" : "utf8")
+    });
+  }
+
+  async listLocalPathCollisions(room: MountedRoomState): Promise<Array<{ key: string; paths: string[] }>> {
+    const scoped = this.scanLocalPathCollisions(room);
+    if (scoped) return scoped;
+    const groups = new Map<string, string[]>();
+    const mountSegments = room.mountPath.split("/").filter(Boolean);
+    for (const path of await this.vault.list(room.mountPath)) {
+      const segments = path.split("/");
+      if (!mountSegments.every((segment, index) => portablePathKey(segment) === portablePathKey(segments[index] ?? ""))) continue;
+      const relativePath = segments.slice(mountSegments.length).join("/");
+      if (!relativePath || isConflictCopyPath(relativePath) || relativePath.split("/").some(segment => segment.startsWith("."))) continue;
+      const key = portablePathKey(relativePath);
+      const paths = groups.get(key) ?? [];
+      if (!paths.includes(relativePath)) paths.push(relativePath);
+      groups.set(key, paths);
+    }
+    const collisions = [...groups].filter(([, paths]) => paths.length > 1).map(([key, paths]) => ({ key, paths }));
+    room.pathLocalCollisionKeys = [...new Set([...(room.pathLocalCollisionKeys ?? []), ...collisions.map(group => group.key)])];
+    room.pathCollisionPaths = [...new Set([...(room.pathCollisionPaths ?? []), ...collisions.flatMap(group => group.paths)])];
+    return collisions;
+  }
+
+  scanLocalPathCollisions(room: MountedRoomState): Array<{ key: string; paths: string[] }> | undefined {
+    if (!this.vault.pathCollisions) return undefined;
+    const collisions = this.vault.pathCollisions(room.mountPath);
+    // A manual rename can remove the disk alias while an old CRDT identity/intent remains.
+    // Only explicit preservation releases that prior quarantine.
+    room.pathLocalCollisionKeys = [...new Set([...(room.pathLocalCollisionKeys ?? []), ...collisions.map(group => group.key)])];
+    room.pathCollisionPaths = [...new Set([...(room.pathCollisionPaths ?? []), ...collisions.flatMap(group => group.paths)])];
+    return collisions;
+  }
+
+  /** An authoritative snapshot also resolves abandoned paths that no longer exist remotely. */
+  async recoverAbsentSnapshotPaths(room: MountedRoomState, files: Array<{ relativePath: string }>, deviceName: string): Promise<boolean> {
+    const present = new Set(files.map(file => portablePathKey(file.relativePath)));
+    let changed = false;
+    for (const key of [...(room.pathRecoveryKeys ?? [])]) {
+      if (present.has(portablePathKey(key)) || isMountedPathBlocked(room, key, true)) continue;
+      if (room.pendingCrdtTextPaths?.some(path => portablePathKey(path) === portablePathKey(key)) ||
+        room.pendingCrdtOperations?.some(operation => portablePathKey(operation.relativePath) === portablePathKey(key) ||
+          (operation.kind === "rename" && portablePathKey(operation.oldRelativePath) === portablePathKey(key)))) continue;
+      const path = getMountedFileEntry(room, key)?.[0] ?? room.pathCollisionPaths?.find(path => portablePathKey(path) === portablePathKey(key)) ?? key;
+      try {
+        await this.applyRemoteDelete(room, { relativePath: path, version: getMountedFileEntry(room, path)?.[1].serverVersion ?? 0 }, deviceName, true, true);
+        completePathRecovery(room, path);
+      } catch (error) {
+        (room.pathRecoveryErrors ??= {})[portablePathKey(key)] = error instanceof Error ? error.message : String(error);
+      }
+      changed = true;
+    }
+    return changed;
+  }
+
+  async repairLocalPathCollision(room: MountedRoomState, exactRelativePath: string, newRelativePath: string, options: LocalPathRepairOptions): Promise<void> {
+    assertPortablePath(newRelativePath);
+    const key = portablePathKey(exactRelativePath);
+    if (key === portablePathKey(newRelativePath)) throw new Error("Choose a distinct name, not another spelling of the same path.");
+    if (isMountedPathBlocked(room, newRelativePath) || getMountedFileEntry(room, newRelativePath) || await this.vault.exists(mountedPath(room, newRelativePath))) {
+      throw new Error("The destination already exists or is paused.");
+    }
+    if (!this.vault.renameExact) throw new Error("This vault adapter cannot repair an exact local path.");
+    const collisions = await this.listLocalPathCollisions(room);
+    const paths = [...new Set([exactRelativePath, ...(collisions.find(group => group.key === key)?.paths ?? []),
+      ...Object.keys(room.files).filter(path => pathMatchesKey(path, key)),
+      ...(await this.vault.list(room.mountPath)).map(path => path.split("/").slice(room.mountPath.split("/").filter(Boolean).length).join("/")).filter(path => pathMatchesKey(path, key)),
+      ...(room.pathCollisionPaths ?? []).filter(path => pathMatchesKey(path, key))])];
+    if ((room.pendingCrdtOperations ?? []).some(operation => pathMatchesKey(operation.relativePath, key) ||
+      (operation.kind === "rename" && pathMatchesKey(operation.oldRelativePath, key)))) {
+      throw new Error("Preserve and retire the uncertain structural intent before renaming this local file.");
+    }
+    this.pauseLocalRecovery(room, paths);
+    await options.persist();
+    await options.preserveCrdt(paths);
+    const backup = Object.fromEntries(Object.entries(room.files).filter(([path]) => pathMatchesKey(path, key)).map(([path, state]) => [path, { ...state }]));
+    (room.pathRepairBackups ??= []).push({ repairedAt: this.now().toISOString(), files: backup, operations: [] });
+    await options.persist();
+    const isFolder = this.vault.isFolderExact?.(mountedPath(room, exactRelativePath)) ?? paths.some(path => path.startsWith(`${exactRelativePath}/`));
+    await this.vault.renameExact(mountedPath(room, exactRelativePath), mountedPath(room, newRelativePath));
+    // The old identity is pulled afresh only after its files/caches have been preserved.
+    for (const path of Object.keys(backup)) delete room.files[path];
+    const selected = paths.filter(path => path === exactRelativePath || path.startsWith(`${exactRelativePath}/`));
+    const descendants = selected.filter(path => path !== exactRelativePath && !isConflictCopyPath(path) && !path.split("/").some(segment => segment.startsWith(".")));
+    const newPaths = isFolder ? descendants.map(path => newRelativePath + path.slice(exactRelativePath.length)) : [newRelativePath];
+    for (const path of newPaths) {
+      room.files[path] = { serverVersion: 0, serverSha256: null, localSha256: null, dirty: true };
+      if (room.crdtEnabled && isCrdtEligiblePath(path)) room.pendingCrdtTextPaths = [...new Set([...(room.pendingCrdtTextPaths ?? []), path])];
+    }
+    if (isFolder) {
+      room.pathRecoveryKeys = room.pathRecoveryKeys?.filter(path => portablePathKey(path) !== key);
+      room.pathCollisionPaths = room.pathCollisionPaths?.filter(path => portablePathKey(path) !== key);
+    }
+    const remainingCollisions = await this.listLocalPathCollisions(room);
+    room.pathLocalCollisionKeys = [...new Set([...(room.pathLocalCollisionKeys ?? []).filter(path => portablePathKey(path) !== key), ...remainingCollisions.map(group => group.key)])];
+    await options.persist();
+  }
+
+  async abandonAmbiguousLocalPathIntents(room: MountedRoomState, relativePath: string, options: LocalPathRepairOptions): Promise<void> {
+    const keys = new Set([portablePathKey(relativePath)]);
+    const operations = room.pendingCrdtOperations ?? [];
+    // Preserve the whole connected rename chain; dropping only its first link can replay a
+    // destructive follower against the survivor later.
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const operation of operations) {
+        const paths = [operation.relativePath, ...(operation.kind === "rename" ? [operation.oldRelativePath] : [])];
+        if (!paths.some(path => [...keys].some(key => pathMatchesKey(path, key)))) continue;
+        for (const path of paths) if (!keys.has(portablePathKey(path))) { keys.add(portablePathKey(path)); expanded = true; }
+      }
+    }
+    const affected = operations.filter(operation => [...keys].some(key => pathMatchesKey(operation.relativePath, key) ||
+      (operation.kind === "rename" && pathMatchesKey(operation.oldRelativePath, key))));
+    const files = Object.fromEntries(Object.entries(room.files).filter(([path]) => [...keys].some(key => pathMatchesKey(path, key))).map(([path, state]) => [path, { ...state }]));
+    const paths = [...new Set([...keys, ...Object.keys(files), ...(room.pathCollisionPaths ?? []).filter(path => keys.has(portablePathKey(path))),
+      ...affected.flatMap(operation => [operation.relativePath, ...(operation.kind === "rename" ? [operation.oldRelativePath] : [])])])];
+    this.pauseLocalRecovery(room, paths);
+    await options.persist();
+    await options.preserveCrdt(paths);
+    (room.pathRepairBackups ??= []).push({ repairedAt: this.now().toISOString(), files, operations: affected.map(operation => ({ ...operation })) });
+    await options.persist();
+    const remainingCollisions = await this.listLocalPathCollisions(room);
+    const priorTextPaths = room.pendingCrdtTextPaths;
+    room.pendingCrdtOperations = operations.filter(operation => !affected.includes(operation));
+    room.pendingCrdtTextPaths = priorTextPaths?.filter(path => ![...keys].some(key => pathMatchesKey(path, key)));
+    for (const path of Object.keys(files)) delete room.files[path];
+    room.pathLocalCollisionKeys = [...new Set([...(room.pathLocalCollisionKeys ?? []).filter(path => !keys.has(portablePathKey(path))), ...remainingCollisions.map(group => group.key)])];
+    const folders = paths.filter(path => this.vault.isFolderExact?.(mountedPath(room, path)));
+    room.pathRecoveryKeys = room.pathRecoveryKeys?.filter(key => !folders.some(path => portablePathKey(path) === portablePathKey(key)));
+    room.pathCollisionPaths = room.pathCollisionPaths?.filter(path => !folders.some(folder => portablePathKey(folder) === portablePathKey(path)));
+    try {
+      await options.persist();
+    } catch (error) {
+      Object.assign(room.files, files);
+      const current = room.pendingCrdtOperations ?? [];
+      const affectedIds = new Set(affected.map(operation => operation.operationId));
+      const originalIds = new Set(operations.map(operation => operation.operationId));
+      // Other paths keep syncing while settings save awaits. Restore only retired intentions;
+      // never replace the current journal/text list and discard newly queued unrelated edits.
+      room.pendingCrdtOperations = [
+        ...operations.filter(operation => affectedIds.has(operation.operationId) || current.some(candidate => candidate.operationId === operation.operationId)),
+        ...current.filter(operation => !originalIds.has(operation.operationId))
+      ];
+      room.pendingCrdtTextPaths = [...new Set([...(priorTextPaths ?? []).filter(path => [...keys].some(key => pathMatchesKey(path, key))), ...(room.pendingCrdtTextPaths ?? [])])];
+      throw error;
+    }
+  }
+
+  private pauseLocalRecovery(room: MountedRoomState, paths: string[]): void {
+    room.pathRecoveryKeys = [...new Set([...(room.pathRecoveryKeys ?? []), ...paths.map(portablePathKey)])];
+    room.pathCollisionPaths = [...new Set([...(room.pathCollisionPaths ?? []), ...paths])];
   }
 
   async pushLocalChange(room: MountedRoomState, relativePath: string, deviceName: string): Promise<void> {
@@ -553,7 +752,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return Buffer.from(buffer).toString("base64");
 }
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
   const buffer = Buffer.from(base64, "base64");
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }

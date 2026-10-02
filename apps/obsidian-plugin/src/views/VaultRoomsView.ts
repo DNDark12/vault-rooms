@@ -148,6 +148,7 @@ export class VaultRoomsView extends ItemView {
       mountedPath: this.plugin.mountedPathFor(room.id),
       mountedServerId: this.plugin.mountedRoomServerId(room.id),
       conflictCount: this.plugin.listRoomConflicts(room.id).length,
+      pausedPathCount: this.plugin.listRoomPausedPaths(room.id).reduce((count, group) => count + group.paths.length, 0),
       canManage: this.plugin.canManageRoom(room),
       storedBytes: room.storedBytes
     }));
@@ -434,6 +435,8 @@ export class VaultRoomsView extends ItemView {
       this.addPanelButton(parent, PANEL_COPY.room.switch, () => this.plugin.activateServer(mountedServerId), true);
     } else if (action === "manage") {
       this.addPanelButton(parent, PANEL_COPY.room.manage, () => this.plugin.openRoomSettingsModal(room));
+    } else if (action === "recover-paths") {
+      this.addPanelButton(parent, PANEL_COPY.pausedPaths.review, () => this.plugin.openPausedPathsModal(room.id));
     }
   }
 

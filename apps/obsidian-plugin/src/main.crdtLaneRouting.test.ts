@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Notice } from "obsidian";
 import VaultRoomsPlugin from "./main.js";
 import { CrdtRejectedError, type CrdtSessionManager } from "./crdtSession.js";
 import type { ServerConnection, VaultRoomsSettings } from "./settings.js";
@@ -10,7 +11,7 @@ import { VaultSyncEngine, type MountedRoomState, type RelayFileApi, type VaultAd
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
 
 vi.mock("obsidian", () => ({
-  Notice: class Notice {},
+  Notice: vi.fn(),
   Plugin: class Plugin {},
   normalizePath: (path: string) => path,
   requestUrl: vi.fn()
@@ -107,6 +108,7 @@ type WatchMountedRoomInternals = {
   watchMountedRoom: (roomId: string) => void;
   resolveCrdtTarget: (vaultPath: string) => { roomId: string; relativePath: string } | undefined;
   handleActiveEditorChanged: () => void;
+  renderOpenRoomsViews: () => void;
 };
 
 /**
@@ -216,6 +218,7 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     internals.saveSettings = vi.fn().mockResolvedValue(undefined);
     internals.getActiveServer = () => server;
     internals.handleActiveEditorChanged = vi.fn();
+    internals.renderOpenRoomsViews = vi.fn();
 
     return { plugin, internals, roomState, vaultAdapter, ensureSession, forgetLocalDelete, renameSession, recordCreate, recordRename };
   }
@@ -224,6 +227,54 @@ describe("VaultRoomsPlugin.watchMountedRoom CRDT-lane routing", () => {
     const { internals, roomState } = setUp({ persistedCrdtEnabled: true });
     roomState.mountPath = "Rooms/Café";
     expect(internals.resolveCrdtTarget("rooms/cafe\u0301/Note.md")).toEqual({ roomId: "room_1", relativePath: "Note.md" });
+  });
+
+  it("explains repeated attempted edits before the blocked CRDT watcher early return", () => {
+    const { roomState, vaultAdapter, internals, ensureSession } = setUp({ persistedCrdtEnabled: true });
+    roomState.pathCollisionKeys = ["board.md"];
+    vi.mocked(Notice).mockClear();
+    internals.watchMountedRoom(roomState.roomId);
+    vaultAdapter.emit({ type: "modify", path: `${roomState.mountPath}/Board.md` });
+    vaultAdapter.emit({ type: "modify", path: `${roomState.mountPath}/Board.md` });
+    expect(Notice).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(Notice).mock.calls[0]?.[0]).toContain("Review paused files");
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(roomState.files).toEqual({});
+  });
+
+  it("discovers disk aliases synchronously before a create can enter either sync lane", () => {
+    const { roomState, vaultAdapter, internals, ensureSession, recordCreate } = setUp({ persistedCrdtEnabled: true });
+    Object.assign(vaultAdapter, { pathCollisions: vi.fn(() => [{ key: "board.md", paths: ["Board.md", "board.md"] }]) });
+    vi.mocked(Notice).mockClear();
+    internals.watchMountedRoom(roomState.roomId);
+    vaultAdapter.emit({ type: "create", path: `${roomState.mountPath}/Board.md` });
+    expect(roomState.pathLocalCollisionKeys).toEqual(["board.md"]);
+    expect(Notice).toHaveBeenCalledOnce();
+    expect(recordCreate).not.toHaveBeenCalled();
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(roomState.files).toEqual({});
+    expect(internals.renderOpenRoomsViews).toHaveBeenCalled();
+  });
+
+  it("suppresses every descendant rename performed by explicit local folder recovery", async () => {
+    const { plugin, roomState, vaultAdapter, internals, recordRename } = setUp({ persistedCrdtEnabled: true });
+    roomState.pathLocalCollisionKeys = ["folder"];
+    roomState.pathRecoveryKeys = ["folder/note.md"];
+    roomState.pathCollisionPaths = ["Folder", "folder", "Folder/Note.md"];
+    const preserve = vi.fn().mockResolvedValue(undefined);
+    Object.assign(internals.crdtSessionManager, { preserveLocalPathAliases: preserve });
+    vi.spyOn(internals.syncEngine, "repairLocalPathCollision").mockImplementation(async (_room, _old, _new, options) => {
+      await options.preserveCrdt(["Folder/Note.md", "folder/Other.md"]);
+      vaultAdapter.emit({ type: "rename", oldPath: `${roomState.mountPath}/Folder/Note.md`, path: `${roomState.mountPath}/Saved/Note.md` });
+    });
+    Object.assign(plugin, { refreshRoomPausedPaths: vi.fn().mockResolvedValue(undefined), requireActiveServer: internals.getActiveServer });
+    vi.mocked(Notice).mockClear();
+    internals.watchMountedRoom(roomState.roomId);
+    await plugin.repairLocalRoomPath(roomState.roomId, "Folder", "Saved");
+    expect(preserve).toHaveBeenCalledWith(roomState.roomId, ["Folder/Note.md", "folder/Other.md"]);
+    expect(Notice).not.toHaveBeenCalled();
+    expect(recordRename).not.toHaveBeenCalled();
+    expect(roomState.files).toEqual({});
   });
 
   it("skips every quarantined alias before journaling or opening CRDT", () => {

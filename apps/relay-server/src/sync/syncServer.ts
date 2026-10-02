@@ -847,7 +847,7 @@ async function handleMessage(
         {
           type: "remote_crdt_update",
           roomId: room.id,
-          relativePath: normalizedPath,
+          relativePath: file.relative_path,
           epoch: file.crdt_epoch,
           update: message.update,
           updatedBy

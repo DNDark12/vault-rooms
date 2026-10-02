@@ -1,5 +1,6 @@
 import { normalizePath } from "obsidian";
 import { isValidUtf8, portablePathKey } from "@vault-rooms/protocol";
+import { base64ToArrayBuffer } from "./syncClient.js";
 import type { Plugin, TAbstractFile, TFile } from "obsidian";
 import type { VaultAdapter, VaultChangeEvent } from "./syncClient.js";
 import { isFile, isFolder, listFiles } from "./vaultTraversal.js";
@@ -76,6 +77,67 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     // for a user-driven rename in Obsidian's own UI - this is applying someone else's rename, not
     // a raw file-system move.
     await this.app.fileManager.renameFile(existing, destinationPath);
+  }
+
+  async recoverFile(path: string, conflictCopyPath: string, replacement?: { content: string; contentEncoding: "utf8" | "base64" }): Promise<void> {
+    const normalized = normalizePath(path);
+    const existing = this.resolvePath(normalized);
+    if (existing) {
+      if (!isFile(existing)) throw new Error(`Not a file: ${path}`);
+      // Move the live TFile, including edits arriving after the initial copy, without rewriting
+      // backlinks. Editors saving that TFile now save into the preserved local copy.
+      await this.app.vault.rename(existing, await this.ensureFolder(normalizePath(conflictCopyPath)));
+    }
+    if (replacement) {
+      const destination = await this.ensureFolder(normalized);
+      // create() refuses an occupied path. Never modify a file recreated after the move.
+      if (replacement.contentEncoding === "base64") {
+        await this.app.vault.createBinary(destination, base64ToArrayBuffer(replacement.content));
+      } else {
+        await this.app.vault.create(destination, replacement.content);
+      }
+    } else if (this.resolvePath(normalized)) {
+      throw new Error(`A local file was recreated during recovery: ${path}`);
+    }
+  }
+
+  async renameExact(oldPath: string, newPath: string): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(normalizePath(oldPath));
+    if (!existing) throw new Error(`Exact local path not found: ${oldPath}`);
+    if (this.resolvePath(normalizePath(newPath))) throw new Error(`Destination already exists: ${newPath}`);
+    await this.app.fileManager.renameFile(existing, await this.ensureFolder(normalizePath(newPath)));
+  }
+
+  pathCollisions(prefix: string): Array<{ key: string; paths: string[] }> {
+    const root = this.resolvePath(normalizePath(prefix));
+    if (!root || !isFolder(root)) return [];
+    const groups: Array<{ key: string; paths: string[] }> = [];
+    const visit = (folder: typeof root): void => {
+      const children = new Map<string, TAbstractFile[]>();
+      for (const child of folder.children) {
+        const name = child.path.slice(child.path.lastIndexOf("/") + 1);
+        if (name.startsWith(".")) continue;
+        const key = portablePathKey(name);
+        const siblings = children.get(key) ?? [];
+        siblings.push(child);
+        children.set(key, siblings);
+      }
+      for (const siblings of children.values()) {
+        if (siblings.length > 1) {
+          const paths = siblings.map(child => child.path.slice(root.path ? root.path.length + 1 : 0));
+          groups.push({ key: portablePathKey(paths[0]!), paths });
+        } else if (siblings[0] && isFolder(siblings[0])) {
+          visit(siblings[0]);
+        }
+      }
+    };
+    visit(root);
+    return groups;
+  }
+
+  isFolderExact(path: string): boolean {
+    const existing = this.app.vault.getAbstractFileByPath(normalizePath(path));
+    return Boolean(existing && isFolder(existing));
   }
 
   async delete(path: string): Promise<void> {

@@ -103,6 +103,12 @@ function ack(harness: Harness, message: SyncServerMessage): Promise<void> {
   return harness.manager.handleServerMessage(message);
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 /**
  * Opens a session for a path the server does *not* already have a document for, so its on-disk text
  * seeds the fresh document. Since the seventeenth hardware-testing round the client only seeds when the
@@ -1149,6 +1155,21 @@ describe("CrdtSessionManager - concurrent ensureSession calls for a brand-new pa
 });
 
 describe("CrdtSessionManager - room disposal", () => {
+  it.each(["room", "manager"])("invalidates a pending disk read when the %s is disposed", async (target) => {
+    const started = deferred();
+    const gate = deferred();
+    const h = createHarness({ readDiskText: async () => { started.resolve(); await gate.promise; return "retired local identity"; } });
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0 }]);
+    const opening = h.manager.ensureSession("r", "Note.md");
+    const result = opening.then(() => "opened", (error: unknown) => error);
+    await started.promise;
+    await (target === "room" ? h.manager.disposeRoom("r") : h.manager.dispose());
+    gate.resolve();
+    expect(await result).toMatchObject({ code: "SESSION_INVALIDATED" });
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(false);
+    await h.manager.dispose();
+  });
+
   it("deletes all persisted state for a room and drops its in-memory sessions", async () => {
     const adapter = new FakeDataAdapter();
     const docStore = makeDocStore(adapter);
@@ -1212,6 +1233,382 @@ describe("portable CRDT identity", () => {
 
 
 describe("CRDT collision recovery", () => {
+  it("preserves and retires quarantined cached identities absent from the authoritative snapshot", async () => {
+    const store = makeDocStore();
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "absent unique cache");
+    await store.save("r", "Gone.md", 0, Y.encodeStateAsUpdate(doc));
+    await store.save("other", "Elsewhere.md", 0, Y.encodeStateAsUpdate(doc));
+    const preserved = vi.fn(async () => undefined);
+    const h = createHarness({ preserveRecoveredText: preserved }, store);
+    await h.manager.handleRoomSnapshot("other", [{ relativePath: "Elsewhere.md", pathCollision: true }]);
+    await h.manager.handleRoomSnapshot("r", [], ["Gone.md"]);
+    expect(preserved).toHaveBeenCalledWith("r", "Gone.md", "absent unique cache", null);
+    expect(await store.load("r", "Gone.md", 0)).toBeNull();
+    expect(await h.manager.ensureSessionIfKnown("r", "Gone.md")).toBeUndefined();
+    h.manager.registerKnownEpoch("r", "Gone.md", 7);
+    expect((await h.manager.ensureSession("r", "Gone.md")).epoch).toBe(7);
+    expect(await store.load("other", "Elsewhere.md", 0)).not.toBeNull();
+    await expect(h.manager.ensureSession("other", "Elsewhere.md")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    doc.destroy();
+    await h.manager.dispose();
+  });
+
+  it("retains an absent quarantined cache and pause when preservation fails", async () => {
+    const store = makeDocStore();
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "absent unique cache");
+    await store.save("r", "Gone.md", 0, Y.encodeStateAsUpdate(doc));
+    const h = createHarness({ preserveRecoveredText: async () => { throw new Error("copy failed"); } }, store);
+    await expect(h.manager.handleRoomSnapshot("r", [], ["Gone.md"])).rejects.toThrow("copy failed");
+    expect(await store.load("r", "Gone.md", 0)).not.toBeNull();
+    await expect(h.manager.ensureSession("r", "GONE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    doc.destroy();
+    await h.manager.dispose();
+  });
+
+  it("flushes a quarantined edit still waiting for debounce during global disposal", async () => {
+    const store = makeDocStore();
+    const timers = new Map<number, () => void>();
+    let nextTimer = 0;
+    const h = createHarness({
+      schedule: (fn) => { const id = ++nextTimer; timers.set(id, fn); return id; },
+      cancel: (id) => { timers.delete(id); }
+    }, store);
+    h.disk.set("r/Note.md", "disk before quarantine");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(session.doc));
+    session.ytext.insert(session.ytext.length, " UNIQUE EDIT");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, pathCollision: true }]);
+    expect(timers.size).toBeGreaterThan(0);
+    const disposing = h.manager.dispose();
+    expect(timers.size).toBe(0);
+    await disposing;
+    const preserved = vi.fn(async () => undefined);
+    const restarted = createHarness({ preserveRecoveredText: preserved }, store);
+    await restarted.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }], ["Note.md"]);
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "disk before quarantine UNIQUE EDIT", "survivor");
+    await restarted.manager.dispose();
+  });
+
+  it("rejects global disposal without destroying the last unsaved quarantined document on write failure", async () => {
+    const store = makeDocStore();
+    const h = createHarness({}, store);
+    h.disk.set("r/Note.md", "unique unsaved");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    const destroyed = vi.fn();
+    session.doc.on("destroy", destroyed);
+    const save = vi.spyOn(store, "save").mockRejectedValue(new Error("disk full"));
+    await expect(Promise.resolve(h.manager.dispose())).rejects.toThrow("disk full");
+    expect(destroyed).not.toHaveBeenCalled();
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    expect(session.ytext.toString()).toBe("unique unsaved");
+    save.mockRestore();
+    await h.manager.dispose();
+    expect(destroyed).toHaveBeenCalledOnce();
+  });
+
+  it("rejects repair snapshots after failed global disposal until retry persists the held document", async () => {
+    const store = makeDocStore();
+    const h = createHarness({}, store);
+    h.disk.set("r/Note.md", "cached text");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(session.doc));
+    const cached = await store.load("r", "Note.md", 0);
+    session.ytext.insert(session.ytext.length, " UNIQUE HELD EDIT");
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    const save = vi.spyOn(store, "save").mockRejectedValue(new Error("disk full"));
+    await expect(h.manager.dispose()).rejects.toThrow("disk full");
+    await expect(h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }]))
+      .rejects.toMatchObject({ code: "SESSION_INVALIDATED" });
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    expect(session.ytext.toString()).toBe("cached text UNIQUE HELD EDIT");
+    expect(await store.load("r", "Note.md", 0)).toEqual(cached);
+    await expect(h.manager.ensureSession("r", "NOTE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    save.mockRestore();
+    await h.manager.dispose();
+    const preserved = vi.fn(async () => undefined);
+    const restarted = createHarness({ preserveRecoveredText: preserved }, store);
+    await restarted.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }], ["Note.md"]);
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "cached text UNIQUE HELD EDIT", "survivor");
+    await restarted.manager.dispose();
+  });
+
+  it("serializes a room-disposal save before owner repair removes the ambiguous cache", async () => {
+    const store = makeDocStore();
+    const h = createHarness({ preserveRecoveredText: async () => undefined }, store);
+    h.disk.set("r/Note.md", "ambiguous");
+    const session = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(session.doc));
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    const save = store.save.bind(store);
+    const started = deferred();
+    const gate = deferred();
+    vi.spyOn(store, "save").mockImplementation(async (...args) => {
+      started.resolve();
+      await gate.promise;
+      await save(...args);
+    });
+    const disposing = h.manager.disposeRoom("r");
+    await started.promise;
+    let repaired = false;
+    const repairing = h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }])
+      .then(() => { repaired = true; });
+    await vi.waitFor(() => expect(repaired).toBe(true), { timeout: 100, interval: 5 }).catch(() => undefined);
+    const repairedBeforeSave = repaired;
+    gate.resolve();
+    await Promise.all([disposing, repairing]);
+    expect(repairedBeforeSave).toBe(false);
+    expect(await store.load("r", "Note.md", 0)).toBeNull();
+    const restarted = createHarness({}, store);
+    await restarted.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0 }]);
+    const adopted = await restarted.manager.ensureSession("r", "Note.md");
+    const survivor = new Y.Doc();
+    survivor.getText(CRDT_TEXT_KEY).insert(0, "surviving identity");
+    Y.applyUpdate(survivor, Y.encodeStateAsUpdate(adopted.doc, Y.encodeStateVector(survivor)));
+    expect(survivor.getText(CRDT_TEXT_KEY).toString()).toBe("surviving identity");
+    survivor.destroy();
+    await restarted.manager.dispose();
+    await h.manager.dispose();
+  });
+
+  it("serializes a non-awaited unload save before recovery in a new manager and distinct store", async () => {
+    const adapter = new FakeDataAdapter();
+    const oldStore = makeDocStore(adapter);
+    const newStore = makeDocStore(adapter);
+    const old = createHarness({}, oldStore);
+    old.disk.set("r/Note.md", "initial ambiguous disk");
+    const session = await openFreshlyCreatedSession(old, "r", "Note.md");
+    await oldStore.save("r", "Note.md", 0, Y.encodeStateAsUpdate(session.doc));
+    session.ytext.insert(session.ytext.length, " UNIQUE OLD LIVE EDIT");
+    await old.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    const started = deferred();
+    const gate = deferred();
+    const save = oldStore.save.bind(oldStore);
+    vi.spyOn(oldStore, "save").mockImplementation(async (...args) => {
+      started.resolve();
+      await gate.promise;
+      await save(...args);
+    });
+    const preserved = vi.fn(async () => undefined);
+    const fresh = createHarness({ preserveRecoveredText: preserved }, newStore);
+    const retirement = old.manager.dispose(); // Obsidian unload cannot await this promise.
+    let repaired = false;
+    const repairing = fresh.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }], ["Note.md"])
+      .then(() => { repaired = true; });
+    await started.promise;
+    await vi.waitFor(() => expect(repaired).toBe(true), { timeout: 100, interval: 5 }).catch(() => undefined);
+    const repairedBeforeSave = repaired;
+    gate.resolve();
+    await Promise.all([retirement, repairing]);
+    const resurrected = await newStore.load("r", "Note.md", 0);
+    fresh.disk.set("r/Note.md", "SURVIVOR");
+    const adopted = await fresh.manager.ensureSession("r", "Note.md");
+    const survivor = new Y.Doc();
+    survivor.getText(CRDT_TEXT_KEY).insert(0, "SURVIVOR");
+    Y.applyUpdate(survivor, Y.encodeStateAsUpdate(adopted.doc));
+    const finalText = survivor.getText(CRDT_TEXT_KEY).toString();
+    survivor.destroy();
+    await fresh.manager.dispose();
+    expect(repairedBeforeSave).toBe(false);
+    expect(resurrected).toBeNull();
+    expect(finalText).toBe("SURVIVOR");
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "initial ambiguous disk UNIQUE OLD LIVE EDIT", "survivor");
+  });
+
+  it("fails a queued new-manager repair when the old final save fails and recovers after retirement retry", async () => {
+    const adapter = new FakeDataAdapter();
+    const oldStore = makeDocStore(adapter);
+    const newStore = makeDocStore(adapter);
+    const old = createHarness({}, oldStore);
+    old.disk.set("r/Note.md", "old cache");
+    const session = await openFreshlyCreatedSession(old, "r", "Note.md");
+    await oldStore.save("r", "Note.md", 0, Y.encodeStateAsUpdate(session.doc));
+    const cached = await oldStore.load("r", "Note.md", 0);
+    session.ytext.insert(session.ytext.length, " UNIQUE HELD EDIT");
+    await old.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    const started = deferred();
+    const gate = deferred();
+    const save = vi.spyOn(oldStore, "save").mockImplementationOnce(async () => {
+      started.resolve();
+      await gate.promise;
+      throw new Error("disk full");
+    });
+    const preserved = vi.fn(async () => undefined);
+    const fresh = createHarness({ preserveRecoveredText: preserved }, newStore);
+    const retirement = old.manager.dispose();
+    const retirementResult = retirement.then(() => "retired", (error: unknown) => error);
+    const repairing = fresh.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }], ["Note.md"]);
+    const repairResult = repairing.then(() => "repaired", (error: unknown) => error);
+    await started.promise;
+    gate.resolve();
+    expect(await retirementResult).toMatchObject({ message: "disk full" });
+    const result = await repairResult;
+    const cacheAfterFailure = await newStore.load("r", "Note.md", 0);
+    const preservedDuringFailure = preserved.mock.calls.length;
+    expect(old.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    save.mockRestore();
+    await old.manager.dispose();
+    await fresh.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }]);
+    await fresh.manager.dispose();
+    expect(result).toMatchObject({ message: "disk full" });
+    expect(cacheAfterFailure).toEqual(cached);
+    expect(preservedDuringFailure).toBe(0);
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "old cache UNIQUE HELD EDIT", "survivor");
+  });
+
+  it.each([false, true])("hands off a settled failed retirement to a later manager (repeated write failure: %s)", async (repeatedFailure) => {
+    const adapter = new FakeDataAdapter();
+    const oldStore = makeDocStore(adapter);
+    const newStore = makeDocStore(adapter);
+    const old = createHarness({}, oldStore);
+    old.disk.set("r/Note.md", "old cached text");
+    const session = await openFreshlyCreatedSession(old, "r", "Note.md");
+    await oldStore.save("r", "Note.md", 0, Y.encodeStateAsUpdate(session.doc));
+    const cached = await oldStore.load("r", "Note.md", 0);
+    session.ytext.insert(session.ytext.length, " UNIQUE RETAINED EDIT");
+    await old.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    const destroyed = vi.fn();
+    session.doc.on("destroy", destroyed);
+    const save = vi.spyOn(oldStore, "save");
+    if (repeatedFailure) save.mockRejectedValue(new Error("disk full"));
+    else save.mockRejectedValueOnce(new Error("disk full"));
+    await expect(old.manager.dispose()).rejects.toThrow("disk full");
+    const preserved = vi.fn(async () => undefined);
+    const fresh = createHarness({ preserveRecoveredText: preserved }, newStore);
+    const repair = () => fresh.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }], ["Note.md"]);
+    if (repeatedFailure) {
+      await expect(repair()).rejects.toThrow("disk full");
+      expect(preserved).not.toHaveBeenCalled();
+      expect(await newStore.load("r", "Note.md", 0)).toEqual(cached);
+      expect(destroyed).not.toHaveBeenCalled();
+      await expect(fresh.manager.ensureSession("r", "NOTE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+      save.mockRestore();
+    }
+    await repair();
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "old cached text UNIQUE RETAINED EDIT", "survivor");
+    expect(destroyed).toHaveBeenCalledOnce();
+    expect(old.manager.isSessionOpen("r", "Note.md")).toBe(false);
+    expect(await newStore.load("r", "Note.md", 0)).toBeNull();
+    save.mockRestore();
+    await old.manager.dispose();
+    expect(await newStore.load("r", "Note.md", 0)).toBeNull();
+    await fresh.manager.dispose();
+  });
+
+  it("invalidates a queued rename whose pending source open was retired by repair", async () => {
+    const store = makeDocStore();
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "ambiguous");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(doc));
+    const started = deferred();
+    const gate = deferred();
+    const h = createHarness({
+      readDiskText: async () => { started.resolve(); await gate.promise; return "ambiguous"; },
+      preserveRecoveredText: async () => undefined
+    }, store);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0 }]);
+    const opening = h.manager.ensureSession("r", "Note.md");
+    const opened = opening.then(() => "opened", (error: unknown) => error);
+    await started.promise;
+    const renaming = h.manager.renameSession("r", "Note.md", "Next.md");
+    const result = renaming.then(() => "renamed", (error: unknown) => error);
+    await Promise.resolve();
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }]);
+    gate.resolve();
+    expect(await opened).toMatchObject({ code: "SESSION_INVALIDATED" });
+    await vi.waitFor(() => expect(h.sent.some((message) => message.type === "crdt_rename")).toBe(true), { timeout: 100, interval: 5 }).catch(() => undefined);
+    const outbound = h.sent.filter((message) => message.type === "crdt_rename");
+    if (outbound[0]) await ack(h, { type: "crdt_rejected", requestId: outbound[0].requestId, roomId: "r", relativePath: "Next.md", code: "PATH_COLLISION", message: "settle regression request" });
+    const renameResult = await result;
+    await h.manager.dispose();
+    doc.destroy();
+    expect(outbound).toEqual([]);
+    expect(renameResult).toMatchObject({ code: "SESSION_INVALIDATED" });
+  });
+
+  it("invalidates an in-flight open even after quarantine and owner repair have cleared the pause", async () => {
+    const store = makeDocStore();
+    const oldDoc = new Y.Doc();
+    oldDoc.getText(CRDT_TEXT_KEY).insert(0, "ALIEN");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(oldDoc));
+    const started = deferred();
+    const gate = deferred();
+    const preserved = vi.fn(async () => undefined);
+    let firstRead = true;
+    const h = createHarness({
+      preserveRecoveredText: preserved,
+      readDiskText: async () => {
+        if (!firstRead) return null;
+        firstRead = false;
+        started.resolve();
+        await gate.promise;
+        return "ALIEN";
+      }
+    }, store);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0 }]);
+    const opening = h.manager.ensureSession("r", "Note.md");
+    const result = opening.then(() => "opened", (error: unknown) => error);
+    await started.promise;
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", pathCollision: true }]);
+    await h.manager.handleRoomSnapshot("r", [{ relativePath: "Note.md", crdtEpoch: 0, sha256: "survivor" }]);
+    expect(preserved).toHaveBeenCalledWith("r", "Note.md", "ALIEN", "survivor");
+    expect(await store.load("r", "Note.md", 0)).toBeNull();
+    gate.resolve();
+    expect(await result).toMatchObject({ code: "SESSION_INVALIDATED" });
+    const fresh = await h.manager.ensureSession("r", "Note.md");
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    h.manager.bindToEditor("r", "Note.md");
+    const survivor = new Y.Doc();
+    survivor.getText(CRDT_TEXT_KEY).insert(0, "SURVIVOR");
+    await h.manager.handleServerMessage({ type: "remote_crdt_update", roomId: "r", relativePath: "Note.md", epoch: 0, update: Buffer.from(Y.encodeStateAsUpdate(survivor)).toString("base64"), updatedBy: { userId: "peer", displayName: "Peer" } });
+    expect(fresh.ytext.toString()).toBe("SURVIVOR");
+    oldDoc.destroy();
+    survivor.destroy();
+    await h.manager.dispose();
+  });
+
+  it("preserves exact cached aliases and the latest live text before local collision repair", async () => {
+    const store = makeDocStore();
+    const preserved = vi.fn(async () => undefined);
+    const h = createHarness({ preserveRecoveredText: preserved }, store);
+    h.disk.set("r/Café.md", "live text");
+    const live = await openFreshlyCreatedSession(h, "r", "Café.md");
+    live.ytext.insert(live.ytext.length, " pending edit");
+    const old = new Y.Doc();
+    old.getText(CRDT_TEXT_KEY).insert(0, "old epoch");
+    await store.save("r", "Café.md", 2, Y.encodeStateAsUpdate(old), true);
+    const alias = new Y.Doc();
+    alias.getText(CRDT_TEXT_KEY).insert(0, "exact NFD alias");
+    await store.save("r", "cafe\u0301.MD", 0, Y.encodeStateAsUpdate(alias));
+    await h.manager.preserveLocalPathAliases("r", ["Café.md", "cafe\u0301.MD"]);
+    expect(preserved).toHaveBeenCalledWith("r", "Café.md", "live text pending edit", null);
+    expect(preserved).toHaveBeenCalledWith("r", "Café.md", "old epoch", null);
+    expect(preserved).toHaveBeenCalledWith("r", "cafe\u0301.MD", "exact NFD alias", null);
+    expect(await store.loadAllEpochs("r", "Café.md")).toEqual([]);
+    expect(await store.loadAllEpochs("r", "cafe\u0301.MD")).toEqual([]);
+    expect(h.manager.isSessionOpen("r", "Café.md")).toBe(false);
+    old.destroy();
+    alias.destroy();
+    await h.manager.dispose();
+  });
+
+  it("keeps aliases, the live document and the pause when local preservation fails", async () => {
+    const store = makeDocStore();
+    const h = createHarness({ preserveRecoveredText: async () => { throw new Error("copy failed"); } }, store);
+    h.disk.set("r/Note.md", "live unique text");
+    const live = await openFreshlyCreatedSession(h, "r", "Note.md");
+    await store.save("r", "Note.md", 0, Y.encodeStateAsUpdate(live.doc));
+    await expect(h.manager.preserveLocalPathAliases("r", ["Note.md", "note.md"])).rejects.toThrow("copy failed");
+    expect(await store.load("r", "Note.md", 0)).not.toBeNull();
+    expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
+    expect(live.ytext.toString()).toBe("live unique text");
+    await expect(h.manager.ensureSession("r", "NOTE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
+    await h.manager.dispose();
+  });
+
   it("persists unsaved quarantined text and retains paused caches when the room is unmounted", async () => {
     const store = makeDocStore();
     const h = createHarness({}, store);
@@ -1273,12 +1670,13 @@ describe("CRDT collision recovery", () => {
     h.disk.set("r/Note.md", "unique unsaved");
     const session = await openFreshlyCreatedSession(h, "r", "Note.md");
     await h.manager.handleRoomSnapshot("r", [{ relativePath: "note.md", crdtEpoch: 0, pathCollision: true }]);
-    vi.spyOn(store, "save").mockRejectedValue(new Error("disk full"));
+    const save = vi.spyOn(store, "save").mockRejectedValue(new Error("disk full"));
     await expect(h.manager.disposeRoom("r")).rejects.toThrow("disk full");
     expect(h.manager.isSessionOpen("r", "Note.md")).toBe(true);
     expect(session.ytext.toString()).toBe("unique unsaved");
     await expect(h.manager.ensureSession("r", "NOTE.MD")).rejects.toMatchObject({ code: "PATH_COLLISION" });
-    h.manager.dispose();
+    save.mockRestore();
+    await h.manager.dispose();
   });
 
   it("keeps the cache and path paused if no text-preservation callback is available", async () => {

@@ -22,6 +22,30 @@ export const PANEL_COPY = {
     noRoomsMember: "No rooms are available yet. Ask the room owner to invite you.",
     attentionLabel: "Needs a choice"
   },
+  pausedPaths: {
+    review: "Review paused files",
+    heading: "Paused files",
+    count: (count: number) => count === 1 ? "1 file name is paused" : `${count} file names are paused`,
+    serverCollision: "These names overlap on the server. The room owner must rename the server files to distinct names. Other files in this room continue syncing.",
+    localCollision: "These names overlap on this computer. Rename each exact local file to a distinct name. All local content and saved recovery copies are preserved; no file is chosen as the winner.",
+    recoveryPending: "The server names are repaired. Local recovery must preserve saved edits and pull the authoritative files before these names resume syncing.",
+    ambiguousJournal: "A saved file operation has an ambiguous name. Its original intent is retained. Review the operation before retrying; no server file will be deleted automatically.",
+    preserveReload: "Preserve local work and reload server state",
+    preserveReloadConfirm: "Save all local edits and the original file operations in recovery copies and history, then stop replaying these ambiguous operations and reload the server files. Server files are preserved. You can rename the saved local copies afterward.",
+    ownerRepair: "Repair server names",
+    askOwner: "Ask the room owner to repair the server names, then try again.",
+    retry: "Retry recovery",
+    retrying: "Recovering…",
+    localRename: "Rename exact local file",
+    localRenaming: "Preserving and renaming…",
+    exactPath: "Exact local file",
+    newPath: "New distinct path inside this room",
+    localRenamed: "Local file preserved and renamed. Recovery will resume after the remaining names are distinct.",
+    renameFailed: "Local recovery failed. All pending state remains available; try again.",
+    recoveryFailed: "Recovery failed. The file remains paused; try again.",
+    none: "No file names are paused. Close this dialog to return to your rooms.",
+    editNotice: (path: string, reason: string) => `Vault Rooms: sync is paused for "${path}". ${reason} Open Rooms → Review paused files.`
+  },
   /**
    * Every empty state names an action or says who can act. A bare "None yet." leaves a user unable to
    * tell a missing permission from a missing feature.

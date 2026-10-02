@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type WebSocket from "ws";
+import WebSocket from "ws";
+import type { AddressInfo } from "node:net";
 import * as Y from "yjs";
 import { createApp } from "../src/app.js";
 import { CRDT_TEXT_KEY } from "../src/sync/crdtDocManager.js";
@@ -23,15 +24,24 @@ afterEach(async () => {
   }
 });
 
-async function connect(app: Awaited<ReturnType<typeof createApp>>): Promise<JsonSocket> {
+async function connect(app: Awaited<ReturnType<typeof createApp>>, real = false): Promise<JsonSocket> {
   await app.ready();
-  const socket = (await app.injectWS("/sync")) as unknown as JsonSocket;
+  if (real && !app.server.listening)
+    await app.listen({ host: "127.0.0.1", port: 0 });
+  const socket = (real
+    ? new WebSocket(`ws://127.0.0.1:${(app.server.address() as AddressInfo).port}/sync`)
+    : await app.injectWS("/sync")) as unknown as JsonSocket;
   socket.sendJson = (payload: unknown) => socket.send(JSON.stringify(payload));
   sockets.push(socket);
   messageQueues.set(socket, []);
   socket.on("message", (raw: WebSocket.RawData) => {
     messageQueues.get(socket)!.push(JSON.parse(raw.toString()));
   });
+  if (real)
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
   return socket;
 }
 
@@ -160,6 +170,51 @@ function emptyStateVectorBase64(): string {
 }
 
 describe("CRDT sync flow (Phase 4)", () => {
+  it.each([
+    ["crdt_update", "notes/café.MD"],
+    ["crdt_update", "Notes/Cafe\u0301.md"],
+    ["crdt_sync_step2", "notes/café.MD"],
+    ["crdt_sync_step2", "Notes/Cafe\u0301.md"]
+  ])("fans out %s from alias %s with stored spelling to legacy peers over real WebSockets", async (type, alias) => {
+    const { app, owner, room } = await setupCrdtRoom();
+    const reader = await addMember(app, owner, room, "reader", "Notes/Café.md");
+    const denied = await addMember(app, owner, room, "reader", "Other/**/*");
+    const writer = await connect(app, true);
+    const peer = await connect(app, true);
+    const hidden = await connect(app, true);
+    // These clients advertise CRDT only, matching older exact-path clients without portablePaths.
+    await helloAndSubscribe(writer, owner.deviceToken, room.id);
+    await helloAndSubscribe(peer, reader.deviceToken, room.id);
+    await helloAndSubscribe(hidden, denied.deviceToken, room.id);
+    const storedPath = "Notes/Café.md";
+    writer.sendJson({ type: "crdt_create", requestId: "create-stored", roomId: room.id, relativePath: storedPath });
+    const created = await nextMessage(writer, "crdt_created");
+    expect(await nextMessage(peer, "remote_file_change")).toMatchObject({ relativePath: storedPath });
+
+    // Request-correlated replies keep the sender's alias for legacy exact-path matching.
+    writer.sendJson({ type: "crdt_sync_step1", requestId: "alias-handshake", roomId: room.id, relativePath: alias, epoch: created.epoch, stateVector: emptyStateVectorBase64() });
+    expect(await nextMessage(writer, "crdt_sync_step2")).toMatchObject({ requestId: "alias-handshake", relativePath: alias });
+    expect(await nextMessage(writer, "crdt_sync_step1")).toMatchObject({ relativePath: alias });
+
+    const doc = new Y.Doc();
+    doc.getText(CRDT_TEXT_KEY).insert(0, "received by the exact-path peer");
+    writer.sendJson({ type, requestId: "alias-update", roomId: room.id, relativePath: alias, epoch: created.epoch, update: base64OfUpdate(Y.encodeStateAsUpdate(doc)) });
+    const received = await nextMessage(peer, "remote_crdt_update");
+    expect(received).toMatchObject({ relativePath: storedPath, epoch: created.epoch });
+    const legacyDoc = new Y.Doc();
+    if (received.relativePath === storedPath)
+      Y.applyUpdate(legacyDoc, new Uint8Array(Buffer.from(received.update, "base64")));
+    expect(legacyDoc.getText(CRDT_TEXT_KEY).toString()).toBe("received by the exact-path peer");
+    // A same-socket snapshot provides a delivery barrier before checking the hidden peer's queue.
+    hidden.sendJson({ type: "subscribe_room", requestId: "hidden-barrier", roomId: room.id });
+    const hiddenSnapshot = await nextMessage(hidden, "room_snapshot");
+    expect(hiddenSnapshot.files).toEqual([]);
+    expect(messageQueues.get(hidden)).not.toContainEqual(expect.objectContaining({ type: "remote_crdt_update" }));
+    expect(JSON.stringify(messageQueues.get(hidden))).not.toContain("Café");
+    doc.destroy();
+    legacyDoc.destroy();
+  });
+
   it("advertises durable structural-operation receipts in hello_ok", async () => {
     const { app, owner } = await setupCrdtRoom();
     const socket = await connect(app);

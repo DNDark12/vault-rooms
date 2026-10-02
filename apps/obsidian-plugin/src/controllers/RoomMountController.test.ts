@@ -42,6 +42,14 @@ class FakeVaultAdapter implements VaultAdapter {
     this.files.delete(path);
   }
 
+  async recoverFile(path: string, copyPath: string, replacement?: { content: string; contentEncoding: "utf8" | "base64" }): Promise<void> {
+    if (this.files.has(path)) await this.rename(path, copyPath);
+    if (replacement) {
+      if (this.files.has(path)) throw new Error("Destination exists");
+      this.files.set(path, replacement.content);
+    }
+  }
+
   async rename(oldPath: string, newPath: string): Promise<void> {
     const content = this.files.get(oldPath);
     if (content === undefined) return;
@@ -626,5 +634,37 @@ describe("portable mount reconciliation", () => {
     expect(ensureCrdtSession).not.toHaveBeenCalled();
     expect(pushLocalChange).not.toHaveBeenCalled();
     expect(state.pathCollisionKeys).toEqual(["note.md"]);
+  });
+});
+
+
+describe("mount recovery edits during download", () => {
+  it("keeps the edit made while awaiting the survivor on remount", async () => {
+    const vault = new FakeVaultAdapter();
+    vault.files.set("Room/Note.md", "initial text");
+    const state: MountedRoomState = { roomId: "r", mountPath: "Room", pathCollisionKeys: ["note.md"], files: {
+      "Note.md": { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: true }
+    } };
+    const room: RoomSummary = { id: "r", name: "Room", type: "folder", sourcePath: "Room", mountName: "Room",
+      ownerUserId: "owner", conflictPolicy: "keep_both", permissions: ["sync:push"], capabilities: [], crdtEnabled: false, storedBytes: 0 };
+    let finishPull!: (value: unknown) => void;
+    const readFile = vi.fn(() => new Promise(resolve => { finishPull = resolve; }));
+    const api = { readFile, listFiles: async () => ({ files: [{ relativePath: "note.md", version: 6, sha256: "survivor", deleted: false }] }) };
+    const controller = new RoomMountController({
+      app: { vault: { configDir: ".obsidian" } } as App,
+      settings: { mountedRooms: { r: state }, roomMountPaths: {}, mountRoot: "" } as unknown as RoomMountControllerDeps["settings"],
+      visibleRooms: [room], vaultAdapter: vault,
+      getSyncEngine: () => new VaultSyncEngine(vault, api as never), ensureCrdtSession: vi.fn(), apiFor: () => api as never,
+      requireActiveServer: () => ({ id: "s", userId: "owner", deviceName: "device" }) as never,
+      saveSettings: vi.fn(), renderOpenRoomsViews: vi.fn(), stopWatchingRoom: vi.fn(), watchMountedRoom: vi.fn(),
+      subscribeRoom: vi.fn(), unsubscribeRoom: vi.fn(), unbindCrdtRoom: vi.fn()
+    });
+    const mounting = controller.mountRoom(room);
+    await vi.waitFor(() => expect(readFile).toHaveBeenCalled());
+    vault.files.set("Room/Note.md", "edit during remount pull");
+    finishPull({ relativePath: "note.md", version: 6, sha256: "survivor", content: "survivor" });
+    await mounting;
+    expect([...vault.files.values()]).toContain("edit during remount pull");
+    expect(vault.files.get("Room/Note.md")).toBe("survivor");
   });
 });

@@ -41,6 +41,7 @@ import { RoomSettingsModal } from "./modals/RoomSettingsModal.js";
 import { SetupTeamModal } from "./modals/SetupTeamModal.js";
 import { collisionRecoveryPaths, getMountedFileEntry, isMountedPathBlocked, localPortablePathError, isConflictCopyPath, resolveCanPushLocalEdits, resolveRoomCrdtEnabled, VaultSyncEngine, type MountedRoomState, type PendingCrdtOperation } from "./syncClient.js";
 import { RoomPushCoordinator } from "./pushCoordinator.js";
+import { pausedPathModel, type PausedPathGroup } from "./views/pausedPathModel.js";
 import { RoomSyncSocket, type SyncConnectionState } from "./syncWsClient.js";
 import { ObsidianVaultAdapter } from "./vaultAdapter.js";
 import { VAULT_ROOMS_VIEW_TYPE, VaultRoomsView } from "./views/VaultRoomsView.js";
@@ -61,6 +62,10 @@ import { notifyIfUpdateAvailable } from "./updateNotice.js";
 
 function crdtRenameMarkerKey(roomId: string, oldRelativePath: string, newRelativePath: string): string {
   return `${roomId} ${portablePathKey(oldRelativePath)} ${portablePathKey(newRelativePath)}`;
+}
+
+function localCollisionState(room: MountedRoomState): string {
+  return JSON.stringify([room.pathLocalCollisionKeys ?? [], room.pathCollisionPaths ?? []]);
 }
 
 export default class VaultRoomsPlugin extends Plugin {
@@ -96,6 +101,8 @@ export default class VaultRoomsPlugin extends Plugin {
   private roomCoordinators = new Map<string, RoomPushCoordinator>();
   private syncSocket: RoomSyncSocket | null = null;
   private syncState: SyncConnectionState = "offline";
+  private syncConnectGeneration = 0;
+  private crdtRetirementFailed = false;
   private readonly connectedServerIdsThisSession = new Set<string>();
   private readonly securityMigrationsInFlight = new Set<string>();
   private roomMountController!: RoomMountController;
@@ -405,14 +412,19 @@ export default class VaultRoomsPlugin extends Plugin {
     // after startup) - it never blocks or double-registers, so this doesn't affect any of
     // connectSyncSocket()'s other call sites (setupServer/joinServer/activateServer/etc.), which
     // already only ever run well after startup in response to user actions.
-    this.app.workspace.onLayoutReady(() => this.initializeSyncAfterLayoutReady());
+    this.app.workspace.onLayoutReady(() => {
+      void this.initializeSyncAfterLayoutReady().catch((error) => {
+        console.error("Vault Rooms: failed to initialize local sync", error);
+        new Notice(userFacingError(error, "Local sync could not start. Try reconnecting."), 10000);
+      });
+    });
   }
 
   /** Initializes local watchers/CRDT state even if this device's embedded relay is currently
    *  stopped. connectSyncSocket() itself suppresses only the network connection in that case; the
    *  local lifecycle must already exist to capture edits made before the user starts the server. */
-  private initializeSyncAfterLayoutReady(): void {
-    this.connectSyncSocket();
+  private async initializeSyncAfterLayoutReady(): Promise<void> {
+    await this.connectSyncSocket();
     void this.refreshRooms({ notify: false }).catch(() => undefined);
     void notifyIfUpdateAvailable(this.manifest.version);
   }
@@ -431,8 +443,12 @@ export default class VaultRoomsPlugin extends Plugin {
       this.stopWatchingRoom(roomId);
     }
     this.syncSocket?.disconnect();
+    const retirement = this.crdtSessionManager?.dispose();
     this.crdtEditorController.unbindAll();
-    this.crdtSessionManager?.dispose();
+    if (retirement) void retirement.catch((error) => {
+      console.error("Vault Rooms: final local document save failed during unload", error);
+      new Notice(`Vault Rooms: local edits could not finish saving during unload. ${userFacingError(error, "Keep this vault open and retry before closing Obsidian.")}`, 10000);
+    });
     void this.serverConnectionManager.stopSilently();
   }
 
@@ -482,7 +498,7 @@ export default class VaultRoomsPlugin extends Plugin {
       // Pause/Start is a transport interruption, not a server switch. Keep the existing Y.Docs and
       // editor bindings alive so edits made while hosting was paused ride the normal reconnect
       // handshake instead of being reconstructed from a potentially stale Obsidian disk save.
-      this.connectSyncSocket({ preserveCrdtSessions: true });
+      await this.connectSyncSocket({ preserveCrdtSessions: true });
       await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
       this.renderOpenRoomsViews();
     }
@@ -659,6 +675,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const previousServers = this.settings.servers;
     const previousActiveServerId = this.settings.activeServerId;
     const previousEmbeddedServerConnectionId = this.settings.embeddedServerConnectionId;
+    await this.retireCrdtSessions();
     this.upsertServer(baseUrl, response, pinnedInfo);
     this.settings.embeddedServerConnectionId = response.device.id;
     try {
@@ -676,7 +693,7 @@ export default class VaultRoomsPlugin extends Plugin {
       }
       throw error;
     }
-    this.connectSyncSocket();
+    await this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     await this.openRoomsPanel();
     this.renderOpenRoomsViews();
@@ -714,6 +731,7 @@ export default class VaultRoomsPlugin extends Plugin {
       throw new Error(restoredStatus.error ?? "The restored v0.1 relay could not be started.");
     }
     const recovered = await this.serverConnectionManager.recoverEmbeddedOwnerDevice(deviceName);
+    await this.retireCrdtSessions();
     this.upsertServer(restoredStatus.localUrl, recovered, restoredStatus.pinnedInfo);
     this.settings.embeddedServerConnectionId = recovered.device.id;
     try {
@@ -729,7 +747,7 @@ export default class VaultRoomsPlugin extends Plugin {
       }
       throw error;
     }
-    this.connectSyncSocket();
+    await this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     this.renderOpenRoomsViews();
     new Notice("Restored v0.1 server data and recovered owner access. The previous database was retained as a pre-restore backup.");
@@ -772,9 +790,10 @@ export default class VaultRoomsPlugin extends Plugin {
       baseUrl: url,
       response: await new RelayApiClient(url, undefined, undefined, pin).join(inviteToken, displayName, deviceName)
     }));
+    await this.retireCrdtSessions();
     this.upsertServer(joinedBaseUrl, response, pin);
     await this.saveSettings();
-    this.connectSyncSocket();
+    await this.connectSyncSocket();
     await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
     this.renderOpenRoomsViews();
     new Notice(inviteJoinNotice(response, joinedBaseUrl));
@@ -790,7 +809,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const addressChanged = baseUrl !== server.baseUrl;
     const result = await this.serverConnectionManager.acceptInviteForServer(server, inviteToken, baseUrl, pin);
     if ((addressChanged || pin || result.deviceToken) && this.getActiveServer()?.id === server.id) {
-      this.connectSyncSocket();
+      await this.connectSyncSocket();
     }
     if (result.inviteType !== "friend" && this.getActiveServer()?.id === server.id) {
       await Promise.all([this.refreshTeams({ notify: false }), this.refreshRooms({ notify: false })]).catch(() => undefined);
@@ -1128,6 +1147,7 @@ export default class VaultRoomsPlugin extends Plugin {
       return;
     }
     const isActive = this.getActiveServer()?.id === server.id;
+    if (isActive) await this.retireCrdtSessions();
     this.settings.servers = this.settings.servers.filter((candidate) => candidate.id !== server.id);
     if (this.settings.embeddedServerConnectionId === server.id) {
       this.settings.embeddedServerConnectionId = undefined;
@@ -1152,7 +1172,7 @@ export default class VaultRoomsPlugin extends Plugin {
     }
     await this.saveSettings();
     if (isActive) {
-      this.connectSyncSocket();
+      await this.connectSyncSocket();
     }
     this.renderOpenRoomsViews();
     new Notice(`Removed ${server.baseUrl} from this device.`);
@@ -1163,10 +1183,11 @@ export default class VaultRoomsPlugin extends Plugin {
     if (!server) {
       throw new Error("Server not found.");
     }
+    await this.retireCrdtSessions();
     this.settings.activeServerId = serverId;
     this.resetSessionState();
     await this.saveSettings();
-    this.connectSyncSocket();
+    await this.connectSyncSocket();
     await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
       new Notice(userFacingError(error, "Failed to load server"));
     });
@@ -1178,7 +1199,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const wasActive = this.getActiveServer()?.id === serverId;
     const updated = await this.serverConnectionManager.updateServerAddress(serverId, address);
     if (wasActive) {
-      this.connectSyncSocket();
+      await this.connectSyncSocket();
       await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
         new Notice(userFacingError(error, "Address updated, but server data could not be refreshed yet"));
       });
@@ -1191,7 +1212,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const wasActive = this.getActiveServer()?.id === serverId;
     const updated = await this.serverConnectionManager.findServerOnLan(serverId);
     if (wasActive) {
-      this.connectSyncSocket();
+      await this.connectSyncSocket();
       await Promise.all([this.refreshRooms({ notify: false }), this.refreshTeams({ notify: false })]).catch((error) => {
         new Notice(userFacingError(error, "Server found, but its data could not be refreshed yet"));
       });
@@ -1237,6 +1258,7 @@ export default class VaultRoomsPlugin extends Plugin {
     const result = await this.apiFor(server).listRooms();
     this.visibleRooms = result.rooms.map((room) => withInstalledCapabilities(this.app, room));
     await this.persistRoomFlagsForMountedRooms();
+    await this.scanMountedRoomLocalCollisions(server.id);
     if (options.notify ?? true) {
       new Notice(`Loaded ${this.visibleRooms.length} room(s).`);
     }
@@ -1348,6 +1370,99 @@ export default class VaultRoomsPlugin extends Plugin {
     return (await this.apiFor(this.requireActiveServer()).listPathCollisions(roomId)).groups;
   }
 
+  listRoomPausedPaths(roomId: string): PausedPathGroup[] {
+    const room = this.settings.mountedRooms[roomId];
+    return room ? pausedPathModel(room) : [];
+  }
+
+  async openPausedPathsModal(roomId: string): Promise<void> {
+    const { PausedPathsModal } = await import("./modals/PausedPathsModal.js");
+    new PausedPathsModal(this, roomId).open();
+  }
+
+  private activeMountedRoomForRecovery(roomId: string): MountedRoomState {
+    const room = this.settings.mountedRooms[roomId];
+    const server = this.requireActiveServer();
+    if (!room || room.unmounted || room.serverId !== server.id) throw new Error("Switch to this room's server and add it to this computer before recovering files.");
+    return room;
+  }
+
+  async refreshRoomPausedPaths(roomId: string): Promise<void> {
+    const room = this.activeMountedRoomForRecovery(roomId);
+    await this.syncEngine.listLocalPathCollisions(room);
+    await this.saveSettings();
+    this.renderOpenRoomsViews();
+  }
+
+  private async scanMountedRoomLocalCollisions(serverId: string): Promise<void> {
+    if (!this.syncEngine) return;
+    let changed = false;
+    for (const room of Object.values(this.settings.mountedRooms)) {
+      if (room.unmounted || room.serverId !== serverId) continue;
+      const before = localCollisionState(room);
+      await this.syncEngine.listLocalPathCollisions(room);
+      changed ||= before !== localCollisionState(room);
+    }
+    if (changed) await this.saveSettings();
+  }
+
+  async repairLocalRoomPath(roomId: string, exactRelativePath: string, relativePath: string): Promise<void> {
+    const room = this.activeMountedRoomForRecovery(roomId);
+    const manager = this.crdtSessionManager;
+    if (!manager) throw new Error("Local recovery is not ready. Try again after reconnecting.");
+    const marker = crdtRenameMarkerKey(roomId, exactRelativePath, relativePath);
+    const markers = new Set([marker]);
+    this.selfInflictedRenames.add(marker);
+    try {
+      await this.syncEngine.repairLocalPathCollision(room, exactRelativePath, relativePath, {
+        preserveCrdt: async (paths) => {
+          for (const path of paths) {
+            if (path !== exactRelativePath && !path.startsWith(`${exactRelativePath}/`)) continue;
+            const childMarker = crdtRenameMarkerKey(roomId, path, relativePath + path.slice(exactRelativePath.length));
+            markers.add(childMarker);
+            this.selfInflictedRenames.add(childMarker);
+          }
+          await manager.preserveLocalPathAliases(roomId, paths);
+        },
+        persist: () => this.saveSettings()
+      });
+      await this.refreshRoomPausedPaths(roomId);
+      this.syncSocket?.refreshRoom(roomId);
+    } catch (error) {
+      (room.pathRecoveryErrors ??= {})[portablePathKey(exactRelativePath)] = userFacingError(error, "Local recovery failed. Try again.");
+      await this.saveSettings();
+      this.renderOpenRoomsViews();
+      throw error;
+    } finally {
+      for (const key of markers) this.selfInflictedRenames.delete(key);
+    }
+  }
+
+  async abandonRoomPathIntents(roomId: string, key: string): Promise<void> {
+    const room = this.activeMountedRoomForRecovery(roomId);
+    const manager = this.crdtSessionManager;
+    if (!manager) throw new Error("Local recovery is not ready. Try again after reconnecting.");
+    try {
+      await this.syncEngine.abandonAmbiguousLocalPathIntents(room, key, {
+        preserveCrdt: (paths) => manager.preserveLocalPathAliases(roomId, paths),
+        persist: () => this.saveSettings()
+      });
+    } catch (error) {
+      (room.pathRecoveryErrors ??= {})[portablePathKey(key)] = userFacingError(error, "Local recovery failed. Try again.");
+      await this.saveSettings();
+      this.renderOpenRoomsViews();
+      throw error;
+    }
+    await this.refreshRoomPausedPaths(roomId);
+    this.syncSocket?.refreshRoom(roomId);
+  }
+
+  async retryRoomPathRecovery(roomId: string): Promise<void> {
+    await this.refreshRoomPausedPaths(roomId);
+    if (!this.syncSocket || this.syncState !== "connected") throw new Error("Reconnect to this server, then retry recovery.");
+    this.syncSocket.refreshRoom(roomId);
+  }
+
   async renameRoomFile(roomId: string, input: RenameRoomFileInput): Promise<RenameRoomFileResponse> {
     const server = this.requireActiveServer();
     const result = await this.apiFor(server).renameRoomFile(roomId, input);
@@ -1361,7 +1476,9 @@ export default class VaultRoomsPlugin extends Plugin {
     const notified = (this.invalidNamesNotified ??= new Set<string>());
     if (notified.has(key)) return;
     notified.add(key);
-    new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "Choose a portable file name.")}`);
+    new Notice((error as { code?: string }).code === "PATH_COLLISION"
+      ? error.message
+      : `Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "Choose a portable file name.")}`);
   }
 
   openRoomSettingsModal(room: RoomSummary): void {
@@ -1769,6 +1886,10 @@ export default class VaultRoomsPlugin extends Plugin {
           this.notifyInvalidLocalPath(roomId, relativePath, error instanceof Error ? error : new Error(String(error)));
           return;
         }
+        if ((error as { code?: unknown })?.code === "PATH_COLLISION") {
+          this.notifyInvalidLocalPath(roomId, relativePath, error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
         console.error(`Vault Rooms: failed to sync "${relativePath}"`, error);
         new Notice(`Vault Rooms: couldn't sync "${relativePath}" - ${userFacingError(error, "the server rejected the change.")}`);
       },
@@ -1787,10 +1908,33 @@ export default class VaultRoomsPlugin extends Plugin {
         // "modify" | "delete". A rename fully inside the room additionally carries renameHint on
         // each of the two calls (see fileWatcher.ts's RenameHint doc comment).
         const changeType = event.type as "create" | "modify" | "delete";
-        if (isMountedPathBlocked(roomState, relativePath)) return;
+        // Consume both halves of our own file/folder renames before notices or journaling.
+        if (renameHint && "renamedToRelativePath" in renameHint &&
+          this.selfInflictedRenames.has(crdtRenameMarkerKey(roomId, relativePath, renameHint.renamedToRelativePath))) return;
+        if (renameHint && "renamedFromRelativePath" in renameHint &&
+          this.selfInflictedRenames.delete(crdtRenameMarkerKey(roomId, renameHint.renamedFromRelativePath, relativePath))) return;
+        if (changeType === "create" || renameHint) {
+          const before = localCollisionState(roomState);
+          try {
+            this.syncEngine.scanLocalPathCollisions(roomState);
+          } catch (error) {
+            const key = portablePathKey(relativePath);
+            roomState.pathRecoveryKeys = [...new Set([...(roomState.pathRecoveryKeys ?? []), key])];
+            (roomState.pathRecoveryErrors ??= {})[key] = userFacingError(error, "Local file names could not be checked. Retry recovery.");
+            void this.saveSettings();
+            this.renderOpenRoomsViews();
+            this.notifyInvalidLocalPath(roomId, relativePath, error instanceof Error ? error : new Error(String(error)));
+            return;
+          }
+          if (before !== localCollisionState(roomState)) {
+            void this.saveSettings();
+            this.renderOpenRoomsViews();
+          }
+        }
+        if (coordinator.notifyBlockedPath(relativePath)) return;
         if (renameHint) {
           const otherPath = "renamedToRelativePath" in renameHint ? renameHint.renamedToRelativePath : renameHint.renamedFromRelativePath;
-          if (isMountedPathBlocked(roomState, otherPath)) return;
+          if (coordinator.notifyBlockedPath(otherPath)) return;
         }
         // Use persisted CRDT mode until the first room refresh completes.
         const crdtEnabled = resolveRoomCrdtEnabled(this.visibleRooms.find((candidate) => candidate.id === roomId), roomState);
@@ -1815,26 +1959,6 @@ export default class VaultRoomsPlugin extends Plugin {
         // an unrelated new file appear (and the old one never went away) - the "rename produced a
         // duplicate" hardware bug (fifth round, 2026-07-24). The edit is safe on disk and reconciles
         // once canPushLocalEdits resolves true.
-        // This plugin performed this exact rename itself (applying a peer's rename, or adopting a
-        // server-assigned name for a colliding new note). Obsidian's vault event for it is
-        // indistinguishable from a user rename, so without this the watcher pushes a crdt_rename the
-        // server can only reject - the echo that made a name collision escalate without bound.
-        // Consumed here so a later genuine user rename of the same pair is still honored.
-        // fileWatcher emits the delete half first, then the create half, so the marker is only
-        // *consumed* by the create half - checking-without-consuming on the delete half keeps it
-        // available for its partner. A genuine later user rename of the same pair re-adds nothing and
-        // is therefore still honored.
-        if (renameHint && "renamedToRelativePath" in renameHint) {
-          if (this.selfInflictedRenames.has(crdtRenameMarkerKey(roomId, relativePath, renameHint.renamedToRelativePath))) {
-            return;
-          }
-        }
-        if (renameHint && "renamedFromRelativePath" in renameHint) {
-          if (this.selfInflictedRenames.delete(crdtRenameMarkerKey(roomId, renameHint.renamedFromRelativePath, relativePath))) {
-            return;
-          }
-        }
-
         if (canPushLocalEdits && crdtEnabled) {
           const newPath = renameHint && "renamedToRelativePath" in renameHint ? renameHint.renamedToRelativePath :
             changeType !== "delete" && !getMountedFileEntry(roomState, relativePath)?.[1].serverSha256 ? relativePath : undefined;
@@ -1965,11 +2089,34 @@ export default class VaultRoomsPlugin extends Plugin {
    * another. This also means: mounted rooms only actually sync while their own server is active -
    * switch back to a server to resume syncing whatever's mounted under it.
    */
-  private connectSyncSocket(options: { preserveCrdtSessions?: boolean } = {}): void {
+  private async retireCrdtSessions(): Promise<void> {
+    const manager = this.crdtSessionManager;
+    if (!manager) return;
+    try {
+      await manager.dispose();
+    } catch (error) {
+      this.crdtRetirementFailed = true;
+      this.disconnectSyncSocket();
+      this.syncState = "offline";
+      for (const roomId of Array.from(this.roomWatchers.keys())) this.stopWatchingRoom(roomId);
+      this.renderOpenRoomsViews();
+      console.error("Vault Rooms: document retirement failed; local sync is paused", error);
+      throw error;
+    }
+    this.crdtRetirementFailed = false;
+    if (this.crdtSessionManager === manager) this.crdtSessionManager = null;
+  }
+
+  private async connectSyncSocket(options: { preserveCrdtSessions?: boolean } = {}): Promise<void> {
+    const generation = this.syncConnectGeneration = (this.syncConnectGeneration ?? 0) + 1;
+    const server = this.getActiveServer();
+    const preserveCrdtSessions = options.preserveCrdtSessions === true && !this.crdtRetirementFailed && server !== undefined && Boolean(this.crdtSessionManager);
+    if (!preserveCrdtSessions) {
+      await this.retireCrdtSessions();
+      if (generation !== this.syncConnectGeneration || server?.id !== this.getActiveServer()?.id) return;
+    }
     this.disconnectSyncSocket();
     this.syncState = "offline";
-    const server = this.getActiveServer();
-    const preserveCrdtSessions = options.preserveCrdtSessions === true && server !== undefined && this.crdtSessionManager !== null;
     if (!preserveCrdtSessions) {
       // Every watcher was registered against whichever server was active when it was set up; that
       // binding is about to go stale (syncEngine below is being replaced), so every watcher must be
@@ -1983,8 +2130,6 @@ export default class VaultRoomsPlugin extends Plugin {
       // tear it down alongside syncEngine below, and unbind every editor view live against it (not
       // just the focused one - second-hardware-testing-round item 3).
       this.crdtEditorController.unbindAll();
-      this.crdtSessionManager?.dispose();
-      this.crdtSessionManager = null;
       this.syncEngine = new VaultSyncEngine(
         this.vaultAdapter,
         server ? this.apiFor(server) : new RelayApiClient("http://127.0.0.1:8787")
@@ -1994,6 +2139,8 @@ export default class VaultRoomsPlugin extends Plugin {
       this.renderOpenRoomsViews();
       return;
     }
+    await this.scanMountedRoomLocalCollisions(server.id);
+    if (generation !== this.syncConnectGeneration || server.id !== this.getActiveServer()?.id) return;
     if (!preserveCrdtSessions) {
       this.crdtSessionManager = new CrdtSessionManager({
         send: (message) => this.syncSocket?.sendCrdtMessage(message) ?? false,
@@ -2015,6 +2162,7 @@ export default class VaultRoomsPlugin extends Plugin {
         writeDiskText: (roomId, relativePath, text) => this.writeCrdtDiskText(roomId, relativePath, text),
         renameDiskFile: (roomId, oldRelativePath, newRelativePath) => this.renameCrdtDiskFile(roomId, oldRelativePath, newRelativePath),
         onSessionRetiring: (roomId, relativePath) => this.crdtEditorController.unbindTarget(roomId, relativePath),
+        onSessionChanged: (roomId, relativePath) => this.roomCoordinators.get(roomId)?.notifyBlockedPath(relativePath),
         onSessionOpened: () => this.handleActiveEditorChanged(),
         // First creator of a name keeps it; this device's own new note was given a distinct name instead
         // of being merged into someone else's note or silently failing to sync. Worth telling the user,
@@ -2187,7 +2335,7 @@ export default class VaultRoomsPlugin extends Plugin {
     try {
       const migrated = await this.serverConnectionManager.migrateConnection(server);
       if (this.getActiveServer()?.id === migrated.id) {
-        this.connectSyncSocket();
+        await this.connectSyncSocket();
       }
       new Notice("Vault Rooms connection upgraded to pinned TLS.");
     } catch (error) {

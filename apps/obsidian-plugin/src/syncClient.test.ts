@@ -36,6 +36,14 @@ class FakeVaultAdapter implements VaultAdapter {
     this.files.delete(path);
   }
 
+  async recoverFile(path: string, copyPath: string, replacement?: { content: string; contentEncoding: "utf8" | "base64" }): Promise<void> {
+    if (this.files.has(path)) await this.rename(path, copyPath);
+    if (replacement) {
+      if (this.files.has(path)) throw new Error("Destination exists");
+      this.files.set(path, replacement.content);
+    }
+  }
+
   async rename(oldPath: string, newPath: string): Promise<void> {
     const content = this.files.get(oldPath);
     if (content === undefined) return;

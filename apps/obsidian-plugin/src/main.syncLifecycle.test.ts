@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Notice } from "obsidian";
 import VaultRoomsPlugin from "./main.js";
 import type { EmbeddedServerStatus } from "./serverManager.js";
 import type { ServerConnection, VaultRoomsSettings } from "./settings.js";
@@ -14,7 +15,7 @@ const socketMocks = vi.hoisted(() => ({
 const updateMocks = vi.hoisted(() => ({ notifyIfUpdateAvailable: vi.fn().mockResolvedValue(undefined) }));
 
 vi.mock("obsidian", () => ({
-  Notice: class Notice {},
+  Notice: vi.fn(),
   Plugin: class Plugin {},
   normalizePath: (path: string) => path,
   requestUrl: vi.fn()
@@ -74,20 +75,131 @@ beforeEach(() => {
 });
 
 describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
-  it("initializes local sync lifecycle after layout ready even while the own relay is stopped", () => {
+  function retiringConnection(dispose: ReturnType<typeof vi.fn>) {
+    const active = server();
+    const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
+    plugin.settings = settings(active);
+    plugin.visibleRooms = [];
+    const manager = { dispose };
+    const internals = plugin as unknown as {
+      crdtSessionManager: typeof manager | null;
+      crdtEditorController: { unbindAll: ReturnType<typeof vi.fn> };
+      roomWatchers: Map<string, () => void>;
+      roomCoordinators: Map<string, unknown>;
+      vaultAdapter: { list?: ReturnType<typeof vi.fn> };
+      crdtDocStore: Record<string, never>;
+      syncSocket: null;
+      serverConnectionManager: { apiFor: () => Record<string, never>; stopSilently: ReturnType<typeof vi.fn> };
+      renderOpenRoomsViews: ReturnType<typeof vi.fn>;
+      handleActiveEditorChanged: ReturnType<typeof vi.fn>;
+      activeServerIsOwnStoppedServer: () => boolean;
+      getActiveServer: () => ServerConnection;
+      connectSyncSocket: (options?: { preserveCrdtSessions?: boolean }) => Promise<void>;
+      resetSessionState: ReturnType<typeof vi.fn>;
+      saveSettings: ReturnType<typeof vi.fn>;
+      refreshRooms: ReturnType<typeof vi.fn>;
+      refreshTeams: ReturnType<typeof vi.fn>;
+    };
+    internals.crdtSessionManager = manager;
+    internals.crdtEditorController = { unbindAll: vi.fn() };
+    internals.roomWatchers = new Map();
+    internals.roomCoordinators = new Map();
+    internals.vaultAdapter = {};
+    internals.crdtDocStore = {};
+    internals.syncSocket = null;
+    internals.serverConnectionManager = { apiFor: () => ({}), stopSilently: vi.fn().mockResolvedValue(undefined) };
+    internals.renderOpenRoomsViews = vi.fn();
+    internals.handleActiveEditorChanged = vi.fn();
+    internals.activeServerIsOwnStoppedServer = () => false;
+    internals.getActiveServer = () => active;
+    internals.resetSessionState = vi.fn();
+    internals.saveSettings = vi.fn().mockResolvedValue(undefined);
+    internals.refreshRooms = vi.fn().mockResolvedValue(undefined);
+    internals.refreshTeams = vi.fn().mockResolvedValue(undefined);
+    return { plugin, internals, manager, active };
+  }
+
+  it("awaits manager persistence before replacing it or unbinding all editors", async () => {
+    let finish!: () => void;
+    const { internals, manager } = retiringConnection(vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })));
+    const connecting = Promise.resolve(internals.connectSyncSocket());
+    expect(internals.crdtSessionManager).toBe(manager);
+    expect(internals.crdtEditorController.unbindAll).not.toHaveBeenCalled();
+    expect(socketMocks.instances).toHaveLength(0);
+    finish();
+    await connecting;
+    expect(internals.crdtSessionManager).not.toBe(manager);
+    expect(socketMocks.instances).toHaveLength(1);
+  });
+
+  it("discovers local disk collisions before a reconnect can bind editors or subscribe", async () => {
+    const { plugin, internals, active } = retiringConnection(vi.fn().mockResolvedValue(undefined));
+    plugin.settings.mountedRooms.r = { roomId: "r", serverId: active.id, mountPath: "Shared", files: {} };
+    const list = vi.fn().mockResolvedValue(["Shared/Board.md", "Shared/board.md"]);
+    internals.vaultAdapter = { list };
+    const order: string[] = [];
+    list.mockImplementation(async () => { order.push("scan"); return ["Shared/Board.md", "Shared/board.md"]; });
+    internals.handleActiveEditorChanged = vi.fn(() => order.push("bind"));
+    (plugin as unknown as { watchMountedRoom: () => void }).watchMountedRoom = vi.fn();
+    await internals.connectSyncSocket();
+    expect(plugin.settings.mountedRooms.r.pathLocalCollisionKeys).toEqual(["board.md"]);
+    expect(order.indexOf("scan")).toBeLessThan(order.indexOf("bind"));
+    expect(internals.saveSettings).toHaveBeenCalledOnce();
+  });
+
+  it("retains the previous manager and server selection when final persistence fails", async () => {
+    const error = new Error("final cache write failed");
+    const failed = Promise.reject(error);
+    void failed.catch(() => undefined);
+    const { plugin, internals, manager, active } = retiringConnection(vi.fn(() => failed));
+    const disconnect = vi.fn();
+    Object.assign(internals, { syncState: "connected", syncSocket: { disconnect } });
+    plugin.settings.servers.push({ ...active, id: "other" });
+    await expect(plugin.activateServer("other")).rejects.toThrow("final cache write failed");
+    expect(plugin.settings.activeServerId).toBe(active.id);
+    expect(internals.crdtSessionManager).toBe(manager);
+    expect(internals.saveSettings).not.toHaveBeenCalled();
+    expect(socketMocks.instances).toHaveLength(0);
+    expect(plugin.getSyncState()).toBe("offline");
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("retries a failed retirement before a same-server preservation reconnect", async () => {
+    const dispose = vi.fn().mockRejectedValueOnce(new Error("cache write failed")).mockResolvedValue(undefined);
+    const { plugin, internals, manager, active } = retiringConnection(dispose);
+    plugin.settings.servers.push({ ...active, id: "other" });
+    await expect(plugin.activateServer("other")).rejects.toThrow("cache write failed");
+    await internals.connectSyncSocket({ preserveCrdtSessions: true });
+    expect(dispose).toHaveBeenCalledTimes(2);
+    expect(socketMocks.instances[0]?.deps.crdt).not.toBe(manager);
+  });
+
+  it("reports a failed non-awaiting unload save and retains its manager", async () => {
+    const error = new Error("unload cache write failed");
+    const failed = Promise.reject(error);
+    void failed.catch(() => undefined);
+    const { plugin, internals, manager } = retiringConnection(vi.fn(() => failed));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    plugin.onunload();
+    await vi.waitFor(() => expect(Notice).toHaveBeenCalledWith(expect.stringContaining("unload cache write failed"), 10000));
+    expect(internals.crdtSessionManager).toBe(manager);
+    vi.mocked(console.error).mockRestore();
+  });
+
+  it("initializes local sync lifecycle after layout ready even while the own relay is stopped", async () => {
     const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
     const connectSyncSocket = vi.fn();
     const refreshRooms = vi.fn().mockResolvedValue(undefined);
     const internals = plugin as unknown as {
       connectSyncSocket: typeof connectSyncSocket;
       refreshRooms: typeof refreshRooms;
-      initializeSyncAfterLayoutReady: () => void;
+      initializeSyncAfterLayoutReady: () => Promise<void>;
     };
     internals.connectSyncSocket = connectSyncSocket;
     internals.refreshRooms = refreshRooms;
     (plugin as unknown as { manifest: { version: string } }).manifest = { version: "0.2.5" };
 
-    internals.initializeSyncAfterLayoutReady();
+    await internals.initializeSyncAfterLayoutReady();
 
     expect(connectSyncSocket).toHaveBeenCalledOnce();
     expect(refreshRooms).toHaveBeenCalledWith({ notify: false });
@@ -232,7 +344,7 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
     expect(saveSettings).toHaveBeenCalledOnce();
   });
 
-  it("replaces only the socket while retaining the live Y.Doc manager, editor bindings, and watchers", () => {
+  it("replaces only the socket while retaining the live Y.Doc manager, editor bindings, and watchers", async () => {
     const active = server();
     const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
     plugin.settings = settings(active);
@@ -256,7 +368,7 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
       activeServerIsOwnStoppedServer: () => boolean;
       handleActiveEditorChanged: () => void;
       renderOpenRoomsViews: () => void;
-      connectSyncSocket: (options?: { preserveCrdtSessions?: boolean }) => void;
+      connectSyncSocket: (options?: { preserveCrdtSessions?: boolean }) => Promise<void>;
     };
     internals.syncSocket = previousSocket;
     internals.syncState = "offline";
@@ -271,7 +383,7 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
     internals.handleActiveEditorChanged = vi.fn();
     internals.renderOpenRoomsViews = vi.fn();
 
-    internals.connectSyncSocket({ preserveCrdtSessions: true });
+    await internals.connectSyncSocket({ preserveCrdtSessions: true });
 
     expect(previousSocket.disconnect).toHaveBeenCalledOnce();
     expect(manager.dispose).not.toHaveBeenCalled();
@@ -283,7 +395,7 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
     expect(socketMocks.instances[0]?.connect).toHaveBeenCalledOnce();
   });
 
-  it("reports a dropped CRDT send when hosting is paused instead of leaving create requests pending", () => {
+  it("reports a dropped CRDT send when hosting is paused instead of leaving create requests pending", async () => {
     const active = server();
     const plugin = Object.create(VaultRoomsPlugin.prototype) as VaultRoomsPlugin;
     plugin.settings = settings(active);
@@ -304,7 +416,7 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
       handleActiveEditorChanged: () => void;
       renderOpenRoomsViews: () => void;
       disconnectSyncSocket: () => void;
-      connectSyncSocket: () => void;
+      connectSyncSocket: () => Promise<void>;
     };
     internals.syncSocket = null;
     internals.syncState = "offline";
@@ -321,7 +433,7 @@ describe("VaultRoomsPlugin embedded-server sync lifecycle", () => {
     internals.handleActiveEditorChanged = vi.fn();
     internals.renderOpenRoomsViews = vi.fn();
 
-    internals.connectSyncSocket();
+    await internals.connectSyncSocket();
     const manager = socketMocks.instances[0]?.deps.crdt as {
       deps: { send: (message: Record<string, unknown>) => boolean | void };
     };

@@ -44,6 +44,9 @@ const invokedStrings: Array<[string, string]> = [
   ["room.location", PANEL_COPY.room.location("Notes/Daily Report")],
   ["room.needsChoice", PANEL_COPY.room.needsChoice(1)],
   ["room.needsChoice", PANEL_COPY.room.needsChoice(2)],
+  ["pausedPaths.count", PANEL_COPY.pausedPaths.count(1)],
+  ["pausedPaths.count", PANEL_COPY.pausedPaths.count(2)],
+  ["pausedPaths.editNotice", PANEL_COPY.pausedPaths.editNotice("Notes/Board.md", PANEL_COPY.pausedPaths.localCollision)],
   ["hosting.pausedHere", PANEL_COPY.hosting.pausedHere(1)],
   ["hosting.pausedHere", PANEL_COPY.hosting.pausedHere(2)],
   ["connection.ownedBy", PANEL_COPY.connection.ownedBy("Huy")],
@@ -95,6 +98,8 @@ describe("panel copy contract", () => {
       "connection.ownedBy",
       "connection.unnamedOnPort",
       "hosting.pausedHere",
+      "pausedPaths.count",
+      "pausedPaths.editNotice",
       "room.location",
       "room.needsChoice"
     ]);

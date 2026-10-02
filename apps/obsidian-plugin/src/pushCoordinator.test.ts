@@ -89,6 +89,65 @@ function createRoom(): MountedRoomState {
 }
 
 describe("RoomPushCoordinator", () => {
+  it("reports each blocked path and reason once without mutating or pushing ambiguous tracking", () => {
+    const vault = new FakeVaultAdapter();
+    const api = new FakeApi();
+    const room = createRoom();
+    room.pathCollisionKeys = ["board.md"];
+    room.files["Board.md"] = { serverVersion: 1, serverSha256: "old", localSha256: "old", dirty: false };
+    const before = structuredClone(room.files);
+    const onError = vi.fn();
+    const coordinator = new RoomPushCoordinator({
+      room, syncEngine: new VaultSyncEngine(vault, api), deviceName: "Laptop",
+      onPersist: vi.fn(), onError, debounceMs: 50, isStillMounted: () => true
+    });
+    coordinator.handleLocalChange("modify", "Board.md");
+    coordinator.handleLocalChange("modify", "Board.md");
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toMatchObject({ code: "PATH_COLLISION" });
+    room.pathCollisionKeys = [];
+    room.pathRecoveryKeys = ["board.md"];
+    coordinator.handleLocalChange("modify", "Board.md");
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(room.files).toEqual(before);
+    expect(api.writes).toEqual([]);
+    expect(api.deletes).toEqual([]);
+    coordinator.dispose();
+  });
+
+  it("reports a local alias collision even when authoritative recovery is also pending", () => {
+    const room = createRoom();
+    room.pathRecoveryKeys = ["board.md"];
+    room.files["Board.md"] = { serverVersion: 1, serverSha256: "a", localSha256: "a", dirty: false };
+    room.files["board.md"] = { serverVersion: 1, serverSha256: "b", localSha256: "b", dirty: false };
+    const onError = vi.fn();
+    const coordinator = new RoomPushCoordinator({ room, syncEngine: new VaultSyncEngine(new FakeVaultAdapter(), new FakeApi()),
+      deviceName: "Laptop", onPersist: vi.fn(), onError, debounceMs: 50, isStillMounted: () => true });
+    coordinator.handleLocalChange("modify", "Board.md");
+    expect(onError.mock.calls[0]?.[1]).toMatchObject({ reason: "local-collision" });
+  });
+
+  it("cancels queued pushes when disposed while a preceding push is still in flight", async () => {
+    const room = createRoom();
+    const engine = new VaultSyncEngine(new FakeVaultAdapter(), new FakeApi());
+    let finish!: () => void;
+    const firstPush = new Promise<void>((resolve) => { finish = resolve; });
+    const push = vi.spyOn(engine, "pushLocalChange").mockImplementationOnce(() => firstPush).mockResolvedValue(undefined);
+    const timers: Array<() => void> = [];
+    const coordinator = new RoomPushCoordinator({ room, syncEngine: engine, deviceName: "Laptop",
+      onPersist: vi.fn(), onError: vi.fn(), debounceMs: 50, isStillMounted: () => true,
+      schedule: (fn) => { timers.push(fn); return timers.length; }, cancel: vi.fn() });
+    coordinator.handleLocalChange("modify", "Board.md");
+    timers.shift()!();
+    await vi.waitFor(() => expect(push).toHaveBeenCalledOnce());
+    coordinator.handleLocalChange("modify", "Board.md");
+    timers.shift()!();
+    coordinator.dispose();
+    finish();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(push).toHaveBeenCalledOnce();
+  });
+
   it("marks a file dirty synchronously on a local edit, before the debounce timer fires", async () => {
     const vault = new FakeVaultAdapter();
     const api = new FakeApi();

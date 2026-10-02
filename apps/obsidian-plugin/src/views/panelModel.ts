@@ -11,7 +11,7 @@ export type PanelTab = "rooms" | "people" | "activity";
  */
 export type ActivityAccess = "allowed" | "denied" | "unknown";
 export type PanelDataState = "current" | "refreshing" | "stale-error";
-export type PanelRoomAction = "open" | "add" | "remove" | "switch" | "manage";
+export type PanelRoomAction = "open" | "add" | "remove" | "switch" | "manage" | "recover-paths";
 
 export type PanelState = {
   activeServer?: {
@@ -47,6 +47,7 @@ export type PanelRoomState = {
   mountedPath?: string;
   mountedServerId?: string;
   conflictCount: number;
+  pausedPathCount?: number;
   canManage: boolean;
   /** Stored bytes referenced by this room. Shared blobs can appear in multiple rooms. */
   storedBytes: number;
@@ -268,15 +269,18 @@ function connectionAlert(state: PanelState): string | undefined {
 
 function roomPresentation(room: PanelRoomState, activeServerId: string | undefined): RoomPresentation {
   const paused = room.mounted && Boolean(room.mountedServerId && room.mountedServerId !== activeServerId);
-  const attention = paused || room.conflictCount > 0 || !room.mounted;
+  const attention = paused || room.conflictCount > 0 || (room.pausedPathCount ?? 0) > 0 || !room.mounted;
   const actions: PanelRoomAction[] = paused
     ? ["switch"]
     : room.mounted
       ? ["open", "remove"]
       : ["add"];
   if (room.canManage) actions.push("manage");
+  if (!paused && (room.pausedPathCount ?? 0) > 0) actions.push("recover-paths");
   const status = paused
     ? PANEL_COPY.room.paused
+    : (room.pausedPathCount ?? 0) > 0
+      ? PANEL_COPY.pausedPaths.count(room.pausedPathCount!)
     : room.conflictCount > 0
       ? PANEL_COPY.room.needsChoice(room.conflictCount)
       : room.mounted

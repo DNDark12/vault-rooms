@@ -2,6 +2,8 @@ import { portablePathKey } from "@vault-rooms/protocol";
 import type { RenameHint } from "./fileWatcher.js";
 import { userFacingError } from "./errorMessages.js";
 import { getMountedFileEntry, isMountedPathBlocked, localPortablePathError, isConflictCopyPath, type MountedRoomState, VaultSyncEngine } from "./syncClient.js";
+import { PANEL_COPY } from "./views/panelCopy.js";
+import { pausedPathModel } from "./views/pausedPathModel.js";
 
 /** Errors that cannot succeed by retrying the same write. */
 const TERMINAL_ERROR_CODES = new Set(["FILE_TOO_LARGE", "INVALID_PATH", "VALIDATION_ERROR", "STORAGE_QUOTA_EXCEEDED"]);
@@ -35,8 +37,10 @@ export type RoomPushCoordinatorDeps = {
  * inline in main.ts's watchMountedRoom().
  */
 export class RoomPushCoordinator {
+  private disposed = false;
   private readonly pendingTimers = new Map<string, number>();
   private readonly invalidNamesNotified = new Set<string>();
+  private readonly blockedPathsNotified = new Set<string>();
   private readonly pushChains = new Map<string, Promise<void>>();
   private readonly schedule: (fn: () => void, ms: number) => number;
   private readonly cancel: (id: number) => void;
@@ -48,11 +52,13 @@ export class RoomPushCoordinator {
 
   /** Handles one already-classified local vault event for this room. */
   handleLocalChange(type: "create" | "modify" | "delete", relativePath: string, renameHint?: RenameHint): void {
-    if (relativePath.split("/").some((part) => part.startsWith(".")) || isConflictCopyPath(relativePath) || isMountedPathBlocked(this.deps.room, relativePath)) {
+    if (this.disposed) return;
+    if (relativePath.split("/").some((part) => part.startsWith(".")) || isConflictCopyPath(relativePath) || this.notifyBlockedPath(relativePath)) {
       return;
     }
     const renamedTo = renameHint && "renamedToRelativePath" in renameHint ? renameHint.renamedToRelativePath : undefined;
     const tracked = getMountedFileEntry(this.deps.room, relativePath)?.[1];
+    if (renamedTo && this.notifyBlockedPath(renamedTo)) return;
     if (renamedTo && !this.isValidNewName(renamedTo)) return;
     if (type !== "delete" && (renameHint || !tracked?.serverSha256) && !this.isValidNewName(relativePath)) return;
     if (renamedTo && portablePathKey(renamedTo) === portablePathKey(relativePath)) {
@@ -72,11 +78,29 @@ export class RoomPushCoordinator {
     this.handleLocalEdit(relativePath);
   }
 
+  /** Shared with the watcher so its CRDT early return also explains the paused edit. */
+  notifyBlockedPath(relativePath: string): boolean {
+    const room = this.deps.room;
+    if (!isMountedPathBlocked(room, relativePath)) return false;
+    const key = portablePathKey(relativePath);
+    const reason = pausedPathModel(room).find((group) => group.key === key || key.startsWith(`${group.key}/`))?.reason ?? "local-collision";
+    const notificationKey = `${relativePath}\0${reason}`;
+    if (!this.blockedPathsNotified.has(notificationKey)) {
+      this.blockedPathsNotified.add(notificationKey);
+      const description = reason === "server-collision" ? PANEL_COPY.pausedPaths.serverCollision
+        : reason === "local-collision" ? PANEL_COPY.pausedPaths.localCollision : PANEL_COPY.pausedPaths.recoveryPending;
+      this.deps.onError(relativePath, Object.assign(new Error(PANEL_COPY.pausedPaths.editNotice(relativePath, description)), {
+        code: "PATH_COLLISION", reason
+      }));
+    }
+    return true;
+  }
+
   /** Re-enqueues every file currently marked dirty or pending-delete (and not terminally failed)
    *  through the exact same debounced/serialized push machinery - call this when connectivity is
    *  restored (e.g. the sync socket reaches "connected") instead of maintaining a second queue. */
   retryPending(): void {
-    if (!this.deps.isStillMounted()) {
+    if (this.disposed || !this.deps.isStillMounted()) {
       return;
     }
     for (const [relativePath, state] of Object.entries(this.deps.room.files)) {
@@ -95,6 +119,7 @@ export class RoomPushCoordinator {
 
   /** Cancels all pending debounce timers - call on unmount/dispose so nothing fires after teardown. */
   dispose(): void {
+    this.disposed = true;
     for (const timer of this.pendingTimers.values()) {
       this.cancel(timer);
     }
@@ -171,7 +196,7 @@ export class RoomPushCoordinator {
     }
     const timer = this.schedule(() => {
       this.pendingTimers.delete(portablePathKey(relativePath));
-      if (!this.deps.isStillMounted()) {
+      if (this.disposed || !this.deps.isStillMounted()) {
         return;
       }
       run();
@@ -182,25 +207,25 @@ export class RoomPushCoordinator {
   /** Chains onto any push already in flight for this path, so overlapping pushes for the same
    *  path never race each other (see the class doc comment). */
   private enqueue(relativePath: string, push: () => Promise<void>): void {
-    if (!this.deps.isStillMounted() || isMountedPathBlocked(this.deps.room, relativePath)) {
+    if (this.disposed || !this.deps.isStillMounted() || isMountedPathBlocked(this.deps.room, relativePath)) {
       return;
     }
     const previous = this.pushChains.get(portablePathKey(relativePath)) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(() => {
-        if (!this.deps.isStillMounted() || isMountedPathBlocked(this.deps.room, relativePath)) {
+        if (this.disposed || !this.deps.isStillMounted() || isMountedPathBlocked(this.deps.room, relativePath)) {
           return;
         }
         return push();
       })
       .then(() => {
-        if (this.deps.isStillMounted()) {
+        if (!this.disposed && this.deps.isStillMounted()) {
           this.deps.onPersist();
         }
       })
       .catch((error) => {
-        if (!this.deps.isStillMounted()) {
+        if (this.disposed || !this.deps.isStillMounted()) {
           return;
         }
         if (isTerminalSyncError(error)) {

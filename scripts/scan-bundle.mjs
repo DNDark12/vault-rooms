@@ -3,6 +3,10 @@
 // Any increase requires source inspection before updating these numbers.
 // clearTimeout( 27 -> 28: CrdtDocManager.retireRoom cancels a room's pending materialize timers
 // through the injected SyncTimerHost (window timers when embedded), not a bare global.
+// globalThis 10 -> 12: CrdtDocStore's Symbol.for-scoped WeakMap keeps cache ownership and
+// failed final-save handoff across non-awaited plugin reloads. Esbuild emits a read and write
+// for ??=. This stores only volatile queues scoped to the public vault adapter/cache directory;
+// it does not inspect the host, expose vault data, or introduce a dependency.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -15,7 +19,7 @@ export const TIER3_APPROVED_BASELINE = {
   "setInterval(": 3,
   "clearTimeout(": 28,
   "clearInterval(": 3,
-  "globalThis": 10,
+  "globalThis": 12,
   "fetch(": 2,
   "window.setTimeout": 15
 };

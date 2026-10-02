@@ -10,6 +10,7 @@ import type {
 } from "../apiClient.js";
 import type { ServerConnection, VaultRoomsSettings } from "../settings.js";
 import { PANEL_COPY } from "./panelCopy.js";
+import type { PausedPathGroup } from "./pausedPathModel.js";
 import { VaultRoomsView } from "./VaultRoomsView.js";
 
 vi.mock("obsidian", () => {
@@ -216,6 +217,8 @@ function harness(options: HarnessOptions | boolean = {}) {
     mountedPathFor: () => "Vault Rooms/Daily Report",
     mountedRoomServerId: () => active.id,
     listRoomConflicts: () => [],
+    listRoomPausedPaths: vi.fn((): PausedPathGroup[] => []),
+    openPausedPathsModal: vi.fn(),
     openCreateInviteModal: vi.fn(),
     openCreateRoomModal: vi.fn(),
     openRoomSettingsModal: vi.fn(),
@@ -302,6 +305,20 @@ describe("VaultRoomsView UX B", () => {
     const { view } = harness(true);
     view.render();
     expect(view.containerEl.textContent).toContain("Manage");
+  });
+
+  it("renders paused-path attention and opens recovery for members without Manage", () => {
+    const { view, plugin } = harness({ canManageRoom: false });
+    plugin.listRoomPausedPaths.mockReturnValue([
+      { key: "board.md", paths: ["Board.md", "board.md"], reason: "local-collision", pendingIntentCount: 0 }
+    ]);
+    view.render();
+    expect(view.containerEl.textContent).toContain("2 file names are paused");
+    expect(view.containerEl.querySelector("#vault-rooms-tab-rooms")?.textContent).toContain("1");
+    Array.from(view.containerEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "Review paused files")?.click();
+    expect(plugin.openPausedPathsModal).toHaveBeenCalledWith("daily");
+    expect(plugin.openRoomSettingsModal).not.toHaveBeenCalled();
   });
 
   it("keeps room rows visible and labels them stale after refresh fails", async () => {

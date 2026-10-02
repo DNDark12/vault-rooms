@@ -1,6 +1,19 @@
 import type { DataAdapter } from "obsidian";
 import { recoverDataAdapterFileReplacement, replaceDataAdapterFile } from "./dataAdapterFileReplace.js";
 
+type RoomCacheAccess = {
+  tail: Promise<void>;
+  failedRetirement?: () => Promise<unknown>;
+};
+type RuntimeCacheAccess = WeakMap<DataAdapter, Map<string, RoomCacheAccess>>;
+const CACHE_ACCESS_KEY = Symbol.for("vault-rooms.crdt-cache-access.v1");
+/** Deliberately shared volatile ownership: Obsidian unload cannot await final writes, and plugin
+ * reload evaluates a new module while the old one may still own the same adapter/cache directory.
+ * Keep failed final saves available to the next instance; this is not process-crash durability. */
+const runtimeCacheAccess = (globalThis as unknown as Record<symbol, RuntimeCacheAccess | undefined>)[CACHE_ACCESS_KEY] ??= new WeakMap();
+
+export type CrdtRoomAccessOptions = { retainFailure?: boolean };
+
 /** Per-doc quota (contracts 1.7/1.12) - the client should never accumulate more local persisted
  *  state for one document than the server would ever hold for it. */
 export const MAX_PERSISTED_CRDT_DOC_BYTES = 4 * 1024 * 1024;
@@ -31,6 +44,45 @@ export class CrdtDocStore {
 
   private roomDir(roomId: string): string {
     return `${this.baseDir}/${sanitizeSegment(roomId)}`;
+  }
+
+  /** Register ownership synchronously, before any await. Call store methods directly inside the
+   * callback: recursively acquiring this queue for the same room would wait on itself. */
+  withRoomAccess<T>(roomId: string, operation: () => Promise<T>, options: CrdtRoomAccessOptions = {}): Promise<T> {
+    let rooms = runtimeCacheAccess.get(this.adapter);
+    if (!rooms) {
+      rooms = new Map();
+      runtimeCacheAccess.set(this.adapter, rooms);
+    }
+    const directory = this.roomDir(roomId);
+    const access = rooms.get(directory) ?? { tail: Promise.resolve() };
+    rooms.set(directory, access);
+    const running = access.tail.then(async () => {
+      const retained = access.failedRetirement;
+      if (retained) {
+        // Retry only the failed final save, once per subsequent access. No disk reconciliation,
+        // journal replay or identity selection occurs before those captured bytes are durable.
+        await retained();
+        if (access.failedRetirement === retained) delete access.failedRetirement;
+      }
+      return operation();
+    }).catch((error: unknown) => {
+      // A final save can also be skipped by a rejected predecessor. Retain it in that case,
+      // while keeping an older failed retirement when its own retry is what failed.
+      if (options.retainFailure && !access.failedRetirement) access.failedRetirement = operation;
+      throw error;
+    });
+    const tail = running.then(() => undefined);
+    access.tail = tail;
+    const settled = () => {
+      if (access.tail !== tail) return;
+      if (access.failedRetirement) access.tail = Promise.resolve();
+      else rooms.delete(directory);
+    };
+    // Queued dependants receive predecessor failure. A later access can retry retained final
+    // persistence; ordinary failed operations release ownership for their caller's explicit retry.
+    void tail.then(settled, settled);
+    return running;
   }
 
   private async keyFor(roomId: string, relativePath: string, epoch: number): Promise<{ dir: string; prefix: string; path: string }> {

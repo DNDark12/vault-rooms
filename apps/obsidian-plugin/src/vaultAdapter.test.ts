@@ -105,3 +105,18 @@ describe("ObsidianVaultAdapter exact cache with portable children", () => {
     expect(trashFile).not.toHaveBeenCalled();
   });
 });
+
+describe("scoped local folder collision discovery", () => {
+  it("reports an empty aliased folder and repairs only the selected exact folder", async () => {
+    const first = { path: "Room/Secret", children: [{ path: "Room/Secret/a.md", extension: "md" }] };
+    const second = { path: "Room/secret", children: [] };
+    const root = { path: "", children: [{ path: "Room", children: [first, second] }] };
+    const renameFile = vi.fn(async (folder: typeof first, path: string) => { folder.path = path; });
+    const vault = { getRoot: () => root, getAbstractFileByPath: (path: string) => path === "Room/secret" ? second : null };
+    const adapter = new ObsidianVaultAdapter({ app: { vault, fileManager: { renameFile } } } as unknown as Plugin);
+    expect(adapter.pathCollisions("Room")).toEqual([{ key: "secret", paths: ["Secret", "secret"] }]);
+    await adapter.renameExact("Room/secret", "Room/other-secret");
+    expect(renameFile).toHaveBeenCalledWith(second, "Room/other-secret");
+    expect(first.path).toBe("Room/Secret");
+  });
+});

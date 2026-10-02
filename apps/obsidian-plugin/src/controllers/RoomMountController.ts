@@ -105,6 +105,7 @@ export class RoomMountController {
     // conflict copy instead of being clobbered.
     const api = this.deps.apiFor(server);
     const files = await api.listFiles(room.id);
+    await syncEngine.listLocalPathCollisions?.(state);
     const previousPaths = collisionRecoveryPaths(state);
     const previousCollisions = new Set(previousPaths.map(portablePathKey));
     updatePathCollisionKeys(state, files.files);
@@ -132,6 +133,8 @@ export class RoomMountController {
       await syncEngine.applyRemoteChange(state, content, server.deviceName, recovering, recovering);
       if (recovering) completePathRecovery(state, file.relativePath);
     }
+
+    await syncEngine.recoverAbsentSnapshotPaths?.(state, files.files, server.deviceName);
 
     // The server's listing only covers what's already been synced. On the room owner's own
     // device, mountPath is the real sourcePath folder, which typically already has real content

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DataAdapter } from "obsidian";
 import { CrdtDocStore, CrdtDocStoreQuotaExceededError, MAX_PERSISTED_CRDT_DOC_BYTES } from "./crdtDocStore.js";
 
@@ -59,7 +59,118 @@ function asDataAdapter(adapter: FakeDataAdapter): DataAdapter {
   return adapter as unknown as DataAdapter;
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("CrdtDocStore", () => {
+  it("shares room ownership across distinct stores even after the module is reloaded", async () => {
+    const adapter = asDataAdapter(new FakeDataAdapter());
+    const old = new CrdtDocStore(adapter, "vault-rooms/crdt");
+    const started = deferred();
+    const gate = deferred();
+    const oldWriting = old.withRoomAccess("r", async () => {
+      started.resolve();
+      await gate.promise;
+      await old.save("r", "Note.md", 0, new Uint8Array([7]));
+    });
+    await started.promise;
+    vi.resetModules();
+    const reloaded = await import("./crdtDocStore.js");
+    const fresh = new reloaded.CrdtDocStore(adapter, "vault-rooms/crdt");
+    const reading = vi.fn(() => fresh.load("r", "Note.md", 0));
+    const loaded = fresh.withRoomAccess("r", reading);
+    await Promise.resolve();
+    expect(reading).not.toHaveBeenCalled();
+    gate.resolve();
+    await oldWriting;
+    expect(await loaded).toEqual(new Uint8Array([7]));
+    expect(reading).toHaveBeenCalledOnce();
+  });
+
+  it("rejects already-queued operations after a write failure and releases room ownership for retry", async () => {
+    const adapter = new FakeDataAdapter();
+    const old = new CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    const fresh = new CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    await old.save("r", "Note.md", 0, new Uint8Array([1]));
+    const started = deferred();
+    const gate = deferred();
+    const write = vi.spyOn(adapter, "writeBinary").mockImplementationOnce(async () => {
+      started.resolve();
+      await gate.promise;
+      throw new Error("disk full");
+    });
+    const writing = old.withRoomAccess("r", () => old.save("r", "Note.md", 0, new Uint8Array([2])));
+    const writeResult = writing.then(() => "written", (error: unknown) => error);
+    const deletion = vi.fn(() => fresh.deleteEpoch("r", "Note.md", 0));
+    const deleting = fresh.withRoomAccess("r", deletion);
+    const deleteResult = deleting.then(() => "deleted", (error: unknown) => error);
+    await started.promise;
+    gate.resolve();
+    expect(await writeResult).toMatchObject({ message: "disk full" });
+    expect(await deleteResult).toMatchObject({ message: "disk full" });
+    expect(deletion).not.toHaveBeenCalled();
+    expect(await fresh.load("r", "Note.md", 0)).toEqual(new Uint8Array([1]));
+    write.mockRestore();
+    await old.withRoomAccess("r", () => old.save("r", "Note.md", 0, new Uint8Array([2])));
+    expect(await fresh.withRoomAccess("r", () => fresh.load("r", "Note.md", 0))).toEqual(new Uint8Array([2]));
+  });
+
+  it("scopes ownership to adapter, cache directory and room", async () => {
+    const adapter = asDataAdapter(new FakeDataAdapter());
+    const blocked = new CrdtDocStore(adapter, "vault-rooms/crdt");
+    const gate = deferred();
+    const waiting = blocked.withRoomAccess("r", async () => { await gate.promise; });
+    const otherDirectory = new CrdtDocStore(adapter, "other-server/crdt");
+    const otherAdapter = new CrdtDocStore(asDataAdapter(new FakeDataAdapter()), "vault-rooms/crdt");
+    const results = await Promise.all([
+      otherDirectory.withRoomAccess("r", async () => "other directory"),
+      otherAdapter.withRoomAccess("r", async () => "other vault"),
+      blocked.withRoomAccess("other-room", async () => "other room")
+    ]);
+    gate.resolve();
+    await waiting;
+    expect(results).toEqual(["other directory", "other vault", "other room"]);
+  });
+
+  it("retains failed final persistence across module reload until a later access can save it", async () => {
+    const adapter = new FakeDataAdapter();
+    const old = new CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    await old.save("r", "Note.md", 0, new Uint8Array([1]));
+    const write = vi.spyOn(adapter, "writeBinary")
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockRejectedValueOnce(new Error("disk full"));
+    await expect(old.withRoomAccess("r", () => old.save("r", "Note.md", 0, new Uint8Array([2])), { retainFailure: true }))
+      .rejects.toThrow("disk full");
+    vi.resetModules();
+    const reloaded = await import("./crdtDocStore.js");
+    const fresh = new reloaded.CrdtDocStore(asDataAdapter(adapter), "vault-rooms/crdt");
+    const reading = vi.fn(() => fresh.load("r", "Note.md", 0));
+    await expect(fresh.withRoomAccess("r", reading)).rejects.toThrow("disk full");
+    expect(reading).not.toHaveBeenCalled();
+    expect(await fresh.load("r", "Note.md", 0)).toEqual(new Uint8Array([1]));
+    write.mockRestore();
+    expect(await fresh.withRoomAccess("r", reading)).toEqual(new Uint8Array([2]));
+    expect(reading).toHaveBeenCalledOnce();
+  });
+
+  it("retains final persistence skipped because an earlier cache write failed", async () => {
+    const adapter = asDataAdapter(new FakeDataAdapter());
+    const old = new CrdtDocStore(adapter, "vault-rooms/crdt");
+    const fresh = new CrdtDocStore(adapter, "vault-rooms/crdt");
+    const earlier = old.withRoomAccess("r", async () => { throw new Error("earlier write failed"); });
+    const earlierResult = earlier.catch((error: unknown) => error);
+    const finalSave = vi.fn(() => old.save("r", "Note.md", 0, new Uint8Array([9])));
+    const retirement = old.withRoomAccess("r", finalSave, { retainFailure: true });
+    await expect(retirement).rejects.toThrow("earlier write failed");
+    await earlierResult;
+    expect(finalSave).not.toHaveBeenCalled();
+    expect(await fresh.withRoomAccess("r", () => fresh.load("r", "Note.md", 0))).toEqual(new Uint8Array([9]));
+    expect(finalSave).toHaveBeenCalledOnce();
+  });
+
   it("retains prior epochs when saving a quarantined document", async () => {
     const store = new CrdtDocStore(asDataAdapter(new FakeDataAdapter()), "vault-rooms/crdt");
     await store.save("r", "Note.md", 2, new Uint8Array([1]));
