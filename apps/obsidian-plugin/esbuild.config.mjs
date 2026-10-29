@@ -6,14 +6,15 @@ import { fileURLToPath } from "node:url";
 const here = fileURLToPath(new URL(".", import.meta.url));
 
 // Replace lib0 modules that introduce forbidden environment and logging calls.
+// Either path separator: on Windows esbuild hands onLoad backslash paths.
 const lib0ShimPlugin = {
   name: "lib0-shims",
   setup(build) {
-    build.onLoad({ filter: /\/lib0\/environment\.js$/ }, async () => ({
+    build.onLoad({ filter: /[\\/]lib0[\\/]environment\.js$/ }, async () => ({
       contents: await readFile(here + "src/vendor-shims/lib0-environment.js", "utf8"),
       loader: "js"
     }));
-    build.onLoad({ filter: /\/lib0\/logging(\.node)?\.js$/ }, async () => ({
+    build.onLoad({ filter: /[\\/]lib0[\\/]logging(\.node)?\.js$/ }, async () => ({
       contents: await readFile(here + "src/vendor-shims/lib0-logging.js", "utf8"),
       loader: "js"
     }));

@@ -1,0 +1,16 @@
+{
+  "name": "@vault-rooms/secure",
+  "version": "0.3.6",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testkit": "./src/testkit.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@peculiar/x509": "2.0.0",
+    "reflect-metadata": "0.2.2",
+    "yjs": "13.6.31"
+  }
+}

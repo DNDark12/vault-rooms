@@ -36,7 +36,7 @@ jobs:
           const read = (path) => JSON.parse(readFileSync(path, "utf8"));
           const manifest = read("manifest.json");
           assert.deepEqual(manifest, read("apps/obsidian-plugin/manifest.json"));
-          for (const path of ["package.json", "apps/obsidian-plugin/package.json", "apps/relay-server/package.json", "packages/protocol/package.json", "packages/policy-engine/package.json"])
+          for (const path of ["package.json", "apps/obsidian-plugin/package.json", "packages/secure/package.json"])
             assert.equal(read(path).version, manifest.version, path);
           assert.equal(read("versions.json")[manifest.version], manifest.minAppVersion);
           NODE

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { computeTextDiff, reconcileYTextWithDiskText } from "./crdtReconcile.js";
+import { computeTextDiff, reconcileYTextByLines, reconcileYTextWithDiskText } from "./crdtReconcile.js";
 
 /** Reconstructs the target text from a diff's ops, so tests can assert correctness without
  *  depending on any particular (equally-valid) minimal edit script - only that applying the script
@@ -16,6 +16,15 @@ function applyDiff(ops: ReturnType<typeof computeTextDiff>): string {
 }
 
 describe("computeTextDiff", () => {
+  it("takes two texts too large to compare as one change, cheaply", () => {
+    const a = "a".repeat(2_000);
+    const b = "b".repeat(2_000);
+    expect(computeTextDiff(a, b)).toEqual([
+      { op: "delete", text: a },
+      { op: "insert", text: b }
+    ]);
+  });
+
   it("returns no ops for identical strings (except a single equal op for non-empty text)", () => {
     expect(computeTextDiff("", "")).toEqual([]);
     expect(computeTextDiff("same", "same")).toEqual([{ op: "equal", text: "same" }]);
@@ -52,6 +61,63 @@ describe("computeTextDiff", () => {
     const newText = "b".repeat(2000);
     const ops = computeTextDiff(oldText, newText);
     expect(applyDiff(ops)).toBe(newText);
+  });
+});
+
+describe("reconcileYTextByLines", () => {
+  /** Reconcile `from` to `to`; returns the result and the update it made. */
+  function byLines(from: string, to: string): { result: string; update: ReturnType<typeof Y.decodeUpdate> } {
+    const doc = new Y.Doc();
+    const text = doc.getText("content");
+    text.insert(0, from);
+    let update: ReturnType<typeof Y.decodeUpdate> | null = null;
+    doc.once("update", (bytes: Uint8Array) => (update = Y.decodeUpdate(bytes)));
+    reconcileYTextByLines(text, to, null);
+    return { result: text.toString(), update: update! };
+  }
+
+  it("turns a note into another", () => {
+    const cases = [["", "a\n"], ["a\n", ""], ["a", ""], ["", "a"], ["a\nb\nc\n", "a\nB\nc\n"], ["a\nb", "a\nb\nc"], ["a\nb\nc\n", "x\nb\ny\nz\n"], ["a\nb\nc\nd\n", "a\nd\n"], ["a\nb\nc", "a"], ["a\nb\nc", "c"], ["😃 a\n", "😃 b\n"], ["\n\n", "\n"], ["x", "\n\nx\n\n"]];
+    for (const [from, to] of cases) expect(byLines(from!, to!).result, JSON.stringify([from, to])).toBe(to);
+    // And any edit of lines, at random (fixed seed).
+    let seed = 7;
+    const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % n);
+    const words = ["", "a", "bb", "start: 2030-01-09", "end", "😃"];
+    for (let round = 0; round < 300; round++) {
+      const note = () => Array.from({ length: random(6) }, () => words[random(words.length)]).join("\n");
+      const [from, to] = [note(), note()];
+      expect(byLines(from, to).result, JSON.stringify([from, to])).toBe(to);
+    }
+  });
+
+  it("only adds when lines are added at either end, with or without a final line break", () => {
+    for (const [from, to] of [["a\nb", "a\nb\nc"], ["a\nb\n", "a\nb\nc\n"], ["a\nb", "x\na\nb"], ["a\nb", "a\nb\n"]]) {
+      expect(byLines(from!, to!).update.ds.clients.size, JSON.stringify([from, to])).toBe(0);
+    }
+  });
+
+  it("puts each new line in front of the line it replaced", () => {
+    const { update } = byLines("---\nstart: 2030-01-09\nend: 2030-01-20\n---\n", "---\nstart: 2030-01-12\nend: 2030-01-23\n---\n");
+    const runs = update.structs.map((struct) => ({ text: ((struct as Y.Item).content as Y.ContentString).str, right: (struct as Y.Item).rightOrigin!.clock }));
+    // Positions in the original text: "start..." begins at 4, "end..." at 22.
+    expect(runs).toEqual([
+      { text: "start: 2030-01-12\n", right: 4 },
+      { text: "end: 2030-01-23\n", right: 22 }
+    ]);
+  });
+
+  it("replaces a changed line whole, so two computers changing it take out the same text", () => {
+    const base = new Y.Doc();
+    base.getText("content").insert(0, "---\nstart: 2030-01-09\n---\n");
+    const deletedBy = (to: string) => {
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(base));
+      let deleted: unknown;
+      doc.once("update", (update: Uint8Array) => (deleted = Y.decodeUpdate(update).ds));
+      reconcileYTextByLines(doc.getText("content"), to, null);
+      return deleted;
+    };
+    expect(deletedBy("---\nstart: 2030-01-12\n---\n")).toEqual(deletedBy("---\nstart: 2030-02-03\n---\n"));
   });
 });
 
@@ -146,6 +212,26 @@ describe("reconcileYTextWithDiskText", () => {
     const insertLen = Math.floor(rand() * 6);
     return text.slice(0, start) + randomText(rand, insertLen) + text.slice(start + deleteLen);
   }
+
+  it("never splits an emoji, so what another computer receives is intact", () => {
+    for (const [before, after] of [
+      ["😀", "😃"],
+      ["a😀b", "a😃b"],
+      ["x\u{1F600}", "y\u{1F600}"],
+      ["\u{1F600}\u{1F601}", "\u{1F600}\u{1F602}"],
+      ["תכנית 👍", "תכנית 👎"]
+    ] as const) {
+      const local = new Y.Doc();
+      const text = local.getText("content");
+      text.insert(0, before);
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(local));
+      local.on("update", (update: Uint8Array) => Y.applyUpdate(remote, update));
+      reconcileYTextWithDiskText(text, after, "disk");
+      expect(text.toString()).toBe(after);
+      expect(remote.getText("content").toString()).toBe(after);
+    }
+  });
 
   const FIXED_SEED = 424242;
 

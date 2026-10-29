@@ -1,326 +1,87 @@
-# Vault Rooms
+# Vault Rooms (secure mesh fork)
 
-![Status: Beta](https://img.shields.io/badge/status-beta-orange) ![Platform: Desktop only](https://img.shields.io/badge/platform-desktop--only-blue) ![Network: Trusted LAN only](https://img.shields.io/badge/network-trusted%20LAN%20only-critical)
+![Status: Beta](https://img.shields.io/badge/status-beta-orange) ![Platform: Desktop only](https://img.shields.io/badge/platform-desktop--only-blue) ![Network: Local network](https://img.shields.io/badge/network-local%20network-informational)
 
-## What it is
+Share folders of your Obsidian vault ("rooms") with people on the same local network and edit notes together, live, with each other's cursors. There is no server and no cloud: every computer is an equal peer, so it keeps working whoever is switched on. Everything a room shares is end-to-end encrypted.
 
-Vault Rooms shares selected folders of your Obsidian vault ("rooms") with trusted people on the same local
-network. One device hosts a small relay server; everyone else joins it from the plugin.
+This is a fork of [DNDark12/vault-rooms](https://github.com/DNDark12/vault-rooms). It keeps the original's idea and its live editing in Obsidian, and replaces the relay host with an encrypted peer-to-peer design built for an office or lab network where no computer is always on and security matters most. How it works and what it protects against: [SECURE-MESH.md](SECURE-MESH.md).
 
-Create a room, invite members, grant per-path permissions, and collaborate on Markdown-backed workflows like
-Kanban boards and Tasks. It is LAN-first, deny-by-default, and never exposes your whole vault.
+## What you get
 
-Identity is per-server: each device gets one token for the server it joined. **Teams** are named permission
-groups you can grant to a room at once; **rooms** are the shared folder boundary and are owned independently of
-any team. A room's access list grants or denies a user or a team, per path pattern.
+- **Live co-editing.** Notes in a room update as people type, with their cursors shown. Other files (images, PDFs, canvases) sync as whole files.
+- **No host.** Computers find each other on the network and connect directly. If one is off, the others carry on; when it comes back it catches up by itself, from whoever is online.
+- **End-to-end encryption.** A computer only holds readable copies of the rooms its user belongs to. Content, file names and room names of other rooms pass through or are stored only as ciphertext.
+- **Per-folder access.** Each room has its own members, each with a role: *can read*, *can edit*, or *manages* (can add and remove people). Even a workspace admin can't get into a room without its managers.
+- **Invite links.** One link per new person, valid for a limited time, used once. Adding another computer of your own works the same way.
+- **Revocation.** Revoke a lost computer or remove a person: they are cut off at once, invites they made stop working, and their rooms get new keys as soon as someone who can edit them is online, so nothing added afterwards reaches them.
+- **Nothing is lost.** Files are only removed when someone deleted them in the room, and then to the trash. A version that clashes with someone else's, or can't be shared, is kept next to it as a copy, never overwritten.
 
-## What it is not
+## Requirements
 
-Not cloud sync, not NAT traversal, not mobile, and not a sandbox for other Obsidian plugins. It syncs every
-regular file in a shared folder - text as text, everything else as binary - except dotfiles and dotfolders (see
-"Known limitations"). Character-level co-editing applies only to Markdown notes (see "CRDT sync"); it starts on
-for new rooms and can be changed per room.
+- Obsidian 1.11.4 or later on Windows, macOS or Linux (desktop only). Tested on Obsidian 1.14.5 on Windows 11.
+- The computers are on the same local network.
+- **Firewall:** each computer must accept incoming connections from the local network on TCP port 47880 (the next free port up to 47889 is used if it's taken; never one outside them: if all ten are taken, the panel says so) and, for automatic discovery, UDP port 47879. On managed Windows PCs your IT department may have to add the rule. For example, in an elevated PowerShell:
 
-## Quick start
+  ```powershell
+  New-NetFirewallRule -DisplayName "Obsidian Vault Rooms" -Direction Inbound -Protocol TCP -LocalPort 47880-47889 -RemoteAddress LocalSubnet -Profile Domain,Private -Action Allow
+  New-NetFirewallRule -DisplayName "Obsidian Vault Rooms discovery" -Direction Inbound -Protocol UDP -LocalPort 47879 -RemoteAddress LocalSubnet -Profile Domain,Private -Action Allow
+  ```
 
-**On the hosting device:**
+  To limit the rules to Obsidian, add `-Program "C:\Users\<user>\AppData\Local\Programs\Obsidian\Obsidian.exe"`. If discovery can't reach across your network (multicast and broadcast blocked), list other computers by address in the plugin's settings; connections still need only TCP. One address that can be reached is enough: devices tell each other where they can be reached and remember it, and a device that joined with an invite link keeps the link's addresses.
 
-1. Panel → **Set up and share**. The wizard shows four steps: **Connection**, **About you**, **Shared folder**,
-   **Invite**.
-2. *Connection* - enter this computer's stable LAN hostname (for example `My-Vault.local`) when available, or its
-   current LAN IP, then **Check connection**. A `.local` hostname survives ordinary DHCP address changes. The
-   wizard does not advance on its own; press **Continue** once the check passes.
-3. *About you* - enter the name teammates will see, then **Create my account**.
-4. *Shared folder* - **Choose folder**, adjust **Room name** if you want, then **Create room**.
-5. *Invite* - pick **View and edit** or **View only**, then **Create invite link**. **Copy message** gives you a
-   sendable message with the link in it; **Copy link only** gives the bare link. The link works once, expires in
-   60 minutes, and needs Vault Rooms installed on your teammate's computer. **Create another link** if it
-   expires; **I'll invite someone later** finishes without creating one.
+## Install
 
-The plugin does not create hostnames or discover an address automatically. Use an existing hostname or current
-IP during setup. After the entered address passes the host-side check, automatic server startup is enabled. The
-guided flow applies the current room defaults without asking for technical settings, including Live editing for
-Markdown notes.
+- **With BRAT:** add the beta plugin `AiSuperBot/vault-rooms`.
+- **By hand:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](https://github.com/AiSuperBot/vault-rooms/releases) into `<vault>/.obsidian/plugins/vault-rooms/`, then enable Vault Rooms under Community plugins.
 
-**On the teammate's device:** install Vault Rooms, click the link, add a display name, join, then choose
-**Add to this computer** for the room under **Rooms**.
+Each release lists the SHA-256 of its files, and the build is reproducible: building its tag with `npx pnpm@11.7.0 install` and `npx pnpm@11.7.0 build:plugin` gives the same `main.js`.
 
-**LAN share: reachable from this device** only proves the host can reach its own address. It cannot prove the
-teammate's firewall or Wi-Fi client isolation will allow the connection - if they can't connect, use **Test connection**
-and see "Troubleshooting".
+This fork has the same plugin id as upstream Vault Rooms but a different, incompatible protocol: use it on every computer of the workspace.
 
-## Architecture
+## Getting started
 
-One device runs the relay; every other device is a client that only makes outbound connections to it. **Your vault
-content never leaves your local network:** there is no cloud service, no relay outside your LAN, and no analytics
-or telemetry of any kind.
+1. **Create a workspace** (one person, who becomes its admin): open the Vault Rooms panel (people icon in the ribbon) and choose *Create a workspace*.
+2. **Share a folder:** *Share a folder* turns a folder of your vault into a room. You manage it.
+3. **Invite people:** *Invite someone* makes a link. Pick which of your rooms the person gets and with which role. Send the link privately (it lets one person join until it is used or expires).
+4. **Join:** the other person opens the link in Obsidian (or uses *Join with an invite link* in the panel), gives their name, and joins. Rooms shared with them appear under `Rooms/` in their vault once a member who's online has handed them the room's key, which happens automatically within seconds.
+5. **Manage:** *Members* on a room adds people, changes roles and removes people. The *People* section shows who is online on which computer. Admins can make other admins, remove people and revoke computers.
+6. **Another computer of yours:** *Add another computer of mine* makes a link for your other computer; it gets all your rooms.
 
-There is exactly one exception to "no Internet traffic at all", and it carries no vault data: on load, the plugin
-makes a single anonymous `GET` to the public GitHub Releases API to see whether a newer version exists, and shows
-a notice if so. It sends no vault content, no room or file names, and no identifier of you or your server - only
-what any HTTPS request reveals to GitHub (your IP address and the fact that a request was made). It fails
-silently, so being offline costs nothing. See [SECURITY.md](SECURITY.md#outbound-update-check).
+Nobody needs to be online at the same time as anyone else for things to work: whatever two computers have, they exchange when they meet.
 
-The relay can run two ways, speaking the same protocol either way:
+## Everyday behaviour
 
-- **Embedded** (recommended) - the plugin runs it in-process. Click **Start sharing**; no terminal, no config
-  file.
-- **Standalone** - a separate process, for development or for hosting on an always-on machine or NAS instead of
-  someone's laptop.
+- **Offline edits** are kept and merged when computers meet. Notes merge character by character.
+- **Conflicts:** if a non-note file, or a note changed outside the editor (while Obsidian was closed, or by another program), changed on two computers at once, nothing is overwritten: the version on this computer is kept next to it as `name (conflict <computer> <date>).ext`, and shared.
+- **Deletions** by others go to your trash (the system trash, or Obsidian's `.trash` folder), and only if your copy was unchanged and you weren't working on it; otherwise your copy stays and is shared again.
+- **Deleting a room's folder** on your computer only hides the room there; nothing is deleted for anyone else. *Show in this vault* in the panel brings it back.
+- **Read-only rooms:** notes open read-only; a change to a file is put back, with your version kept as a copy on your computer only.
+- **Moving a room's folder** is fine; the room follows it. A room's folder can't go inside another room's folder (such a move is undone).
+- **File types:** notes, canvases, bases, text and data files, PDF, EPUB, Word/Excel/PowerPoint (`.docx`, `.xlsx`, `.pptx`) and OpenDocument files, images, audio, video and ZIP files are shared. Programs, scripts, shortcuts, web pages and documents that can carry macros are not, in either direction, so nobody can plant something that runs when opened.
+- **Leaving:** leaving a room or the workspace stops syncing; your files stay on your computer.
 
-The relay owns all permission enforcement. SQLite stores metadata and CRDT state; current whole-file content is
-kept as immutable, content-addressed blobs outside SQLite. Clients hold a working copy of the rooms they mount.
+## Limits
 
-## Security model
+- Desktop only. Notes are shared up to about 6 MB each, other files up to about 32 MB; larger ones stay on the computer they're on.
+- If you use plugins that run code written in notes (Dataview JavaScript, Templater scripts), anyone who can edit a room could run code on your computer: see [SECURITY.md](SECURITY.md).
+- A copy of a vault (or one moved outside Obsidian and opened as a new vault) has to join the workspace again.
+- Peers can see some metadata: which computers are online, which rooms exist (as random ids), how many files a room has, sizes and timing of changes, and who made each change.
+- A removed member keeps what they had already synced; new keys only protect what comes after.
+- A computer that only talks to a malicious peer could be kept out of date (not deceived: everything is signed).
+- Mobile isn't supported.
 
-See [SECURITY.md](SECURITY.md) for the threat model, token handling, and revocation limits. In short:
+## For developers
 
-- **The relay enforces every permission**, per path, on both its request and live-sync channels. The plugin UI is
-  convenience only. A member never receives content - or even filenames - for paths they cannot read.
-- **New servers use pinned TLS.** The server has a persistent identity whose fingerprint travels in every invite,
-  and clients pin it before sending any credential. This authenticates the server and encrypts LAN traffic; it is
-  **not** end-to-end encryption - the relay handles plaintext.
-- **Creating the first owner is the only unauthenticated privileged action**, and it is gated twice so a
-  malicious web page cannot claim your server. It closes permanently once an owner exists.
-- **Built for a LAN you already trust.** Don't port-forward it or expose it to the Internet, and don't rely on it
-  to keep data from people you've already invited.
-- A server created before pinned TLS stays on plaintext until its owner runs the migration in Settings.
-- Vault Rooms cannot sandbox other Obsidian plugins: a local plugin that can read a synced file can read it.
+```sh
+npx pnpm@11.7.0 install
+npx pnpm@11.7.0 typecheck
+npx pnpm@11.7.0 test
+npx pnpm@11.7.0 build:plugin   # builds main.js, copies the plugin files to the repo root, scans the bundle
+```
 
-## The panel
+- `packages/secure`: the protocol (identities, signed workspace record, room keys, invites, encrypted envelopes, sync between peers, TLS transport, discovery), with tests.
+- `apps/obsidian-plugin`: the Obsidian plugin (service, room folders, live editing, UI).
 
-One status chip answers a single question - is your work syncing - using six states: **Syncing**,
-**Connecting**, **Reconnecting**, **Not syncing**, **No access**, **Not set up**. Hosting is a separate line
-below it, and appears only when this computer hosts, needs recovery, or has a hosting error; the two can
-disagree, which is exactly what happens when you work on a teammate's server while your own keeps running for
-others.
+## License and credits
 
-Below that are three tabs:
-
-- **Rooms** - the working list. Each row says where the room is on this computer and offers **Open**,
-  **Add to this computer**, **Remove from this computer**, or **Switch**, plus **Manage**.
-  A paused-name count and **Review paused files** appear when server names overlap, local aliases collide,
-  or saved work still needs recovery. Other files in that room continue syncing.
-- **People** - grouped by what someone can actually reach (**Can edit**/**Can view** and whether it comes
-  through a team), not by Friends versus Teams. Teams are listed below with their own **Manage**.
-- **Activity** - the audit log. It is **not shown at all** unless you can read it: the server owner and team
-  managers can, an ordinary member cannot.
-
-A tab with something needing attention shows a count next to its name. Technical detail - the server address,
-raw permissions, plugin suggestions, the folder overrides - lives behind **Connection details**, **Manage**, or
-**Advanced** rather than on the default screen. Destructive actions sit inside those surfaces and confirm first.
-Tabs are keyboard-navigable with arrow keys.
-
-## Rooms, mounting, and access
-
-The room's source is the folder in the *owner's* vault that it shares - the one real copy everyone else
-reconciles against. In the room's **Manage** surface the owner sees it as **In your vault at …**, and everyone
-else as **Shared from the owner's vault at …**. Each device then keeps its own working copy: the owner shares in
-place (no second copy), while everyone else downloads the room into a folder under their root. Both the folder
-name teammates see and the folder used on this computer can be changed under **Manage → Advanced**.
-
-Access can be withdrawn at four granularities, all enforced by the relay:
-
-- **One rule in one room** - the person keeps whatever else they were granted.
-- **A team membership** - they keep access granted directly or via another team.
-- **A whole user** - revokes their account and all their device tokens, closing their live sessions.
-- **A single device** - for a lost or compromised machine, without touching that person's other devices.
-
-**Blocked** denies every data permission for the selected path scope, including reading, writing, creating,
-deleting and renaming. On upgrade, old deny rules containing exactly the former View-only permission set are
-widened to this full block. Custom partial deny rules keep their explicit permissions.
-
-Deleting a **room** removes it and its history from the server; files already downloaded to someone's vault stay
-on their disk, only the sync tracking is dropped. Deleting a **team** removes its memberships and grants, not the
-rooms themselves.
-
-Revocation stops future access. It cannot delete copies that were already synced to someone's device.
-
-**Rejoining** creates a fresh identity, and the relay's file list is always the source of truth: files it has
-newer versions of are downloaded, files it has deleted are removed locally, files already in sync are left alone,
-and local edits you never pushed are preserved as a timestamped conflict copy rather than discarded. The same
-reconciliation runs on first mount, re-mount, and reconnect.
-
-## How edits sync
-
-By default, concurrent edits to the same file are **first save wins**: the device that saves second keeps its
-version as a **local-only conflict copy** rather than losing it. The Rooms panel marks the room
-**Needs a choice** and offers **Keep mine** / **Keep teammate's version**.
-
-Two things soften that for files which autosave constantly (a drawing plugin can save on every stroke): rapid
-edits to one file are coalesced into a single push, and a room can be set to **Owner's version always wins**
-instead of keeping both.
-
-Latency: after you stop typing your edit is pushed within a fraction of a second, and the relay broadcasts it to
-every mounted device immediately - there is no polling. A device that was offline reconnects on its own,
-re-subscribes, and reconciles; you never need to add the room again. The panel's status chip tells you whether
-you're actually live.
-
-## CRDT sync (live editing for Markdown notes)
-
-New rooms start with **Manage → Live editing** on, giving their Markdown notes real-time, character-level
-merging. Existing rooms keep their previously saved value, and a manager can turn the setting on or off per
-room. Two people typing in the same note merge deterministically instead of one edit becoming a conflict copy.
-
-- **Markdown notes only, and not `.excalidraw.md`.** Every other file type in the room - including
-  `*.excalidraw.md`, which stores a drawing as structured JSON inside a Markdown file - keeps using normal
-  whole-file sync. Merging that JSON character by character could produce a drawing that no longer loads.
-- **Turning it on or off is non-destructive.** Existing notes are seeded from their current content; disabling
-  just returns to whole-file sync.
-- **Renames move the note**, keeping its content and history - even with the note open on both devices.
-- **Creating or renaming a note while disconnected is not lost.** The intent is written to disk, survives an
-  Obsidian restart, and is replayed once the connection is back - the note keeps its identity and history, and a
-  dropped acknowledgement can never produce a duplicate. Replay needs the relay to be on 0.2.6 or newer; against
-  an older relay the pending change stays queued and you get one notice saying the server must be upgraded.
-- **Two people creating a note at once get two notes.** Every new Obsidian note starts with the same default
-  name, so the first to reach the relay keeps it and the other is filed under a name including its creator, with
-  a notice explaining why. Their text is never merged together.
-- **A name you type is never rewritten.** Renaming onto a name a teammate already used is refused with a notice
-  so you can choose another.
-- **Per-keystroke merging needs the note open in your editor.** A device with the room merely mounted still
-  receives every change, just on the ordinary latency budget above.
-- **Open notes show live cursors.** When authorized teammates have the same CRDT Markdown note open, each sees
-  the other's caret and selection with their authenticated display name and a relay-assigned color, unique
-  among live users in that room session and tuned to your theme.
-  Presence disappears when the editor or session closes; it is note-scoped, not a room-wide online status.
-  V1 deliberately has no participant bar.
-- **Older plugin versions can read but not write** a note in this mode; they get a clear rejection rather than a
-  silent conflict.
-- **No new network surface** - it rides the same authenticated connection.
-
-This is the newest part of the plugin. Keep backups for important content while it continues its soak period. See
-[SECURITY.md](SECURITY.md) for its durability characteristics.
-
-## Plugin capability model
-
-A room can *recommend* companion plugins (Kanban, Tasks); the room's **Manage** surface shows whether they're
-enabled locally.
-Vault Rooms never grants permission to run someone else's plugin code.
-
-## Known limitations
-
-- No end-to-end encryption and no encrypted-at-rest database. The relay and authorized clients see plaintext.
-- No cloud relay, NAT traversal, or mobile support. Desktop, one LAN.
-- Synced file types: every regular file in a room's folder, with one exception (below). Markdown, `.txt`,
-  `.canvas`, `.json`, `.csv`, and `.excalidraw` sync as UTF-8 text; every other extension (images, PDFs, audio,
-  video, Office documents, anything unlisted) uses base64 on the current sync wire. The relay decodes it before
-  storage, so file and storage limits count real bytes and binary content no longer inflates `relay.sqlite`.
-  Base64 still adds about 33% to an in-flight frame and peak transport memory; optional raw sync framing remains
-  future work. A device predating this widening never sees a file outside the old whitelist at all.
-- File identity uses Unicode NFC and case-insensitive keys on every platform; original spelling is retained.
-  New names reject Windows device names, reserved punctuation, and trailing spaces/dots in any segment.
-  Legacy names remain readable and can be repaired by the room owner. Multiple live legacy aliases are
-  paused together until the owner renames one by stable file ID in room settings; no content is merged or chosen.
-  Current plugins keep local copies and skip these paths. Older plugins cannot subscribe/list a room with
-  visible collisions until repaired. Unicode folding follows JavaScript lowercase, which can differ from rare
-  filesystem-specific equivalences; real Windows/macOS vault validation is still required before release.
-  Ambiguous local tracking and pending offline CRDT structural operations remain paused after server repair;
-  their local files and quarantined caches are retained, including across unmount, without blind replay.
-  **Review paused files** explains which side needs repair: an owner repairs server names in **Manage**, while
-  each device can rename an exact local file or folder to a distinct name. Ambiguous pending operations require
-  explicit preservation and reload; their original intent is kept in recovery history. Do not delete recovery
-  copies until you have checked their contents.
-- A file classified as text must contain valid UTF-8. Other encodings are rejected with a visible sync error
-  and retained locally, rather than decoded with damaged characters. Convert such files to UTF-8 before syncing.
-- Plugin reload retains pending CRDT saves within the same Obsidian process and refuses recovery if those saves
-  fail. Forced process termination can still lose edits that have not reached disk. After a relay restart,
-  durable CRDT updates are materialized when a device subscribes; until then the whole-file copy may be older.
-- Whole-file retention is latest-only. Superseded and deleted content is reference-checked and collected; a
-  default 256 MiB stored-content ceiling prevents unbounded growth. Lowering the ceiling never blocks reads,
-  deletes, cleanup, or a replacement that reduces usage. The physical SQLite file only returns freed pages to
-  the filesystem after **Vault Rooms: Reclaim relay database space**; this is explicit because compaction briefly
-  pauses writes and needs additional memory.
-- Dotfiles and dotfolders (any path segment starting with `.`, e.g. `.env`, `.secrets/`) never sync, deliberately -
-  sharing a room's folder shouldn't risk shipping a teammate's local secrets file. This is the same rule that
-  already excludes the vault's own config folder and `.git`/`node_modules`.
-- Revoking access, or deleting a room or team, cannot delete copies already synced to someone's device.
-- Character-level co-editing and cursor presence only exist when a room has Live editing enabled, and only for
-  Markdown notes other than `*.excalidraw.md`.
-  Cursor presence is ephemeral: it appears only for authorized teammates who currently have the same note open,
-  is not persisted, and does not provide a room-wide participant or online list.
-- CRDT caveats: per-keystroke merging applies only to a note open in your editor; renaming a note that's open on
-  another device makes that device lose editor focus, which Obsidian controls; and disabling CRDT for a room stops
-  using its history without deleting it.
-- Renames are a real move only for CRDT-enabled Markdown notes. Every other file type - including
-  `*.excalidraw.md` - re-uploads on rename.
-- Offline create/rename replay covers CRDT Markdown notes only. Other file types still reconcile the ordinary way
-  on reconnect, which for a rename means a re-upload under the new name.
-- Device tokens are stored unencrypted in Obsidian's plugin data. A lost device can be revoked on its own.
-- Single-host topology: whoever hosts must stay running. If their machine sleeps, sync stops for everyone.
-- No clustering, and not built for load-balancing - one process, one database. Fine for a small team editing
-  occasionally, not for a write-heavy workload.
-- If a host uses a raw IP and DHCP changes it, old invite links and saved endpoints go stale. Prefer a stable
-  `.local` hostname that already resolves. Current pinned-TLS clients can press **Find server on LAN**; legacy
-  HTTP or older clients must use **Update address** or a fresh invite. Recovery preserves the server identity,
-  login, rooms, mounts, teams, friendships, and access.
-
-## Troubleshooting
-
-Start with **Connection details → Test connection** in the panel (or **Test** in Settings → Vault Rooms → Servers). It
-checks the address, whether anything answers, whether it's a Vault Rooms server with the expected identity, and
-whether this device's login still works - then names the step that failed.
-
-- **A teammate can't reach the server:** on the host, open **Connection details** and confirm the line reads
-  **LAN share: reachable from this device**. If it says **not a LAN address**, the address can't work for anyone else no matter what your own machine says - a loopback
-  address like `127.0.0.1` always means "the computer that's asking", so it sends every teammate back to their
-  own machine. Use this device's LAN address instead. A browser can't validate a pinned server, so it isn't a
-  useful check either.
-- **The host's IP changed:** do not recreate the server, rooms, teams, or friendships. Set the host's **Public URL
-  override** to an existing stable `.local` hostname if possible and restart sharing. Existing IP and hostname
-  settings are never rewritten automatically. On a current pinned-TLS client still trying the old IP, open
-  **Connection details → Find server on LAN**; the three-second multicast/broadcast search runs only when pressed
-  and saves an address only after the pinned server, user, and device identities match. Use **Update address** for legacy HTTP. Older
-  plugin versions cannot rediscover a DHCP-changed IP and need the new address or a fresh invite. A fresh 0.2.7
-  invite also matches the existing connection by `serverId` instead of creating another identity.
-- **The invite link does nothing:** the plugin must already be installed and enabled on that device - the link
-  can't install it.
-- **Live editing isn't merging, or changes take seconds:** open the note and run **"Vault Rooms: Diagnose live
-  editing (CRDT) for the active note"**. It names the missing content-sync link and also reports whether cursor
-  transport is ready, whether this device published its cursor, and which remote names are visible. Most often
-  Live editing is simply off for that room. Existing rooms keep their saved value; check **Manage → Live editing**
-  and save the room settings.
-- **A teammate's cursor isn't visible:** both devices need Vault Rooms 0.2.4 or newer, the same CRDT Markdown note
-  open, the room mounted with live editing enabled, a live connection, and `file:read` access to that exact path.
-  Cursor presence is intentionally absent when a note is only synced in the background.
-- **A teammate's edits aren't showing up:** confirm both devices show **In your vault at …**, not
-  **Not on this computer**. Only rooms added to the computer hold a live subscription.
-- **"This server must be upgraded before offline Markdown creates or renames can replay safely":** you created or
-  renamed a note while disconnected, and the relay is older than 0.2.6, so it cannot confirm the change exactly
-  once. Nothing is lost - the pending change stays on disk and replays as soon as the host updates. Update the
-  hosting device's plugin, or undo the rename and redo it while connected.
-- **A teammate never sees a file I added (`.docx`, `.mp4`, a file with no extension):** they're on a build older
-  than 0.2.6, which only understood a fixed list of file types. Rather than hand them content they'd write to disk
-  incorrectly, the relay hides those paths from them entirely. Both devices need 0.2.6 or newer. Also check the
-  file isn't a dotfile and isn't over the server's size limit.
-- **Server identity mismatch:** the peer presented a different identity, so Vault Rooms stopped before sending
-  credentials. Confirm the address; after a reinstall, get a fresh invite and verify its fingerprint with the
-  owner through a channel you trust. There is deliberately no trust-anyway override.
-- **"Invalid or expired credentials" on one server only:** that server's data was reset after your token was
-  issued. Forget the stale entry in Settings → Vault Rooms → Servers, then join again.
-- **Writes are denied:** check the access rules for that user or team and path pattern.
-- **A room reports paused file names:** open **Rooms → Review paused files**. Server collisions require the
-  room owner to rename the server files; local collisions can be repaired on this computer. Failed recovery
-  stays paused and offers **Retry recovery**, preserving local work.
-
-## Installing the Obsidian plugin manually
-
-Build with `pnpm build:plugin`, then copy root `manifest.json`, `main.js` and `styles.css` into
-`<vault>/.obsidian/plugins/vault-rooms/` and reload Obsidian. Keep the three files from the same build.
-
-## Release checklist
-
-1. Update both manifests, every workspace package version and `versions.json` together. The current prepared
-   version is **0.2.9**; see [release notes and verification](docs/superpowers/specs/2026-10-02-release-0.2.9.md).
-2. Run `pnpm typecheck`, `pnpm test`, `pnpm build:plugin` and `pnpm audit --prod`. The build includes the bundle
-   scan. Commit the regenerated root assets and verify that a rebuild leaves them unchanged.
-3. Push `develop` and check its CI, then integrate into `main` and check that CI too. Branch CI validates
-   metadata, typechecks, tests and builds; a branch push does not publish a release.
-4. Complete Windows/macOS filesystem checks and two-device Obsidian smoke for sync/CRDT changes. Two vaults on
-   one Mac are a useful local smoke, but do not prove the two-machine LAN or Windows behavior.
-5. Only after the release gates pass, push an annotated tag matching the manifest version exactly, without a
-   `v` prefix. `.github/workflows/release.yml` builds that tag and creates a **draft** GitHub release containing
-   `main.js`, `manifest.json` and `styles.css`. Review the notes and assets before publishing.
-
-## License
-
-MIT - see [LICENSE](./LICENSE).
+MIT. Original Vault Rooms by DNDark ([DNDark12/vault-rooms](https://github.com/DNDark12/vault-rooms)); secure mesh fork by AiSuperBot.

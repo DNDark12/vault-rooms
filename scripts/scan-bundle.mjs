@@ -6,27 +6,36 @@
 // globalThis 12 -> 10: CrdtDocStore now anchors its volatile cache ownership/failed-save
 // registry to the public vault adapter, preserving reload/window handoff without a global.
 // Only the previously inspected dependency-owned references remain allowed.
+//
+// 0.3.0 (secure mesh fork; the relay, fastify and sql.js are gone):
+// - "os" is allowed: os.hostname() names this computer by default and os.networkInterfaces() lists its LAN
+//   addresses for invite links. Both are read locally and never sent anywhere else.
+// - setInterval/clearInterval 3 -> 5: per-connection heartbeats (transport.ts), discovery announcements
+//   (discovery.ts), the peer manager's redial tick (peers.ts), the service's housekeeping (meshService.ts) and
+//   presence expiry (presence.ts). Each is cleared on stop.
+// - Required markers are now security settings that must never silently disappear: TLS 1.3 as the minimum
+//   version, and the channel-binding exporter label that ties peer authentication to the TLS session.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const TIER2_STRICT_ZERO = ["fastify", "Fastify", "ajv", "new Function", "eval(", "process.env", "node:fs", "node:os", "console.log(", "console.info(", "console.trace("];
+export const TIER2_STRICT_ZERO = ["fastify", "Fastify", "ajv", "new Function", "eval(", "process.env", "node:fs", "console.log(", "console.info(", "console.trace("];
 
 export const TIER3_APPROVED_BASELINE = {
   "setTimeout(": 27,
-  "setInterval(": 3,
+  "setInterval(": 5,
   "clearTimeout(": 28,
-  "clearInterval(": 3,
+  "clearInterval(": 5,
   "globalThis": 10,
   "fetch(": 2,
   "window.setTimeout": 15
 };
 
-export const REQUIRED_PRESENT = ["noServer", "maxPayload"];
+export const REQUIRED_PRESENT = ["TLSv1.3", "EXPORTER-vault-rooms-peer-auth"];
 
-// Modules matched as a require/import specifier, not a substring: a bare "os" would match "photos".
-export const STRICT_ZERO_MODULES = ["os"];
+// Modules matched as a require/import specifier, not a substring.
+export const STRICT_ZERO_MODULES = ["child_process", "fs"];
 
 const moduleReferences = (bundle, name) =>
   bundle.match(new RegExp(`(?:require\\(\\s*|from\\s*)["'](?:node:)?${name}["']`, "g"))?.length ?? 0;

@@ -1,175 +1,36 @@
 # Security
 
-Vault Rooms is pre-1.0 software. This file is the authoritative description of its threat model, transport
-security, and known limitations.
+The design, with every check and its reasons, is in [SECURE-MESH.md](SECURE-MESH.md). This page is the short version.
 
 ## Threat model
 
-Vault Rooms is designed for **trusted people on a trusted local network** - a household, a small team's office LAN, a shared Wi-Fi you already trust everyone on. It is explicitly **not** designed for:
+Who we defend against, on the local network:
 
-- Untrusted networks (coffee shop Wi-Fi, public networks, anything with a hostile party who can sniff or inject packets on the same LAN segment).
-- Internet-facing use. Do not port-forward or expose any Vault Rooms listener directly to the Internet.
-- Protecting data from other people who already have legitimate LAN access but aren't invited to a given room - the ACL model deny-by-defaults them from Vault Rooms' own rooms, but it cannot stop them from, say, port-scanning your machine.
-- Protecting against a malicious or compromised member you've already invited and granted access to. Once someone has read access to a room, nothing prevents them from keeping a local copy of everything they could read before being revoked (see "Revocation limitations" below).
+- **A stranger's device** (a guest laptop, a compromised printer): it can neither read nor change anything. Every connection is TLS 1.3 to a certificate pinned in the signed workspace record, and both ends authenticate with their device keys over that very TLS session. Until a device is a member it may only show that it is (a join record, or newer versions of the signed record that only extend the one the other side has), under tight limits.
+- **A member** can't read rooms they aren't in (they only ever receive those rooms as ciphertext), can't write where they may only read (every change is signed, and peers drop changes from anyone who isn't currently a writer), can't touch anything outside a room's folder or inside `.obsidian` (every path is checked before any file is written), can't plant programs, scripts or shortcuts (only file types that can't run anything are shared), and can't give themselves access to a room: only a room's managers change its membership, and nobody, admins included, can register a computer under someone else's name. A member also can't take away others' work: a snapshot that lies about what it contains removes nothing from a member's copy, a race between conflicting changes is settled by rules no one can game (someone being removed always loses), and a wrong room key sent to a newcomer doesn't stop the right one arriving.
+- **A revoked computer or a removed person** is disconnected by every peer and turned away when it connects again, their open invites stop working, and their rooms get new keys as soon as someone who can edit them is online; they keep only what they already had.
+- **A lost or stolen computer** exposes that user's rooms only. Its keys are in Obsidian's secret storage, encrypted by the operating system for that user and tied to the vault: copying a vault doesn't copy them. Revoke it from another computer: invites made on it stop working too.
 
-Within that scope, Vault Rooms enforces: per-path, deny-by-default access control (`file:read`/`file:write`/`file:create`/`file:delete`, individually grantable to a user or a whole team); per-server identity (a device only has power on the one server it registered with); and server-side enforcement of every permission check on both REST and WebSocket paths, so client-side UI state is never the actual gate. REST and WebSocket writes/deletes both require the shared `sync:push` permission as well as the file-specific permission.
+Out of scope: someone controlling a member's computer while it is unlocked (they are that member), and availability (a malicious peer can refuse to pass things on, or spend a room's storage; it can't forge or read anything).
 
-## Transport security modes
+**Plugins that run code from notes.** If you use plugins that execute code written in notes (Dataview JavaScript queries, Templater user scripts and the like), anyone who can edit a room can run code on your computer through a note. Turn those features off for room folders, or don't use such plugins in a vault that shares rooms.
 
-- **Pinned TLS** - the default for new servers. The server holds a persistent identity, signs its own renewable
-  certificate with it, and puts that identity's fingerprint in every invite. The client pins it *before* sending
-  any token or data, and renewing the certificate doesn't change the pin.
-- **OS-trusted TLS** - for a standalone relay where an operator supplies a certificate the client OS already
-  trusts.
-- **Plaintext legacy** - exists only so an older HTTP server can migrate. Tokens, file contents, filenames, and
-  ACL rules are all readable and modifiable by anyone who can watch the LAN. Don't start a new deployment this
-  way or leave a migration unfinished.
+**Revocations add up.** When admins change things at the same moment (computers cut off from each other, say), every revocation and removal among them still takes effect whichever change wins, unless it came from someone the winning change itself revoked, removed or demoted, and what someone revoked at that moment granted then (including people let in through their invites) is taken back.
 
-Pinned TLS is transport encryption and server authentication, **not** end-to-end encryption: the relay and every
-authorized client see plaintext, and the database is not encrypted by this feature.
+**Invite links are secrets.** Anyone holding a link can join until it is used, withdrawn or expired: if a link leaks, withdraw it in the panel. One case needs a look: if someone who got in with a leaked link is taken out again at the same moment as another admin's change (computers cut off from each other, say) and that change wins, the record keeps neither their joining nor their removal. The invite is then open again until a computer of an admin or of the invite's creator withdraws it, which happens on its own once one is online, and the link works meanwhile. After computers that were cut off reconnect, check the people list.
 
-### Migrating a legacy server
+## What is protected, and how
 
-The owner picks one of two ceremonies in Settings:
-
-- **Normal** - a client already authenticated over HTTP can fetch the new identity, pin it, and finish over
-  verified HTTPS, receiving a replacement token. Convenient, but it trusts that one plaintext response; an active
-  LAN attacker could substitute the pin.
-- **Strict** - pin material never travels over HTTP. Each member rejoins with a fresh fingerprint-carrying invite
-  delivered through a channel you trust. Use this if the LAN may already be hostile.
-
-Enforcing TLS afterwards closes the plaintext listener and every session still using a legacy token; those
-devices must rejoin with a pinned invite. The owner can see how many devices are still on plaintext first.
-
-Upgrading an older server's data is non-destructive: the relay keeps a one-time byte-identical backup, migrates
-in place inside a transaction, and never silently overwrites a non-empty database. Saved credentials and
-mounted-room state are preserved; tokens issued before pinned TLS are classified as plaintext, because that is
-what they were.
-
-### Pin mismatch and identity rotation
-
-If certificate verification fails, pinned connections stop **before** sending credentials. A different identity
-puts the connection into a blocking mismatch state with no authenticated retry and deliberately no
-trust-anyway override. A planned rotation is accepted automatically only when the client can verify a signature
-chain from the previously pinned identity; after a reinstall or a lost identity file, members need a fresh invite
-whose fingerprint they verify with the owner out of band.
-
-## CRDT sync (per room, on by default for new rooms)
-
-Character-level live editing applies to a room's Markdown notes - excluding `*.excalidraw.md`, which holds
-structured JSON and stays on the whole-file lane - and is a per-room setting (room **Manage** → "Live editing").
-**New rooms start enabled**; existing rooms keep whatever value they already had and are never
-silently migrated. It adds no new listener or transport: the messages ride the same authenticated sync
-connection every room already uses, under whatever transport mode the server is in, and are gated by the same
-per-path ACL checks.
-
-- **Live cursor presence is authenticated, ephemeral state.** The client sends only document-relative caret and
-  selection data; the relay supplies the display identity from the authenticated principal and requires
-  `file:read` for the exact path. Presence stays in memory only, is not written to SQLite, and is removed through
-  editor, document, room, permission, and connection lifecycle cleanup. It inherits the active transport mode
-  and, like document content, is not end-to-end encrypted.
-- **Bounded update loss on a crash, never corruption.** An accepted edit is applied in memory and appended to a
-  durable log on the ordinary write path - the same accepted trade-off the normal sync lane already makes for its
-  debounced push. A crash in the narrow window before that entry reaches disk can lose that one edit; it cannot
-  corrupt the note or resurrect deleted content, and no edit is reported to other members until it has landed.
-  Lifecycle changes (enabling CRDT, deleting or recreating a file) use the stronger durable commit path.
-- **Older clients can read but not write.** A build without CRDT support keeps seeing current content, because the
-  relay periodically writes the merged text back into normal whole-file storage. A direct write from such a client
-  is refused with a clear error rather than silently losing an edit. One gap: a *rename* is only delivered as a
-  CRDT message such a client ignores, so it keeps the old filename until its next reconnect reconciles it.
-- **An open editor owns its note, not the file on disk.** Obsidian's autosave may lag behind what you typed, so
-  for a note bound to an editor the plugin never reconciles the older on-disk copy back into the shared document -
-  doing so would turn "not saved yet" into a real deletion for everyone. Notes with no editor open are still
-  reconciled, which is what recovers offline or external edits.
-- **Unmounting a room is one atomic teardown**: inbound traffic gated, subscription dropped, that room's editors
-  unbound, and its in-memory and persisted documents disposed before it returns.
-- **Offline create/rename intent is durable, and replay is exactly-once.** A note created or renamed while
-  disconnected is journaled to the client's `data.json` and replayed after reconnect. Each structural operation
-  carries a stable ID; the relay records a receipt (`crdt_operation_receipts`, keyed per room and operation) in the
-  same transaction as the mutation, so a retry after a lost acknowledgement returns the recorded result instead of
-  mutating or broadcasting again. Replay re-runs the full ACL check every time, so access revoked while a device
-  was offline rejects the pending change rather than honouring it. A receipt is only ever returned to the device
-  that created it. Replay requires the relay to advertise support; an older relay leaves the journal untouched
-  rather than accepting an unsafe retry.
-- **A journal entry names files, and is not encrypted at rest.** See "Token storage" below - the same `data.json`
-  caveats apply to the pending paths it records.
-
-This is the newest and least-proven surface in the sync engine, despite extended two-device testing on a real
-LAN. Keep backups for important content; existing rooms retain their saved setting and new rooms can still turn
-Live editing off from **Manage**.
-
-## Token storage
-
-- Invite tokens (`tr_inv_...`) and device tokens (`tr_dev_...`) are generated with a CSPRNG (`crypto.randomBytes`).
-- The relay only ever stores a **SHA-256 hash** of each token, never the token itself - a stolen database dump cannot be used to reconstruct working tokens.
-- The **client** side is weaker: the plugin stores its own device token in Obsidian's plugin data JSON (`data.json` under the plugin's folder in `.obsidian/plugins/vault-rooms/`), in plaintext, unencrypted at rest. This is standard practice for Obsidian plugin settings generally, but it means anyone with filesystem access to that device (or a backup of it) can read the token and use it to impersonate that device against the relay until it's revoked.
-- A leaked/stolen device should be revoked individually (see "Revocation limitations" below) - this invalidates the specific token immediately, without affecting the same user's other devices.
-- The same `data.json` also holds mounted-room bookkeeping and, when a Markdown note was created or renamed while
-  disconnected, the pending operation journal. Those entries contain **file and folder names** (old and new paths)
-  in plaintext, though never file contents. They are removed once the operation is confirmed by the relay.
-
-## Server identity-key storage
-
-- Embedded hosting stores `identity.json` beside `relay.sqlite` under `.obsidian/plugins/vault-rooms/server-data/`. It contains the identity private key and active TLS leaf private key. Obsidian's `DataAdapter` does not expose a portable file-permission API, so Vault Rooms cannot enforce a Unix mode for this file.
-- Embedded database and identity replacements do not depend on `DataAdapter.rename()` overwriting an existing path. The old complete file is moved to a sibling `.replace-backup`, restored if promotion fails, and recovered at startup if replacement was interrupted; users should not delete these recovery files while the relay is stopped after a failed write.
-- Standalone hosting stores the same credential under `IDENTITY_DIR/identity.json`; atomic saves use a private temporary file and the final file is forced to mode `0600`.
-- Do not share either file. Protect vault/plugin configuration backups and sync targets that include the embedded server-data directory. A stolen identity can impersonate the server; a lost identity cannot produce a valid signed continuity chain, so clients correctly block until they receive and independently verify a fresh invite.
-
-## Revocation limitations
-
-Revocation (removing a room-level ACL rule, removing someone from a team, revoking a user server-wide, or revoking a single device) reliably and immediately stops **future** access: the device's token stops authenticating on its next request, and any live WebSocket session for that device is closed at once.
-
-What revocation does **not** do:
-
-- **No guaranteed deletion of already-synced content.** If a device already downloaded a file before being revoked, that local copy is untouched - Vault Rooms has no remote-wipe capability. This applies uniformly to member revocation, team removal, and room/team deletion.
-- **No retroactive protection against a copy already exfiltrated.** If a revoked member already copied files elsewhere (another disk, a screenshot, printed it) before revocation, nothing in this system can undo that - this is inherent to any access-control system without DRM, not specific to Vault Rooms.
-- **No detection of a device that stays offline to avoid revocation taking effect.** Revocation is enforced on the device's *next request* to the relay - a device that never reconnects never "sees" the revocation, though it also can't push new changes or receive new content either.
-
-Treat revocation as "stop this person's future access," not "erase what they already had."
-
-## No plugin sandbox
-
-Vault Rooms does not, and cannot, sandbox other Obsidian community plugins. If another locally-installed plugin (yours or a teammate's) can read a file in the vault, it can read a Vault Rooms-synced file exactly the same as any other vault file - Vault Rooms' ACLs govern what syncs *between devices*, not what other local software on a device that already has legitimate read access can do with the content once it's there. This is a fundamental Obsidian platform constraint, not something Vault Rooms could fix from a plugin sandbox.
-
-## Bootstrap and other unauthenticated endpoints
-
-The only endpoint that can provision privileged access with no pre-existing credential is the one-time server-owner **bootstrap**, and it is deliberately hardened: a per-process random PIN (never sent over the network unprompted - read in-process by the embedded plugin, printed to console for the standalone CLI) plus a `Host` header check, specifically to defend against a malicious web page attempting a DNS-rebinding attack against your loopback/LAN address. Once an owner exists, bootstrap is closed permanently. The other unauthenticated routes are `POST /api/join` (gated by a single-use invite token), `GET /health` (name/version only), and rate-limited `GET /api/identity/rotations` (public signed continuity records only). The rotation probe response contains no private key, device token, room data, or sync payload.
-
-`POST /api/invites/accept` normally uses the same device bearer-token authentication as other REST and WebSocket traffic. The only alternate form is strict TLS migration: over the freshly pinned HTTPS connection, the client omits `Authorization` and sends an HMAC proof bound to the device ID, stable server ID, exact invite token, and presented identity SPKI. The relay verifies that proof against the stored hash of an active plaintext-era device token and immediately rotates the token on success. A copied public `serverId` or attacker-controlled invite therefore cannot make the client disclose a reusable bearer token, and the proof cannot be replayed against another invite or identity.
-
-Every other REST route checks its device token before the relay reads any of the request body. Only the two file-upload routes accept file-sized bodies; every other body, including those of the unauthenticated routes above, is capped at 64 KiB. Cross-origin (CORS) access is granted only to Obsidian's own `app://obsidian.md` renderer origin, so a web page on any other origin gets no CORS grant.
-
-## Outbound update check
-
-Vault Rooms makes exactly one request that leaves your local network, and it carries no vault data.
-
-- **What:** a single anonymous `GET https://api.github.com/repos/DNDark12/vault-rooms/releases/latest` when the
-  plugin loads, using Obsidian's own `requestUrl`. If the published version is newer than the installed one, you
-  get a notice; otherwise nothing happens.
-- **What it sends:** no vault content, no room, folder, or file names, no device or server identifier, no account
-  or token, and no analytics event. GitHub sees what it would see from any HTTPS client: your IP address, the
-  standard request headers, and the fact that a request was made.
-- **What it does not do:** it never uploads, never contacts anything other than GitHub's public API, and never
-  reports usage. There is no analytics or telemetry pipeline in this project.
-- **Failure is silent.** An offline machine, a blocked domain, a rate limit, or a malformed response is swallowed,
-  so nothing about the plugin's behaviour depends on it.
-- **Blocking it is safe and supported.** If your environment forbids outbound Internet traffic from the vault
-  machine, block `api.github.com`; sync is unaffected. The check is a convenience only - Obsidian's own Community
-  Plugins updater is the actual update mechanism.
-
-If a request to a third party is unacceptable in your threat model, treat this as the one thing to block, and
-note that it is a *notification* path only: it cannot install anything, and nothing in the sync engine consults it.
-
-## Files never synced
-
-Any path segment starting with `.` is excluded from sync on both sides - the client's watcher never queues it and
-the relay rejects it. That covers the vault's own config folder, `.git/`, `node_modules/`, and ordinary dotfiles
-such as `.env` or a `.secrets/` folder. Sharing a folder therefore does not risk shipping local credentials that
-happen to sit inside it. This is a deliberate default, not a configurable filter: there is currently no way to
-opt a dotfile back into sync.
+| What | How |
+|---|---|
+| Room content, file names, room names, cursors | AES-256-GCM per room key epoch; associated data binds each message to its room, document, author and counter; new content only ever under the room's newest key |
+| Who may do what | A signed, hash-chained workspace record; every version is checked against what its signer may change |
+| Room keys | Random per epoch; delivered to each entitled device as an X25519-sealed, signed key wrap, checked against a commitment in the record; receipts show who has it |
+| Connections | TLS 1.3, exact certificate pinning, signatures over the session's exported keying material |
+| Invites | A one-time secret from which a signing key is derived; joiners prove it without revealing it; an invite only works while the computer that made it, and its maker's role, still stand |
+| Your files | Removed only when someone deleted them in the room, and then to the trash; conflicting or unshareable versions are kept as copies, never overwritten |
+| Device secrets | Obsidian secret storage (OS-encrypted, outside the vault) |
 
 ## Reporting a vulnerability
 
-Please **do not** open a public GitHub issue for a security vulnerability. Instead, use GitHub's private disclosure feature: open this repository's **Security** tab → **Report a vulnerability** (GitHub Security Advisories). This lets us discuss and fix the issue before it's publicly visible.
-
-If you're unsure whether something qualifies (e.g. a "known limitation" documented above vs. a genuine bug), err on the side of reporting privately - worst case, we point you to the relevant section of this document.
+Please open a [private security advisory](https://github.com/AiSuperBot/vault-rooms/security/advisories/new) on this repository rather than a public issue. Include what an attacker needs (network position, membership, role) and what they get.

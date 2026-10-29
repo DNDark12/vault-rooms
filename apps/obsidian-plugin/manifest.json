@@ -1,10 +1,10 @@
 {
   "id": "vault-rooms",
   "name": "Vault Rooms",
-  "version": "0.2.9",
-  "minAppVersion": "1.12.7",
-  "description": "Share vault folders with trusted teammates on your local network - invite links, per-room and per-path access control, and live file sync via an embedded relay. No cloud account, no separate server to run.",
-  "author": "DNDark",
-  "authorUrl": "https://github.com/DNDark12",
+  "version": "0.3.6",
+  "minAppVersion": "1.11.4",
+  "description": "Share vault folders with people on your local network and edit notes together live, end-to-end encrypted, with no server: every computer is an equal peer. Per-folder access (read, edit, manage), invite links, LAN discovery.",
+  "author": "DNDark (original), AiSuperBot (secure mesh fork)",
+  "authorUrl": "https://github.com/AiSuperBot/vault-rooms",
   "isDesktopOnly": true
 }

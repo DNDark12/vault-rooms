@@ -25,11 +25,19 @@ export type DiffOp = { op: "equal" | "delete" | "insert"; text: string };
  *  the whole differing region - still converges, just without minimal per-region granularity. */
 const MAX_DIFF_CELLS = 1_000_000;
 
-function lcsDiff(a: string, b: string): DiffOp[] {
+function isHighSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+function isLowSurrogate(unit: number): boolean {
+  return unit >= 0xdc00 && unit <= 0xdfff;
+}
+
+/** One op per element of `a` and `b` (code points, or lines); past MAX_DIFF_CELLS, all of `a` out and all of `b` in. */
+function lcsOps(a: string[], b: string[]): DiffOp[] {
   const n = a.length;
   const m = b.length;
-  if (n === 0) return m ? [{ op: "insert", text: b }] : [];
-  if (m === 0) return n ? [{ op: "delete", text: a }] : [];
+  if (n === 0 || m === 0 || n * m > MAX_DIFF_CELLS) return [...a.map((text) => ({ op: "delete" as const, text })), ...b.map((text) => ({ op: "insert" as const, text }))];
 
   const dp: Uint32Array[] = new Array<Uint32Array>(n + 1);
   for (let i = 0; i <= n; i++) {
@@ -67,8 +75,7 @@ function lcsDiff(a: string, b: string): DiffOp[] {
     ops.push({ op: "insert", text: b[j]! });
     j++;
   }
-
-  return coalesce(ops);
+  return ops;
 }
 
 function coalesce(ops: DiffOp[]): DiffOp[] {
@@ -91,13 +98,10 @@ export function computeTextDiff(a: string, b: string): DiffOp[] {
   if (a === b) {
     return a ? [{ op: "equal", text: a }] : [];
   }
-  if (a.length * b.length > MAX_DIFF_CELLS) {
-    const ops: DiffOp[] = [];
-    if (a) ops.push({ op: "delete", text: a });
-    if (b) ops.push({ op: "insert", text: b });
-    return ops;
-  }
-  return lcsDiff(a, b);
+  // Too large to diff: all of `a` out and all of `b` in, whole (one op per code point would cost a lot here).
+  if (a.length * b.length > MAX_DIFF_CELLS) return [...(a ? [{ op: "delete" as const, text: a }] : []), ...(b ? [{ op: "insert" as const, text: b }] : [])];
+  // By code points (not UTF-16 units), so an edit never splits a surrogate pair (an emoji, say) in two.
+  return coalesce(lcsOps(Array.from(a), Array.from(b)));
 }
 
 /**
@@ -123,12 +127,15 @@ export function reconcileYTextWithDiskText(ytext: Y.Text, diskText: string, orig
   while (prefix < maxPrefix && oldText[prefix] === diskText[prefix]) {
     prefix++;
   }
+  // Never cut a surrogate pair (an emoji, say) in two: half of one can't be stored or sent.
+  if (prefix > 0 && isHighSurrogate(oldText.charCodeAt(prefix - 1))) prefix--;
 
   let suffix = 0;
   const maxSuffix = Math.min(oldText.length, diskText.length) - prefix;
   while (suffix < maxSuffix && oldText[oldText.length - 1 - suffix] === diskText[diskText.length - 1 - suffix]) {
     suffix++;
   }
+  if (suffix > 0 && isLowSurrogate(oldText.charCodeAt(oldText.length - suffix))) suffix--;
 
   const oldMid = oldText.slice(prefix, oldText.length - suffix);
   const newMid = diskText.slice(prefix, diskText.length - suffix);
@@ -155,5 +162,71 @@ export function reconcileYTextWithDiskText(ytext: Y.Text, diskText: string, orig
     // Y.Text's own mutators behave when called outside a transaction.
     apply();
   }
+  return true;
+}
+
+/**
+ * Like reconcileYTextWithDiskText, for a whole note saved outside the editor (by another program, or a plugin writing
+ * a date). Lines are compared by their text, and each changed line is replaced whole: the new line is put in right
+ * before the old, which is then taken out. Yjs remembers what an insertion was put in front of,
+ * so each new line stays tied to the line it replaced: two computers that change the same line at the same moment can
+ * be told from two changing lines next to each other (see RoomReplica, clashing saves). Lines added or removed touch
+ * no other line, at the end of a note too, with or without a final line break.
+ */
+export function reconcileYTextByLines(ytext: Y.Text, text: string, origin: unknown): boolean {
+  const oldText = ytext.toString();
+  if (oldText === text) return false;
+  const a = oldText.split("\n");
+  const b = text.split("\n");
+  const last = a.length - 1;
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < a.length - prefix && suffix < b.length - prefix && a[last - suffix] === b[b.length - 1 - suffix]) suffix++;
+  const oldMid = a.slice(prefix, a.length - suffix);
+  const newMid = b.slice(prefix, b.length - suffix);
+  const ops = lcsOps(oldMid, newMid);
+  const apply = (): void => {
+    // `line`: the next old line; `pos`: where it starts now (or the end of the text, past the last one).
+    let line = prefix;
+    let pos = 0;
+    for (let k = 0; k < prefix; k++) pos += a[k]!.length + (k < last ? 1 : 0);
+    for (let i = 0; i < ops.length; ) {
+      if (ops[i]!.op === "equal") {
+        pos += a[line]!.length + (line < last ? 1 : 0);
+        line++;
+        i++;
+        continue;
+      }
+      const gone: string[] = [];
+      const added: string[] = [];
+      for (; i < ops.length && ops[i]!.op !== "equal"; i++) (ops[i]!.op === "delete" ? gone : added).push(ops[i]!.text);
+      const pairs = Math.min(gone.length, added.length);
+      for (let k = 0; k < pairs; k++) {
+        // With its line break (the last line has none): two computers that changed the same line, if both are kept,
+        // leave two whole lines, never one run together.
+        const end = line < last ? 1 : 0;
+        ytext.insert(pos, end ? `${added[k]}\n` : added[k]!);
+        ytext.delete(pos + added[k]!.length + end, gone[k]!.length + end);
+        pos += added[k]!.length + end;
+        line++;
+      }
+      for (let k = pairs; k < gone.length; k++) {
+        // A line taken out goes with one line break: its own, or (the last line) the one before it.
+        if (line < last) ytext.delete(pos, gone[k]!.length + 1);
+        else if (pos > 0) ytext.delete(--pos, gone[k]!.length + 1);
+        else ytext.delete(pos, gone[k]!.length);
+        line++;
+      }
+      for (let k = pairs; k < added.length; k++) {
+        // A new line goes before the next old line, or after a new line break at the end.
+        const inserted = line <= last ? `${added[k]}\n` : `\n${added[k]}`;
+        ytext.insert(pos, inserted);
+        pos += inserted.length;
+      }
+    }
+  };
+  if (ytext.doc) ytext.doc.transact(apply, origin);
+  else apply();
   return true;
 }

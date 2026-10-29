@@ -1,9 +1,7 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/protocol" },
-    { "path": "./packages/policy-engine" },
-    { "path": "./apps/relay-server" },
+    { "path": "./packages/secure" },
     { "path": "./apps/obsidian-plugin" }
   ]
 }
